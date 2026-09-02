@@ -14,10 +14,12 @@ is production-ready yet.
 
 ## Requirements
 
-- Visual Pinball X 10.8.1 (Beta) with the PinMAME plugin. The plugin API
-  headers are fetched at configure time from the pinned VPX and PinMAME commits
-  in `cmake/vpx_headers.cmake`; a VPX build older than that pin may refuse to
-  load the plugin.
+- A Visual Pinball X build at or after the commit pinned in
+  `cmake/vpx_headers.cmake` (currently master of 2026-09-02, rev 5548), with the
+  PinMAME plugin. The plugin API changes layout between builds and has no
+  version handshake, so a plugin loaded into an older VPX does not fail
+  cleanly: it corrupts memory during table start. Match the pin to the VPX you
+  run, and take VPX from the upstream CI artifacts until a release catches up.
 - CMake 3.28 or newer and a C++20 compiler.
 - To build the Scorbit SDK from source (the default): OpenSSL and libarchive
   development packages on the host. Everything else is fetched by CPM. The SDK

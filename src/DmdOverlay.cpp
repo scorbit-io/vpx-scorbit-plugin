@@ -13,8 +13,6 @@ using namespace PinballPlugin::Controller;
 namespace Scorbit
 {
 
-static DmdOverlay* s_overlay = nullptr; // one overlay per plugin instance, needed by the C render callback
-
 static constexpr auto DROP_POLL = std::chrono::milliseconds(100);
 
 // Minimal SHA-256 so the plugin can log the same digest the daemon prints for a payload.
@@ -108,27 +106,31 @@ DmdOverlay::DmdOverlay(const MsgPluginAPI* msgApi, uint32_t endpointId)
    : m_msgApi(msgApi)
    , m_endpointId(endpointId)
    , m_overlayMsgId(msgApi->GetMsgID(SCORBIT_NAMESPACE, SCORBIT_MSG_OVERLAY))
+   , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
    , m_sources(msgApi, endpointId, CTLPI_DISPLAY_GET_SRC_MSG, CTLPI_DISPLAY_ON_SRC_CHG_MSG,
-        [this](std::vector<DisplaySrcId>& items) { FilterSources(items); }, [this]() { OnSourcesChanged(); })
+        [this](std::vector<DisplaySrcId>& items) { FilterSources(items); }, nullptr, [this]() { OnSourcesChanged(); })
    , m_override(msgApi, endpointId, CTLPI_DISPLAY_GET_SRC_MSG, CTLPI_DISPLAY_ON_SRC_CHG_MSG)
 {
-   s_overlay = this;
    m_msgApi->SubscribeMsg(m_endpointId, m_overlayMsgId, OnOverlayMsg, this);
+   m_msgApi->SubscribeMsg(m_endpointId, m_prepareFrameMsgId, OnPrepareFrame, this);
+   m_sources.Subscribe();
 }
 
 DmdOverlay::~DmdOverlay()
 {
    SetDropDir("");
+   m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_overlayMsgId, OnOverlayMsg, this);
+   m_sources.Unsubscribe();
    Withdraw();
+   m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
    m_msgApi->ReleaseMsgID(m_overlayMsgId);
-   s_overlay = nullptr;
 }
 
 void DmdOverlay::SetController(uint32_t controllerEndpointId)
 {
    m_controllerEndpointId = controllerEndpointId;
-   m_sources.SelectItems(false);
+   m_sources.Refresh();
 }
 
 void DmdOverlay::FilterSources(std::vector<DisplaySrcId>& items)
@@ -153,12 +155,7 @@ void DmdOverlay::FilterSources(std::vector<DisplaySrcId>& items)
 
 void DmdOverlay::OnSourcesChanged()
 {
-   DisplaySrcId src { };
-   {
-      std::lock_guard listLock(m_sources.GetListMutex());
-      if (!m_sources.GetItems().empty())
-         src = m_sources.GetItems().front();
-   }
+   const DisplaySrcId src = m_sources.With([](const std::vector<DisplaySrcId>& items) { return items.empty() ? DisplaySrcId { } : items.front(); });
 
    bool changed;
    {
@@ -191,15 +188,15 @@ void DmdOverlay::Publish()
       m_published = true;
 
       id.id = { { m_endpointId, 0 } };
-      id.groupId = { { m_endpointId, 0 } };
       id.overrideId = m_source.id;
+      id.callContext = this;
       id.width = m_source.width;
       id.height = m_source.height;
       id.hardware = m_source.hardware;
       id.frameFormat = m_source.frameFormat;
       id.GetRenderFrame = &DmdOverlay::GetRenderFrame;
-      id.identifyFormat = m_source.identifyFormat;
-      id.GetIdentifyFrame = m_source.GetIdentifyFrame; // pass through: identification is not ours to alter
+      id.identifyFormat = m_source.GetIdentifyFrame ? m_source.identifyFormat : 0;
+      id.GetIdentifyFrame = m_source.GetIdentifyFrame ? &DmdOverlay::GetIdentifyFrame : nullptr; // pass through: identification is not ours to alter
    }
    m_override.SetItem(id);
    LOGI("overlay: overriding display [endpointId="s + std::to_string(m_source.id.endpointId) + "." + std::to_string(m_source.id.resId) + ", " + std::to_string(m_source.width) + "x"
@@ -295,9 +292,19 @@ void DmdOverlay::OnOverlayMsg(const unsigned int msgId, void* userData, void* ms
 }
 
 // Render path. Called by VPX (and any downstream consumer) on their threads.
-DisplayFrame DmdOverlay::GetRenderFrame(const CtlResId id)
+// Identify frames are forwarded to the controller untouched, on its own call context.
+DisplayFrame DmdOverlay::GetIdentifyFrame(void* callContext)
 {
-   DmdOverlay* me = s_overlay;
+   DmdOverlay* me = static_cast<DmdOverlay*>(callContext);
+   std::lock_guard lock(me->m_mutex);
+   if (!me->m_published || me->m_source.GetIdentifyFrame == nullptr)
+      return { 0, nullptr };
+   return me->m_source.GetIdentifyFrame(me->m_source.callContext);
+}
+
+DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
+{
+   DmdOverlay* me = static_cast<DmdOverlay*>(callContext);
    if (me == nullptr)
       return { 0, nullptr };
    std::lock_guard lock(me->m_mutex);
@@ -305,7 +312,7 @@ DisplayFrame DmdOverlay::GetRenderFrame(const CtlResId id)
       return { me->m_outFrameId, me->m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[0].data()) : me->m_rgb[0].data() };
 
    // The controller's frame. Thread safe by contract, and the only cross-plugin call in here.
-   const DisplayFrame src = me->m_source.GetRenderFrame(me->m_source.id);
+   const DisplayFrame src = me->m_source.GetRenderFrame(me->m_source.callContext);
    if (src.frame == nullptr)
       return { me->m_outFrameId, me->m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[me->m_target ^ 1].data()) : me->m_rgb[me->m_target ^ 1].data() };
 
@@ -437,29 +444,43 @@ void DmdOverlay::DropWorker()
          std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
          if (bytes.empty())
             continue;
-         DropEvent* ev = new DropEvent { this, ops[i], std::move(bytes) };
+         DropEvent ev { ops[i], std::move(bytes) };
          if (i == 1)
-            ev->op = ev->bytes[0] ? SCORBIT_OVERLAY_OP_SHOW : SCORBIT_OVERLAY_OP_HIDE;
-         m_msgApi->RunOnMainThread(m_endpointId, 0, OnDropMainThread, ev);
+            ev.op = ev.bytes[0] ? SCORBIT_OVERLAY_OP_SHOW : SCORBIT_OVERLAY_OP_HIDE;
+         std::lock_guard lock(m_dropMutex);
+         m_dropQueue.push_back(std::move(ev));
       }
    }
 }
 
-void DmdOverlay::OnDropMainThread(void* userData)
+void DmdOverlay::OnPrepareFrame(const unsigned int msgId, void* userData, void* msgData)
 {
-   DropEvent* ev = static_cast<DropEvent*>(userData);
-   ScorbitOverlayMsg msg { };
-   msg.version = 1;
-   msg.op = ev->op;
-   if (ev->op == SCORBIT_OVERLAY_OP_UPLOAD)
+   static_cast<DmdOverlay*>(userData)->DrainDrops();
+}
+
+// API thread, once per frame. Each queued payload goes through the same Overlay
+// message the daemon transport will use, so the demo exercises the real seam.
+void DmdOverlay::DrainDrops()
+{
+   std::deque<DropEvent> pending;
    {
-      msg.payload = ev->bytes.data();
-      msg.payloadSize = static_cast<uint32_t>(ev->bytes.size());
+      std::lock_guard lock(m_dropMutex);
+      pending.swap(m_dropQueue);
    }
-   else if (ev->op == SCORBIT_OVERLAY_OP_SHOW && ev->bytes.size() >= 3)
-      msg.durationMs = (static_cast<uint32_t>(ev->bytes[1]) << 8) | ev->bytes[2];
-   ev->self->m_msgApi->BroadcastMsg(ev->self->m_endpointId, ev->self->m_overlayMsgId, &msg);
-   delete ev;
+   for (DropEvent& ev : pending)
+   {
+      ScorbitOverlayMsg msg { };
+      msg.version = 1;
+      msg.op = ev.op;
+      if (ev.op == SCORBIT_OVERLAY_OP_UPLOAD)
+      {
+         msg.payload = ev.bytes.data();
+         msg.payloadSize = static_cast<uint32_t>(ev.bytes.size());
+      }
+      else if (ev.op == SCORBIT_OVERLAY_OP_SHOW && ev.bytes.size() >= 3)
+         msg.durationMs = (static_cast<uint32_t>(ev.bytes[1]) << 8) | ev.bytes[2];
+      m_msgApi->BroadcastMsg(m_endpointId, m_overlayMsgId, &msg);
+   }
 }
 
 }

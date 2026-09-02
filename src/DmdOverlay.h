@@ -3,6 +3,9 @@
 #pragma once
 
 #include "plugins/ControllerPlugin.h"
+#include "plugins/VPXPlugin.h"
+
+#include <deque>
 
 #include <atomic>
 #include <chrono>
@@ -53,14 +56,17 @@ private:
    void Publish();
    void Withdraw();
    static void OnOverlayMsg(const unsigned int msgId, void* userData, void* msgData);
-   static DisplayFrame GetRenderFrame(const CtlResId id);
+   static DisplayFrame GetRenderFrame(void* callContext);
+   static DisplayFrame GetIdentifyFrame(void* callContext);
    const void* Composite(const DisplayFrame& src);
    void DropWorker();
-   static void OnDropMainThread(void* userData);
+   static void OnPrepareFrame(const unsigned int msgId, void* userData, void* msgData);
+   void DrainDrops();
 
    const MsgPluginAPI* const m_msgApi;
    const uint32_t m_endpointId;
    const unsigned int m_overlayMsgId;
+   const unsigned int m_prepareFrameMsgId;
 
    std::atomic<uint32_t> m_controllerEndpointId { 0 };
    PinballPlugin::Controller::CtrlItemConsumer<DisplaySrcId> m_sources;
@@ -93,17 +99,19 @@ private:
    bool m_lastComposited = false;
    uint64_t m_compositedFrames = 0;
 
-   // Demo file drop.
+   // Demo file drop. The worker only reads files and queues them; the queue is
+   // drained on the API thread from OnPrepareFrame, so the demo never posts
+   // callbacks from a worker and nothing is applied before the player runs.
    std::mutex m_dropMutex;
    std::filesystem::path m_dropDir;
    std::atomic<bool> m_dropRunning { false };
    std::thread m_dropThread;
    struct DropEvent
    {
-      DmdOverlay* self;
       int op;
       std::vector<uint8_t> bytes;
    };
+   std::deque<DropEvent> m_dropQueue;
 };
 
 }

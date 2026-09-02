@@ -125,8 +125,9 @@ static void ResolveStates()
 {
    states = { };
 
-   std::lock_guard lock(stateSources->GetListMutex());
-   for (const StateSrcId& src : stateSources->GetItems())
+   stateSources->With([](const std::vector<StateSrcId>& items)
+   {
+   for (const StateSrcId& src : items)
    {
       GameStates resolved;
       resolved.id = src.id;
@@ -159,6 +160,7 @@ static void ResolveStates()
          return;
       }
    }
+   });
 }
 
 // libpinmame leaves pResult untouched when the machine is not running or the
@@ -168,7 +170,7 @@ static int64_t ReadState(const StateSrcId& src, unsigned int index, int64_t defV
    if (index >= src.nStates)
       return defValue;
    int64_t value = defValue;
-   src.stateDefs[index].GetState(src.id, index, &value);
+   src.stateDefs[index].GetState(src.stateDefs[index].callContext, &value);
    return value;
 }
 
@@ -220,15 +222,17 @@ static void PollStates(void*)
 
    if (states.nStates != 0)
    {
-      std::lock_guard lock(stateSources->GetListMutex());
-      for (const StateSrcId& src : stateSources->GetItems())
+      stateSources->With([](const std::vector<StateSrcId>& items)
       {
-         if (src.id.id == states.id.id && src.nStates == states.nStates)
+         for (const StateSrcId& src : items)
          {
-            UpdateSession(src);
-            break;
+            if (src.id.id == states.id.id && src.nStates == states.nStates)
+            {
+               UpdateSession(src);
+               break;
+            }
          }
-      }
+      });
    }
 
    msgApi->RunOnMainThread(endpointId, POLL_INTERVAL, PollStates, nullptr);
@@ -330,15 +334,15 @@ static void OnControllersChanged()
 {
    string romId;
    uint32_t controllerEndpointId = 0;
+   controllers->With([&](const std::vector<ControllerDef>& items)
    {
-      std::lock_guard lock(controllers->GetListMutex());
-      if (!controllers->GetItems().empty())
+      if (!items.empty())
       {
-         const ControllerDef& controller = controllers->GetItems().front();
+         const ControllerDef& controller = items.front();
          romId = string(controller.gameId).substr(strlen(PMPI_GAMEID_PREFIX));
          controllerEndpointId = controller.endpointId;
       }
-   }
+   });
 
    if (romId == currentRomId && controllerEndpointId == pinmameEndpointId)
       return;
@@ -350,7 +354,7 @@ static void OnControllersChanged()
    pinmameEndpointId = controllerEndpointId;
 
    // Re-filter the state sources and the display source for the controller that is now emulating
-   stateSources->SelectItems(false);
+   stateSources->Refresh();
    if (dmdTap)
       dmdTap->SetController(pinmameEndpointId);
    if (dmdOverlay)
@@ -425,9 +429,9 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    }
 
    stateSources = std::make_unique<CtrlItemConsumer<StateSrcId>>(msgApi, endpointId, CTLPI_STATE_GET_SRC_MSG, CTLPI_STATE_ON_SRC_CHG_MSG,
-      [](std::vector<StateSrcId>& items) { FilterStateSources(items); }, []() { ResolveStates(); });
+      [](std::vector<StateSrcId>& items) { FilterStateSources(items); }, nullptr, []() { ResolveStates(); });
    controllers = std::make_unique<CtrlItemConsumer<ControllerDef>>(msgApi, endpointId, CTLPI_CONTROLLERS_GET_MSG, CTLPI_CONTROLLERS_ON_CHG_MSG,
-      [](std::vector<ControllerDef>& items) { FilterControllers(items); }, []() { OnControllersChanged(); });
+      [](std::vector<ControllerDef>& items) { FilterControllers(items); }, nullptr, []() { OnControllersChanged(); });
 
    const ScorbitConfig c = GetPluginConfig();
    LOGI("Scorbit plugin loaded. provider="s + c.provider
@@ -435,7 +439,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
       + " key=" + (c.providerKey.empty() ? "MISSING (Scorbit will stay disabled)"s
                                          : ("present (" + std::to_string(c.providerKey.size()) + " chars)")));
 
-   controllers->SelectItems(false);
+   stateSources->Subscribe();
+   controllers->Subscribe();
 }
 
 MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
@@ -445,6 +450,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    StopPoll();
    msgApi->FlushPendingCallbacks(endpointId);
 
+   controllers->Unsubscribe();
+   stateSources->Unsubscribe();
    controllers = nullptr;
    stateSources = nullptr;
    delete dmdOverlay;

@@ -41,10 +41,11 @@ static void NameThisThread(const char* name)
 
 DmdTap::DmdTap(const MsgPluginAPI* msgApi, uint32_t endpointId)
    : m_sources(msgApi, endpointId, CTLPI_DISPLAY_GET_SRC_MSG, CTLPI_DISPLAY_ON_SRC_CHG_MSG,
-        [this](std::vector<DisplaySrcId>& items) { FilterSources(items); }, [this]() { OnSourcesChanged(); })
+        [this](std::vector<DisplaySrcId>& items) { FilterSources(items); }, nullptr, [this]() { OnSourcesChanged(); })
 {
    m_running = true;
    m_thread = std::thread(&DmdTap::Worker, this);
+   m_sources.Subscribe();
 }
 
 DmdTap::~DmdTap()
@@ -52,13 +53,14 @@ DmdTap::~DmdTap()
    m_running = false;
    if (m_thread.joinable())
       m_thread.join();
+   m_sources.Unsubscribe();
    SetDumpFile("");
 }
 
 void DmdTap::SetController(uint32_t controllerEndpointId)
 {
    m_controllerEndpointId = controllerEndpointId;
-   m_sources.SelectItems(false);
+   m_sources.Refresh();
 }
 
 void DmdTap::FilterSources(std::vector<DisplaySrcId>& items)
@@ -89,11 +91,10 @@ void DmdTap::FilterSources(std::vector<DisplaySrcId>& items)
 
 void DmdTap::OnSourcesChanged()
 {
-   std::lock_guard listLock(m_sources.GetListMutex());
-   const std::vector<DisplaySrcId>& items = m_sources.GetItems();
+   const DisplaySrcId selected = m_sources.With([](const std::vector<DisplaySrcId>& items) { return items.empty() ? DisplaySrcId { } : items.front(); });
 
    std::lock_guard lock(m_sourceMutex);
-   if (items.empty())
+   if (selected.id.id == 0)
    {
       if (m_hasSource)
          LOGI("DMD tap: display source lost, no frames will be captured (skipped "s + std::to_string(m_skipped) + " so far)");
@@ -105,7 +106,7 @@ void DmdTap::OnSourcesChanged()
       return;
    }
 
-   const DisplaySrcId& src = items.front();
+   const DisplaySrcId& src = selected;
    if (m_hasSource && m_source == src)
       return;
    m_source = src;
@@ -154,7 +155,7 @@ void DmdTap::Worker()
          // writes the pixels before it advances frameId (true of PinMAME and
          // the in-tree renderers); a producer that does the reverse can still
          // tear undetected.
-         const DisplayFrame frame = src.GetIdentifyFrame(src.id);
+         const DisplayFrame frame = src.GetIdentifyFrame(src.callContext);
          if (frame.frame == nullptr)
             continue;
          if (haveLast && frame.frameId == lastFrameId)
@@ -164,7 +165,7 @@ void DmdTap::Worker()
          m_back.pixels.resize(n);
          std::memcpy(m_back.pixels.data(), frame.frame, n);
 
-         const DisplayFrame check = src.GetIdentifyFrame(src.id);
+         const DisplayFrame check = src.GetIdentifyFrame(src.callContext);
          if (check.frameId != frame.frameId)
             continue;
 
