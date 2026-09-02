@@ -3,6 +3,7 @@
 #include "common.h"
 #include "Scorbit.h"
 #include "DmdTap.h"
+#include "DmdOverlay.h"
 
 #include "plugins/ControllerPlugin.h"
 #include "pinmame/PinMAMEPlugin.h"
@@ -54,6 +55,7 @@ static std::unique_ptr<CtrlItemConsumer<StateSrcId>> stateSources;
 static Scorbit* scorbit = nullptr;
 // Same reason: ~DmdTap joins a thread and unsubscribes through the host API.
 static DmdTap* dmdTap = nullptr;
+static DmdOverlay* dmdOverlay = nullptr;
 
 static string currentRomId;
 static uint32_t pinmameEndpointId = 0;
@@ -75,6 +77,8 @@ MSGPI_INT_VAL_SETTING(setLog, "logLevel", "Log level",
    "0 quiet, 1 info, 2 debug", true, 0, 2, 2);
 MSGPI_STRING_VAL_SETTING(setDmdDump, "dmdDumpFile", "DMD dump file",
    "Write captured DMD frames to this file as dmddump text (one hex digit per pixel), empty to disable", false, "", 1024);
+MSGPI_STRING_VAL_SETTING(setOverlayDrop, "overlayDropDir", "Overlay drop directory",
+   "Demo: watch this directory for overlay.bin / overlay-ctl.bin (raw probe payloads) and display them, empty to disable", false, "", 1024);
 
 ScorbitConfig GetPluginConfig()
 {
@@ -349,6 +353,8 @@ static void OnControllersChanged()
    stateSources->SelectItems(false);
    if (dmdTap)
       dmdTap->SetController(pinmameEndpointId);
+   if (dmdOverlay)
+      dmdOverlay->SetController(pinmameEndpointId);
 
    if (romId.empty())
    {
@@ -389,6 +395,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setKeyFile);
    msgApi->RegisterSetting(endpointId, &setLog);
    msgApi->RegisterSetting(endpointId, &setDmdDump);
+   msgApi->RegisterSetting(endpointId, &setOverlayDrop);
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
@@ -402,6 +409,19 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
             dump = std::filesystem::path(info.prefPath) / dump;
       }
       dmdTap->SetDumpFile(dump.string());
+   }
+
+   dmdOverlay = new DmdOverlay(msgApi, endpointId);
+   {
+      std::filesystem::path drop = setOverlayDrop_Get();
+      if (!drop.empty() && drop.is_relative() && vpxApi != nullptr)
+      {
+         VPXInfo info { };
+         vpxApi->GetVpxInfo(&info);
+         if (info.prefPath != nullptr)
+            drop = std::filesystem::path(info.prefPath) / drop;
+      }
+      dmdOverlay->SetDropDir(drop.string());
    }
 
    stateSources = std::make_unique<CtrlItemConsumer<StateSrcId>>(msgApi, endpointId, CTLPI_STATE_GET_SRC_MSG, CTLPI_STATE_ON_SRC_CHG_MSG,
@@ -427,6 +447,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
 
    controllers = nullptr;
    stateSources = nullptr;
+   delete dmdOverlay;
+   dmdOverlay = nullptr;
    delete dmdTap;
    dmdTap = nullptr;
 

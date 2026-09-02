@@ -93,6 +93,9 @@ add_library(plugin-scorbit MODULE
    src/Scorbit.cpp
    src/DmdTap.h
    src/DmdTap.cpp
+   src/DmdOverlay.h
+   src/DmdOverlay.cpp
+   src/ScorbitPluginAPI.h
    src/qrcodegen.h
    src/qrcodegen.c
 )

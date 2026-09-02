@@ -96,6 +96,7 @@ dmdDumpFile =
 | `deviceKeyFile` | Per-machine device key, relative to the VPX pref directory |
 | `logLevel` | 0 quiet, 1 info, 2 debug |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
+| `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
 
 The plugin identifies the running machine by the ROM id PinMAME reports and
 looks it up in `assets/scorbit_machines.json`, which maps ROM ids to Scorbit
@@ -116,10 +117,38 @@ Scorbit's `vpin2bin` tool consumes, so a dump from VPX can be compared directly
 against captures from physical machines. Verified on WPC (128x32, 4 shades),
 SAM (128x32, 16 shades) and Sega 192x64 displays.
 
+## DMD overlay
+
+`src/DmdOverlay.*` draws bitmaps over the live DMD the way a Scorbitron does:
+upload a bitmap, show it for a duration or until hidden, hide it. VPX has no
+draw callback for this, so the overlay is a render-frame provider: the plugin
+publishes its own display source overriding the controller's, and serves the
+controller's frame with the cached bitmap composited over it. Identify frames
+pass through untouched, so colorizers and the frame tap still see the real
+display, and nothing in the render path waits on anything but a short local
+lock.
+
+Placement and shading mirror the probe firmware: the bitmap is centred on the
+display, pixels outside it or flagged transparent (`0x80`) show the live frame,
+and the brightness bits drive the display's bitplanes directly, so a
+2-bitplane display sums bits 0 to 2 and a 4-bitplane display uses the low
+four bits.
+
+The overlay is driven by a message on the VPX plugin bus, `Scorbit` /
+`Overlay`, declared in `src/ScorbitPluginAPI.h`. Ops are upload (the raw
+`WriteDmdOverlay` payload: width, height, then one byte per pixel), show with a
+duration in milliseconds (0 for until hidden) and hide. Send it on the API
+thread.
+
+For testing without a daemon connection, `overlayDropDir` names a directory the
+plugin watches. Writing `overlay.bin` (the upload payload) uploads; writing
+`overlay-ctl.bin` (three bytes: on/off, duration high, duration low) shows or
+hides. Both go through the same message.
+
 ## Layout
 
 ```
-src/            plugin sources
+src/            plugin sources (ScorbitPluginAPI.h is the message contract)
 assets/         ROM id to Scorbit machine id mapping
 plugin.cfg      VPX plugin manifest (ids and library names per platform)
 cmake/          CPM bootstrap and the pinned VPX/PinMAME header fetch
