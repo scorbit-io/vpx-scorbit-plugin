@@ -57,17 +57,22 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
          tablePath = info.path;
    }
 
+   {
+      std::lock_guard lock(self->m_mutex);
+      self->m_tablePath = std::move(tablePath);
+      // A table restart with the same ROM and the same display changes nothing
+      // on the wire, so the epoch is what makes Declare go out again anyway.
+      self->m_epoch++;
+   }
+   // Published last, so the worker never sees a running player with no table
+   // path: it reads the flag and the path in two separate steps.
    self->m_playerRunning = true;
-   std::lock_guard lock(self->m_mutex);
-   self->m_tablePath = std::move(tablePath);
-   // A table restart with the same ROM and the same display changes nothing on
-   // the wire, so the epoch is what makes Declare go out again anyway.
-   self->m_epoch++;
 }
 
 void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
 {
    VpxSessionSource* self = static_cast<VpxSessionSource*>(userData);
+   // Cleared first here, for the same reason it is set last above.
    self->m_playerRunning = false;
    std::lock_guard lock(self->m_mutex);
    self->m_tablePath.clear();
@@ -129,26 +134,26 @@ void VpxSessionSource::DrainLog()
 
 void VpxSessionSource::Refresh()
 {
-   // A source that is selected but has not produced a frame yet has no
-   // geometry to declare, so it counts as no source: the daemon is told
-   // shades 0, which is the same legitimate steady state as a table whose
-   // controller publishes nothing conforming. The first captured frame bumps
-   // the generation and a fresh Declare carries the real geometry.
+   // The frame carries the generation of the source that produced it, so
+   // "selected, but nothing captured from this source yet" is read off the
+   // frame rather than inferred. It has to be: the tap keeps the last frame of
+   // the previous source after a replacement, and its frame ids may restart at
+   // values the daemon has already seen, so serving that frame as if it came
+   // from the new source would hand over stale geometry and stale pixels under
+   // a frame id the daemon would take for one it already has.
+   //
+   // Reading the frame and then the generation is safe in that order. The tap
+   // stamps a frame under the same lock that bumps the counter, so a frame's
+   // generation can never be ahead of the counter, only behind it. Equal means
+   // the frame came from the source that is selected now.
    const bool tapHasSource = m_tap.HasSource();
    const bool haveFrame = m_tap.GetLatest(m_latest);
-   m_hasSource = tapHasSource && haveFrame;
+   const uint64_t tapGeneration = m_tap.SourceGeneration();
+   m_hasSource = tapHasSource && haveFrame && m_latest.generation == tapGeneration;
 
-   const unsigned int width = m_hasSource ? m_latest.width : 0;
-   const unsigned int height = m_hasSource ? m_latest.height : 0;
-   const unsigned int shades = m_hasSource ? m_latest.shades : 0;
-   if (m_hasSource != m_keyHasSource || width != m_keyWidth || height != m_keyHeight || shades != m_keyShades)
-   {
-      m_keyHasSource = m_hasSource;
-      m_keyWidth = width;
-      m_keyHeight = height;
-      m_keyShades = shades;
-      m_generation++;
-   }
+   // During that gap the daemon still sees the generation move, so it discards
+   // its cache and stops treating the frame id it last saw as current.
+   m_generation = m_hasSource ? m_latest.generation : tapGeneration;
 }
 
 void VpxSessionSource::GetDeclare(DeclareSnapshot& out)
@@ -164,7 +169,7 @@ void VpxSessionSource::GetDeclare(DeclareSnapshot& out)
    d.width = static_cast<uint16_t>(m_hasSource ? m_latest.width : 0);
    d.height = static_cast<uint16_t>(m_hasSource ? m_latest.height : 0);
    d.shades = static_cast<uint8_t>(m_hasSource ? m_latest.shades : 0);
-   d.sourceGeneration = m_generation;
+   d.sourceGeneration = static_cast<uint32_t>(m_generation);
    d.identifyFormat = !m_hasSource ? "" : (m_latest.shades == 16 ? "BITPLANE4" : "BITPLANE2");
    out.epoch = m_epoch;
 }
@@ -175,7 +180,7 @@ void VpxSessionSource::GetFrame(FrameSnapshot& out)
    Refresh();
 
    out.hasSource = m_hasSource;
-   out.generation = m_generation;
+   out.generation = static_cast<uint32_t>(m_generation);
    if (!m_hasSource)
    {
       out.frameId = 0;

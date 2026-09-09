@@ -259,18 +259,54 @@ void TestSession()
    CHECK(reply.hasPixels == 1 && reply.sourceGeneration == 2);
    CHECK(reply.pixels.size() == 192u * 64u);
 
+   // --- A replacement with identical geometry ----------------------------
+   // The tap bumps its generation on every source change, and a replaced
+   // source may restart its frame counter at a value the daemon has already
+   // seen. Geometry, depth and frame id can therefore all match across the
+   // replacement, leaving the generation as the only thing that differs. An
+   // unchanged reply here would hand the daemon the previous source's pixels.
+   {
+      FrameSnapshot frame;
+      Fill(frame, 1, 3, 192, 64, 16);
+      for (size_t i = 0; i < frame.pixels.size(); i++)
+         frame.pixels[i] = static_cast<uint8_t>((i * 7 + 5) % 16);
+      source.Set(MakeDeclare("ij_l7", 192, 64, 16, 3), frame);
+   }
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   Wire::Declare replaced;
+   CHECK(Wire::Decode(msg.payload, replaced));
+   CHECK_MSG(replaced.sourceGeneration == 3, "a same-geometry replacement must still re-declare");
+   CHECK(replaced.width == 192 && replaced.height == 64 && replaced.shades == 16);
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   // The daemon asks with exactly the frame id it last saw, at the generation
+   // it last saw. Only the generation says the pixels are not the same ones.
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 3100, Wire::Encode(Wire::FrameRequest { 1, 2 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK_MSG(reply.hasPixels == 1, "a restarted frame id at a new generation must resend pixels");
+   CHECK(reply.frameId == 1 && reply.sourceGeneration == 3);
+   CHECK(reply.pixels.size() == 192u * 64u);
+   CHECK_MSG(reply.pixels[0] == 5 && reply.pixels[1] == 12, "the new source's pixels, not the old ones");
+
+   // And once the daemon has caught up, the same request is unchanged again.
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 3101, Wire::Encode(Wire::FrameRequest { 1, 3 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK(reply.hasPixels == 0 && reply.frameId == 1 && reply.sourceGeneration == 3);
+
    // --- No source is a steady state, not an error ------------------------
-   source.Set(MakeDeclare("", 0, 0, 0, 3), FrameSnapshot { false, 0, 3, 0, 0, 0, { } });
+   source.Set(MakeDeclare("", 0, 0, 0, 4), FrameSnapshot { false, 0, 4, 0, 0, 0, { } });
    CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
    Wire::Declare none;
    CHECK(Wire::Decode(msg.payload, none));
-   CHECK(none.shades == 0 && none.identifyFormat.empty() && none.sourceGeneration == 3);
+   CHECK(none.shades == 0 && none.identifyFormat.empty() && none.sourceGeneration == 4);
    CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
 
    CHECK(peer.Send(Wire::TYPE_FRAME, 0, 4000, Wire::Encode(Wire::FrameRequest { 0, 0 })));
    CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
    CHECK(Wire::Decode(msg.payload, reply));
-   CHECK(reply.frameId == 0 && reply.hasPixels == 0 && reply.sourceGeneration == 3);
+   CHECK(reply.frameId == 0 && reply.hasPixels == 0 && reply.sourceGeneration == 4);
    CHECK(reply.width == 0 && reply.height == 0 && reply.shades == 0);
 
    // --- A truncated payload ends the session with error 7 ----------------

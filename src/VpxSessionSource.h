@@ -81,15 +81,11 @@ private:
 
    DmdTap::Frame m_latest;
    bool m_hasSource = false;
-   uint32_t m_generation = 0;
-   // The tuple whose change defines a new source generation. DmdTap keeps its
-   // own generation counter private, so this derives one from what the tap does
-   // expose: whether a conforming source is selected, and the geometry and
-   // depth of the frames it produces.
-   bool m_keyHasSource = false;
-   unsigned int m_keyWidth = 0;
-   unsigned int m_keyHeight = 0;
-   unsigned int m_keyShades = 0;
+   // DmdTap's own counter, which bumps on every source change including a
+   // replacement whose geometry is identical. The wire carries its low 32 bits:
+   // it counts source changes within one plugin load, so it would have to wrap
+   // a u64 before that could hide one.
+   uint64_t m_generation = 0;
 
    std::mutex m_logMutex;
    std::deque<std::pair<int, std::string>> m_logQueue;
