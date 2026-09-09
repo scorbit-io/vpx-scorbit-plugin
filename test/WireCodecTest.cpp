@@ -3,7 +3,7 @@
 // Round trips every slice 1 message and pins the byte layout of the ones most
 // easily misread, against scorbitd's
 // docs/openspec/specs/vpx-virtual-probe/design.md, subsection "Message layouts
-// (protocol 1.0, slice 1)", revision 6edf82c. The daemon's SocketCable is built
+// (protocol 1.0, slice 1)", revision 0ad5e4b. The daemon's SocketCable is built
 // from that same subsection, so the golden vectors here are the thing the two
 // sides can be diffed against without running either of them.
 
@@ -49,6 +49,26 @@ void TestFraming()
    Wire::ErrorPayload back;
    CHECK(Wire::Decode(msg.payload, back));
    CHECK(back == err);
+
+   // A peer that sets only the error bit is still sending a response, and the
+   // spec requires readers to accept that. Taking one for a request would have
+   // this side answer a refusal with a refusal.
+   const std::vector<uint8_t> bitOneOnly = Wire::EncodeMessage(Wire::TYPE_HELLO,
+      Wire::FLAG_ERROR, 3, Wire::Encode(err));
+   CHECK(Wire::DecodeBody(bitOneOnly.data() + Wire::LENGTH_BYTES, bitOneOnly.size() - Wire::LENGTH_BYTES, msg));
+   CHECK_MSG(msg.header.IsResponse(), "an error with only bit 1 must classify as a response");
+   CHECK(msg.header.IsError());
+
+   // A plain request is neither, and must stay dispatchable.
+   const std::vector<uint8_t> request = Wire::EncodeMessage(Wire::TYPE_FRAME, 0, 4,
+      Wire::Encode(Wire::FrameRequest { 0, 0 }));
+   CHECK(Wire::DecodeBody(request.data() + Wire::LENGTH_BYTES, request.size() - Wire::LENGTH_BYTES, msg));
+   CHECK(!msg.header.IsResponse() && !msg.header.IsError());
+
+   // And a plain response is a response but not an error.
+   const std::vector<uint8_t> ok = Wire::EncodeMessage(Wire::TYPE_FRAME, Wire::FLAG_RESPONSE, 4, { });
+   CHECK(Wire::DecodeBody(ok.data() + Wire::LENGTH_BYTES, ok.size() - Wire::LENGTH_BYTES, msg));
+   CHECK(msg.header.IsResponse() && !msg.header.IsError());
 }
 
 void TestHello()

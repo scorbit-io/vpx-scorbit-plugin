@@ -16,7 +16,7 @@
 //
 // The normative layout is scorbitd's
 // docs/openspec/specs/vpx-virtual-probe/design.md, subsection "Message layouts
-// (protocol 1.0, slice 1)", at revision 6edf82c. This file implements that
+// (protocol 1.0, slice 1)", at revision 0ad5e4b. This file implements that
 // subsection and nothing else. It is deliberately free of any Visual Pinball or
 // Scorbit SDK dependency so the codec can be unit tested on its own, and so the
 // daemon's SocketCable and this plugin can each be diffed against the spec
@@ -50,9 +50,10 @@ enum MsgType : uint16_t
    TYPE_PING = 5,
    TYPE_PONG = 6,
    TYPE_BYE = 7,
-   // Reserved for later slices. A request of any of these is answered with
-   // unsupported_type rather than ignored, so the daemon learns at once that
-   // this build does not serve them.
+   // Reserved for later slices. A type id this side does not implement is
+   // answered with unsupported_type whether it is unknown or merely reserved,
+   // because from a 1.0 peer's point of view it does not exist yet. Answered
+   // rather than ignored, so the daemon learns at once what this build serves.
    TYPE_SUBSCRIBE = 16,
    TYPE_POLL = 17,
    TYPE_READ_DIRECT = 18,
@@ -82,6 +83,8 @@ enum ErrorCode : uint16_t
    ERR_MALFORMED = 7,
    ERR_NO_GAME = 8,
    ERR_OUT_OF_RANGE = 9,
+   // Slice 2 only, for an over-sized subscription. An over-sized wire frame is
+   // ERR_MALFORMED, not this.
    ERR_TOO_LARGE = 10,
    ERR_STALE = 11,
    ERR_UNSTABLE = 12,
@@ -161,7 +164,11 @@ struct Header
    uint16_t flags = 0;
    uint32_t seq = 0;
 
-   bool IsResponse() const { return (flags & FLAG_RESPONSE) != 0; }
+   // An error is a response. This side always sets both bits when it sends
+   // one, and the spec requires a reader to accept an error carrying only
+   // bit 1, so classification tests either bit. Without that, a bit 1 only
+   // error would be taken for a request and answered with nonsense.
+   bool IsResponse() const { return (flags & (FLAG_RESPONSE | FLAG_ERROR)) != 0; }
    bool IsError() const { return (flags & FLAG_ERROR) != 0; }
 };
 

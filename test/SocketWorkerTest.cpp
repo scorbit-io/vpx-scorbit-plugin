@@ -378,6 +378,48 @@ void TestMissingToken()
    worker.Stop();
 }
 
+// A daemon that refuses Hello with only the error bit set is still answering,
+// not asking. The worker must read it as a refusal and hang up, never dispatch
+// it as a request and answer a refusal with a refusal.
+void TestErrorWithOnlyTheErrorBit()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeDeclare("", 0, 0, 0, 0), { });
+
+   SocketWorker worker(source, MakeConfig(peer), Quiet());
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_HELLO, msg, WAIT_MS));
+
+   Wire::ErrorPayload err;
+   err.code = Wire::ERR_BUSY;
+   err.reason = "another instance is already connected";
+   CHECK(peer.Send(Wire::TYPE_HELLO, Wire::FLAG_ERROR, msg.header.seq, Wire::Encode(err)));
+
+   CHECK_MSG(peer.WaitForClose(WAIT_MS), "a refused Hello must close the session with nothing sent back");
+   CHECK(!worker.Connected());
+
+   // And it keeps trying, because busy is a condition that can clear.
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   Wire::Declare declare;
+   CHECK(Handshake(peer, hello, declare));
+
+   worker.Stop();
+}
+
 }
 
 int main()
@@ -385,5 +427,6 @@ int main()
    TestSession();
    TestOversizedLength();
    TestMissingToken();
+   TestErrorWithOnlyTheErrorBit();
    return ScorbitTest::Summary("socket_worker_test");
 }
