@@ -4,6 +4,8 @@
 #include "Scorbit.h"
 #include "DmdTap.h"
 #include "DmdOverlay.h"
+#include "SocketWorker.h"
+#include "VpxSessionSource.h"
 
 #include "plugins/ControllerPlugin.h"
 #include "pinmame/PinMAMEPlugin.h"
@@ -38,7 +40,18 @@ LPI_IMPLEMENT_CPP
 #define SCORBIT_DEFAULT_PROVIDER_KEY ""
 #endif
 
+// Identity the plugin sends in Hello, baked in by CMakeLists.txt.
+#ifndef SCORBIT_PLUGIN_VERSION
+#define SCORBIT_PLUGIN_VERSION "0.0.0"
+#endif
+#ifndef SCORBIT_VPX_PLUGIN_API_COMMIT
+#define SCORBIT_VPX_PLUGIN_API_COMMIT ""
+#endif
+
 static constexpr double POLL_INTERVAL = 0.25;
+// The socket worker cannot log from its own thread, so its lines are drained
+// here. Independent of PollStates, which only runs while a game is tracked.
+static constexpr double LOG_DRAIN_INTERVAL = 0.25;
 
 static const MsgPluginAPI* msgApi = nullptr;
 static VPXPluginAPI* vpxApi = nullptr;
@@ -56,6 +69,10 @@ static Scorbit* scorbit = nullptr;
 // Same reason: ~DmdTap joins a thread and unsubscribes through the host API.
 static DmdTap* dmdTap = nullptr;
 static DmdOverlay* dmdOverlay = nullptr;
+// Same reason again: ~SocketWorker joins the transport thread.
+static VpxSessionSource* vpxSession = nullptr;
+static SocketWorker* socketWorker = nullptr;
+static std::atomic<bool> logDrainActive { false };
 
 static string currentRomId;
 static uint32_t pinmameEndpointId = 0;
@@ -79,6 +96,8 @@ MSGPI_STRING_VAL_SETTING(setDmdDump, "dmdDumpFile", "DMD dump file",
    "Write captured DMD frames to this file as dmddump text (one hex digit per pixel), empty to disable", false, "", 1024);
 MSGPI_STRING_VAL_SETTING(setOverlayDrop, "overlayDropDir", "Overlay drop directory",
    "Demo: watch this directory for overlay.bin / overlay-ctl.bin (raw probe payloads) and display them, empty to disable", false, "", 1024);
+MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
+   "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
 
 ScorbitConfig GetPluginConfig()
 {
@@ -238,6 +257,17 @@ static void PollStates(void*)
    msgApi->RunOnMainThread(endpointId, POLL_INTERVAL, PollStates, nullptr);
 }
 
+// API thread. Reschedules itself for the plugin's lifetime, so a line the
+// transport thread queued is written out whether or not a table is running.
+static void DrainSocketLog(void*)
+{
+   if (!logDrainActive)
+      return;
+   if (vpxSession != nullptr)
+      vpxSession->DrainLog();
+   msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
+}
+
 static void StartPoll()
 {
    wasGameOver = true;
@@ -359,6 +389,10 @@ static void OnControllersChanged()
       dmdTap->SetController(pinmameEndpointId);
    if (dmdOverlay)
       dmdOverlay->SetController(pinmameEndpointId);
+   // The transport declares the ROM independently of whether Scorbit has a
+   // machine mapping for it: the daemon wants the frames either way.
+   if (vpxSession)
+      vpxSession->SetRomId(romId);
 
    if (romId.empty())
    {
@@ -400,6 +434,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setLog);
    msgApi->RegisterSetting(endpointId, &setDmdDump);
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);
+   msgApi->RegisterSetting(endpointId, &setSocketPath);
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
@@ -428,6 +463,21 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
       dmdOverlay->SetDropDir(drop.string());
    }
 
+   // The daemon listens and the plugin connects, so this starts whether or not
+   // a daemon is running and retries once a second until one is.
+   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap);
+   {
+      SocketWorkerConfig cfg;
+      cfg.socketPath = setSocketPath_Get();
+      cfg.pluginVersion = SCORBIT_PLUGIN_VERSION;
+      cfg.pluginApiCommit = SCORBIT_VPX_PLUGIN_API_COMMIT;
+      socketWorker = new SocketWorker(*vpxSession, cfg,
+         [](int level, const std::string& message) { vpxSession->PushLog(level, message); });
+      socketWorker->Start();
+   }
+   logDrainActive = true;
+   msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
+
    stateSources = std::make_unique<CtrlItemConsumer<StateSrcId>>(msgApi, endpointId, CTLPI_STATE_GET_SRC_MSG, CTLPI_STATE_ON_SRC_CHG_MSG,
       [](std::vector<StateSrcId>& items) { FilterStateSources(items); }, nullptr, []() { ResolveStates(); });
    controllers = std::make_unique<CtrlItemConsumer<ControllerDef>>(msgApi, endpointId, CTLPI_CONTROLLERS_GET_MSG, CTLPI_CONTROLLERS_ON_CHG_MSG,
@@ -448,12 +498,19 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    LOGI("Scorbit plugin unloading"s);
 
    StopPoll();
+   logDrainActive = false;
+   // Joins the transport thread, so nothing reads vpxSession or dmdTap after
+   // this returns. Bye goes out from the worker as it leaves its serve loop.
+   delete socketWorker;
+   socketWorker = nullptr;
    msgApi->FlushPendingCallbacks(endpointId);
 
    controllers->Unsubscribe();
    stateSources->Unsubscribe();
    controllers = nullptr;
    stateSources = nullptr;
+   delete vpxSession;
+   vpxSession = nullptr;
    delete dmdOverlay;
    dmdOverlay = nullptr;
    delete dmdTap;
