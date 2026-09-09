@@ -6,8 +6,8 @@
 # To move to a newer VPX: update the commit, then update the hashes (the
 # configure step prints the actual hash when one no longer matches).
 
-set(VPX_PLUGIN_API_COMMIT "24af13723acc7c5a6ccbaa2762af2c9458adf293") # vpinball/vpinball master, 2026-09-02 (call-context plugin API; needs a VPX build at or after this)
-set(PINMAME_PLUGIN_API_COMMIT "6589fc5734853e00c0412d415f4e29af2dc475af") # vpinball/pinmame master, 2026-09-02
+set(VPX_PLUGIN_API_COMMIT "0bc9838ed5f1bbac869efdfb6e785b829a541d3f") # vpinball/vpinball master, 2026-09-09 (versioned message names; the commit VPinballX_BGFX-5589 was built from)
+set(PINMAME_PLUGIN_API_COMMIT "6a673a2375bf82d1998e92caf7a598f850a94a44") # vpinball/pinmame master, 2026-09-09
 
 set(VPX_HEADERS_DIR "${CMAKE_BINARY_DIR}/vpx-headers")
 
@@ -28,10 +28,10 @@ function(_fetch_header url dest sha256)
 endfunction()
 
 set(_vpx_raw "https://raw.githubusercontent.com/vpinball/vpinball/${VPX_PLUGIN_API_COMMIT}/plugins/plugins")
-_fetch_header("${_vpx_raw}/MsgPlugin.h"        "${VPX_HEADERS_DIR}/plugins/MsgPlugin.h"        "df7f3e9534cf745b3c5e1742a05be9a44c760b18488ba0ff4cbf89bb868835b3")
-_fetch_header("${_vpx_raw}/ControllerPlugin.h" "${VPX_HEADERS_DIR}/plugins/ControllerPlugin.h" "4c67f8a1fb921515366dc273a7834a7652c0f8fe057483e4f2e4472f08ae2ca8")
-_fetch_header("${_vpx_raw}/VPXPlugin.h"        "${VPX_HEADERS_DIR}/plugins/VPXPlugin.h"        "30d8e4b409d016c4b6be5c3503ecc27be06ee5cfbec23df45c30d16834909db0")
-_fetch_header("${_vpx_raw}/LoggingPlugin.h"    "${VPX_HEADERS_DIR}/plugins/LoggingPlugin.h"    "d73bd1cbb5264dd537a7f1b86668fff2bd42e9dfbb0f42406e77227b0ca9f363")
+_fetch_header("${_vpx_raw}/MsgPlugin.h"        "${VPX_HEADERS_DIR}/plugins/MsgPlugin.h"        "f8cb28f72c9a482a74b7330766a87cf20b87dc97240664662f92cd318cff9775")
+_fetch_header("${_vpx_raw}/ControllerPlugin.h" "${VPX_HEADERS_DIR}/plugins/ControllerPlugin.h" "7d0b5376545ef1f71117b6d6953960a2260aef473802f056983b3e4bc903c1ea")
+_fetch_header("${_vpx_raw}/VPXPlugin.h"        "${VPX_HEADERS_DIR}/plugins/VPXPlugin.h"        "20359f8fec1eb045c9fef38106b885ec5c334a9de56e3814d2fa8cdd937ed30a")
+_fetch_header("${_vpx_raw}/LoggingPlugin.h"    "${VPX_HEADERS_DIR}/plugins/LoggingPlugin.h"    "46e98350f86e34936cc250824421de366e5dce5ecd1636ba904faddae537f4b0")
 
 set(_pinmame_raw "https://raw.githubusercontent.com/vpinball/pinmame/${PINMAME_PLUGIN_API_COMMIT}/src/libpinmame")
-_fetch_header("${_pinmame_raw}/PinMAMEPlugin.h" "${VPX_HEADERS_DIR}/pinmame/PinMAMEPlugin.h" "6d870ed577f121a2ff8acc0468a4449016d8b01661c495fc171b01805a74b0a3")
+_fetch_header("${_pinmame_raw}/PinMAMEPlugin.h" "${VPX_HEADERS_DIR}/pinmame/PinMAMEPlugin.h" "e6c9f436bc5277bdb9d32e13710149873b66b41f4b5f5f099faae078da89b6d2")

@@ -17,7 +17,10 @@
 // bitmap (WriteDmdOverlay, 0x23), show it for a duration or until hidden
 // (WriteDmdOverlayControlReg, 0x27), hide it. Message data is a
 // ScorbitOverlayMsg.
-#define SCORBIT_MSG_OVERLAY "Overlay"
+// The ":1" suffix follows the version-marker convention documented in MsgPlugin.h: a
+// message whose format or behaviour changes must change its marker, so a mismatched
+// peer subscribes to a name nobody serves and sees nothing rather than misreading data.
+#define SCORBIT_MSG_OVERLAY "Overlay:1"
 
 #define SCORBIT_OVERLAY_OP_UPLOAD 1
 #define SCORBIT_OVERLAY_OP_SHOW   2
