@@ -377,6 +377,72 @@ void TestOversizedLength()
    worker.Stop();
 }
 
+// The reserved since_frame_id means the daemon holds no frame, and it has to
+// work even when a real frame carries that same id. That collision is the
+// whole reason for the sentinel: a daemon holding nothing used to ask with a
+// generation it believed impossible, and no value is.
+void TestNoFrameHeldSentinel()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   {
+      // The one frame id that collides with the sentinel.
+      FrameSnapshot frame;
+      Fill(frame, Wire::SINCE_FRAME_NONE, 1, 128, 32, 4);
+      source.Set(MakeDeclare("ij_l7", 128, 32, 4, 1), frame);
+   }
+
+   SocketWorker worker(source, MakeConfig(peer), Quiet());
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   Wire::Declare declare;
+   CHECK(Handshake(peer, hello, declare));
+
+   // Frame id and generation both match what the plugin holds, and the answer
+   // must still be pixels, because that frame id is the reserved one.
+   Wire::Message msg;
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 6000, Wire::Encode(Wire::FrameRequest { Wire::SINCE_FRAME_NONE, 1 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   Wire::FrameReply reply;
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK_MSG(reply.hasPixels == 1, "the reserved frame id must always draw pixels");
+   CHECK(reply.frameId == Wire::SINCE_FRAME_NONE && reply.sourceGeneration == 1);
+   CHECK(reply.pixels.size() == 128u * 32u);
+
+   // An ordinary frame id still takes the unchanged path, so the sentinel has
+   // not quietly disabled the optimisation.
+   {
+      FrameSnapshot frame;
+      Fill(frame, 7, 1, 128, 32, 4);
+      source.Set(MakeDeclare("ij_l7", 128, 32, 4, 1), frame);
+   }
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 6001, Wire::Encode(Wire::FrameRequest { 7, 1 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK_MSG(reply.hasPixels == 0, "an ordinary matching frame id is still unchanged");
+   CHECK(reply.frameId == 7 && reply.sourceGeneration == 1);
+
+   // And the sentinel overrides that same state.
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 6002, Wire::Encode(Wire::FrameRequest { Wire::SINCE_FRAME_NONE, 1 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK(reply.hasPixels == 1 && reply.frameId == 7);
+   CHECK(reply.pixels.size() == 128u * 32u);
+
+   worker.Stop();
+}
+
 // Without a usable token there is nothing to say, so the worker hangs up
 // instead of sending a Hello the daemon would have to refuse.
 void TestMissingToken()
@@ -461,6 +527,7 @@ void TestErrorWithOnlyTheErrorBit()
 int main()
 {
    TestSession();
+   TestNoFrameHeldSentinel();
    TestOversizedLength();
    TestMissingToken();
    TestErrorWithOnlyTheErrorBit();

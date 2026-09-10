@@ -776,7 +776,12 @@ bool SocketWorker::AnswerFrame(const Wire::Message& msg)
       out.width = snapshot.width;
       out.height = snapshot.height;
       out.shades = snapshot.shades;
-      const bool unchanged = snapshot.frameId == req.sinceFrameId && snapshot.generation == req.sinceGeneration;
+      // The reserved since_frame_id says the daemon holds no frame, so nothing
+      // it could send in since_generation makes this reply an unchanged one.
+      const bool holdsNothing = req.sinceFrameId == Wire::SINCE_FRAME_NONE;
+      const bool unchanged = !holdsNothing
+         && snapshot.frameId == req.sinceFrameId
+         && snapshot.generation == req.sinceGeneration;
       if (!unchanged)
       {
          out.hasPixels = 1;

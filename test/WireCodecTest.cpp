@@ -3,7 +3,7 @@
 // Round trips every slice 1 message and pins the byte layout of the ones most
 // easily misread, against scorbitd's
 // docs/openspec/specs/vpx-virtual-probe/design.md, subsection "Message layouts
-// (protocol 1.0, slice 1)", revision 0ad5e4b. The daemon's SocketCable is built
+// (protocol 1.0, slice 1)", revision 3e8a9d5. The daemon's SocketCable is built
 // from that same subsection, so the golden vectors here are the thing the two
 // sides can be diffed against without running either of them.
 
@@ -173,6 +173,15 @@ void TestFrame()
    Wire::FrameRequest reqBack;
    CHECK(Wire::Decode(reqPayload, reqBack));
    CHECK(reqBack == req);
+
+   // The reserved since_frame_id is a value, not a layout change, so it rides
+   // the ordinary encoding. Pinned here because both sides must agree on it.
+   CHECK(Wire::SINCE_FRAME_NONE == 0xFFFFFFFFu);
+   const std::vector<uint8_t> heldNone = Wire::Encode(Wire::FrameRequest { Wire::SINCE_FRAME_NONE, 7 });
+   CHECK_MSG(ScorbitTest::Hex(heldNone) == "ffffffff" "07000000", ScorbitTest::Hex(heldNone));
+   Wire::FrameRequest heldNoneBack;
+   CHECK(Wire::Decode(heldNone, heldNoneBack));
+   CHECK(heldNoneBack.sinceFrameId == Wire::SINCE_FRAME_NONE && heldNoneBack.sinceGeneration == 7);
 
    // Unchanged: header only, no pixel run at all.
    Wire::FrameReply same;

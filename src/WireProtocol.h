@@ -16,7 +16,7 @@
 //
 // The normative layout is scorbitd's
 // docs/openspec/specs/vpx-virtual-probe/design.md, subsection "Message layouts
-// (protocol 1.0, slice 1)", at revision 0ad5e4b. This file implements that
+// (protocol 1.0, slice 1)", at revision 3e8a9d5. This file implements that
 // subsection and nothing else. It is deliberately free of any Visual Pinball or
 // Scorbit SDK dependency so the codec can be unit tested on its own, and so the
 // daemon's SocketCable and this plugin can each be diffed against the spec
@@ -228,6 +228,19 @@ struct Declare
 
    bool operator==(const Declare&) const = default;
 };
+
+// Reserved since_frame_id: the requester holds no frame at all, so the reply
+// must carry pixels whatever since_generation says.
+//
+// A sentinel is needed because no generation value can stand in for one. The
+// daemon used to force a full reply by asking with a generation it believed
+// impossible, and 0xFFFFFFFF is not impossible: paired with a real frame id of
+// 0 it names a frame that can genuinely exist, and the plugin would answer
+// "unchanged" to a daemon holding nothing.
+//
+// The cost is one redundant full frame if a display source ever reaches frame
+// id 0xFFFFFFFF, which at sixty frames a second is years of continuous play.
+inline constexpr uint32_t SINCE_FRAME_NONE = 0xFFFFFFFFu;
 
 struct FrameRequest
 {
