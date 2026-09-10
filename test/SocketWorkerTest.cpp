@@ -440,6 +440,42 @@ void TestNoFrameHeldSentinel()
    CHECK(reply.hasPixels == 1 && reply.frameId == 7);
    CHECK(reply.pixels.size() == 128u * 32u);
 
+   // --- The swap gap, where the sentinel cannot be obeyed literally -------
+   // The generation has moved and the new source has not produced a frame, so
+   // no pixels exist to send. The daemon sends the sentinel after every source
+   // change, so this window is reached on an ordinary table swap rather than
+   // in some corner. The no-source reply wins over the sentinel here.
+   source.Set(MakeDeclare("ij_l7", 0, 0, 0, 2), FrameSnapshot { false, 0, 2, 0, 0, 0, { } });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   Wire::Declare gap;
+   CHECK(Wire::Decode(msg.payload, gap));
+   CHECK(gap.shades == 0 && gap.sourceGeneration == 2);
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 6003, Wire::Encode(Wire::FrameRequest { Wire::SINCE_FRAME_NONE, 1 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK_MSG(reply.hasPixels == 0, "the sentinel cannot conjure pixels that do not exist");
+   CHECK_MSG(reply.width == 0 && reply.height == 0 && reply.shades == 0,
+      "zero geometry is what tells the daemon nothing is available yet, not unchanged");
+   CHECK(reply.frameId == 0 && reply.sourceGeneration == 2);
+   CHECK(reply.pixels.empty());
+
+   // And once the new source renders, the same request delivers again.
+   {
+      FrameSnapshot frame;
+      Fill(frame, 1, 2, 128, 32, 4);
+      source.Set(MakeDeclare("ij_l7", 128, 32, 4, 2), frame);
+   }
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_FRAME, 0, 6004, Wire::Encode(Wire::FrameRequest { Wire::SINCE_FRAME_NONE, 2 })));
+   CHECK(peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, reply));
+   CHECK(reply.hasPixels == 1 && reply.sourceGeneration == 2);
+   CHECK(reply.width == 128 && reply.height == 32 && reply.shades == 4);
+   CHECK(reply.pixels.size() == 128u * 32u);
+
    worker.Stop();
 }
 
