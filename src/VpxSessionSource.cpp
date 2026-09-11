@@ -54,7 +54,7 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
       VPXTableInfo info { };
       self->m_vpxApi->GetTableInfo(&info);
       if (info.path != nullptr)
-         tablePath = info.path;
+         tablePath = Wire::TableFileName(info.path);
    }
 
    {

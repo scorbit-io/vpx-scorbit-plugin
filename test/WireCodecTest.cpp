@@ -390,6 +390,35 @@ void TestCountersAreDistinct()
    CHECK_MSG(pongBack.renderedFrame == 0x1FFFFFFFFULL, "rendered_frame must survive past 32 bits");
 }
 
+
+// Declare::tablePath must never carry the path VPX hands over. The real one from the
+// first live capture named a home directory, an email address and an internal shared
+// drive layout, and it reached the daemon's logs and every wire dump. Pinned here
+// rather than left to review, because the leak is invisible until someone opens a dump.
+void TestTableFileName()
+{
+   // The shape that caused this, with the identifying parts replaced.
+   CHECK(Wire::TableFileName(
+      "/Users/someone/Library/CloudStorage/GoogleDrive-someone@example.com/Shared drives/"
+      "Engineering/Machine Training/Emulations/archive/TOM/Theatre of Magic (Bally 1995) 2.4.vpx")
+      == "Theatre of Magic (Bally 1995) 2.4.vpx");
+
+   CHECK(Wire::TableFileName("C:\\Users\\someone\\Tables\\Theatre of Magic.vpx")
+      == "Theatre of Magic.vpx");
+   CHECK(Wire::TableFileName("/tables/t.vpx") == "t.vpx");
+   CHECK(Wire::TableFileName("t.vpx") == "t.vpx");
+   CHECK(Wire::TableFileName("") == "");
+   CHECK_MSG(Wire::TableFileName("/tables/").empty(), "a trailing separator leaves nothing");
+
+   // Whatever comes out must not contain a separator, which is the property that
+   // actually matters: no directory structure crosses the wire.
+   const char* paths[] = {
+      "/a/b/c.vpx", "C:\\a\\b\\c.vpx", "/a\\b/c.vpx", "relative/path/c.vpx",
+   };
+   for (const char* p : paths)
+      CHECK_MSG(Wire::TableFileName(p).find_first_of("/\\") == std::string::npos, p);
+}
+
 }
 
 int main()
@@ -403,5 +432,6 @@ int main()
    TestMalformed();
    TestForwardCompatibility();
    TestCountersAreDistinct();
+   TestTableFileName();
    return ScorbitTest::Summary("wire_codec_test");
 }
