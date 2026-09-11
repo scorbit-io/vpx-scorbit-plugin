@@ -7,8 +7,11 @@
 
 #include "Check.h"
 #include "TestPeer.h"
+#include "WireVectors.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -558,6 +561,208 @@ void TestErrorWithOnlyTheErrorBit()
    worker.Stop();
 }
 
+
+// SB-4600 deliverable 4: bytes that actually crossed, not bytes we encoded ourselves.
+//
+// Every other test in this file has the peer build its replies with Wire::Encode — the
+// plugin's own encoder — so a shared misreading of design.md would satisfy both sides
+// and pass. The vectors in WireVectors.h came off the wire between this plugin and the
+// real daemon, so agreeing with them is interoperability rather than self consistency.
+uint32_t LengthPrefix(const std::vector<uint8_t>& raw)
+{
+   return static_cast<uint32_t>(raw[0]) | static_cast<uint32_t>(raw[1]) << 8
+        | static_cast<uint32_t>(raw[2]) << 16 | static_cast<uint32_t>(raw[3]) << 24;
+}
+
+bool OpenVector(const char* name, const std::string& hex, Wire::Message& out)
+{
+   const std::vector<uint8_t> raw = ScorbitTest::Unhex(hex);
+   CHECK_MSG(raw.size() > Wire::LENGTH_BYTES, name);
+   if (raw.size() <= Wire::LENGTH_BYTES)
+      return false;
+   CHECK_MSG(LengthPrefix(raw) == raw.size() - Wire::LENGTH_BYTES, name);
+   const bool ok = Wire::DecodeBody(raw.data() + Wire::LENGTH_BYTES,
+                                    raw.size() - Wire::LENGTH_BYTES, out);
+   CHECK_MSG(ok, name);
+   return ok;
+}
+
+// Hello and the populated Declare are withheld from this public repo: one carries the
+// daemon session token, the other a tablePath naming a home directory and an email
+// address. They live beside the corpus and are loaded only when SCORBIT_WIRE_VECTORS
+// points at that file. Absent, the checks that need them skip.
+std::string PrivateVector(const char* name)
+{
+   const char* path = getenv("SCORBIT_WIRE_VECTORS");
+   if (path == nullptr || path[0] == '\0')
+      return { };
+   std::ifstream in(path);
+   // Line based, not token based: the file carries '#' comments, and reading it as a
+   // token stream lets an odd comment word shift every following pair by one.
+   std::string line;
+   while (std::getline(in, line))
+   {
+      if (line.empty() || line[0] == '#')
+         continue;
+      const size_t sep = line.find(' ');
+      if (sep == std::string::npos)
+         continue;
+      if (line.compare(0, sep, name) == 0)
+         return line.substr(sep + 1);
+   }
+   return { };
+}
+
+void TestCapturedWireBytes()
+{
+   Wire::Message msg;
+
+   // --- Every public vector decodes, with the type it was labelled with -------
+   const struct { const char* name; const std::string* hex; uint16_t type; } vectors[] = {
+      { "HELLO_ACK", &Vectors::HELLO_ACK, Wire::TYPE_HELLO_ACK },
+      { "DECLARE_NO_SOURCE", &Vectors::DECLARE_NO_SOURCE, Wire::TYPE_DECLARE },
+      { "FRAME_REQUEST_SENTINEL", &Vectors::FRAME_REQUEST_SENTINEL, Wire::TYPE_FRAME },
+      { "FRAME_REQUEST", &Vectors::FRAME_REQUEST, Wire::TYPE_FRAME },
+      { "FRAME_REPLY_PIXELS", &Vectors::FRAME_REPLY_PIXELS, Wire::TYPE_FRAME },
+      { "FRAME_REPLY_UNCHANGED", &Vectors::FRAME_REPLY_UNCHANGED, Wire::TYPE_FRAME },
+      { "FRAME_REPLY_NO_SOURCE", &Vectors::FRAME_REPLY_NO_SOURCE, Wire::TYPE_FRAME },
+   };
+   for (const auto& v : vectors)
+      if (OpenVector(v.name, *v.hex, msg))
+         CHECK_MSG(msg.header.type == v.type, v.name);
+
+   // --- The sentinel is the real constant, not a literal that happens to match -
+   CHECK(OpenVector("FRAME_REQUEST_SENTINEL", Vectors::FRAME_REQUEST_SENTINEL, msg));
+   Wire::FrameRequest sentinel { };
+   CHECK(Wire::Decode(msg.payload, sentinel));
+   CHECK(sentinel.sinceFrameId == Wire::SINCE_FRAME_NONE);
+
+   CHECK(OpenVector("FRAME_REQUEST", Vectors::FRAME_REQUEST, msg));
+   Wire::FrameRequest normal { };
+   CHECK(Wire::Decode(msg.payload, normal));
+   CHECK(normal.sinceFrameId == 0 && normal.sinceGeneration == 1);
+
+   // --- The three reply shapes stay distinct ---------------------------------
+   CHECK(OpenVector("FRAME_REPLY_PIXELS", Vectors::FRAME_REPLY_PIXELS, msg));
+   Wire::FrameReply pixels { };
+   CHECK(Wire::Decode(msg.payload, pixels));
+   CHECK(pixels.width == 128 && pixels.height == 32 && pixels.shades == 4);
+   CHECK(pixels.hasPixels == 1);
+   CHECK(pixels.pixels.size() == 128u * 32u);
+   bool inRange = true;
+   for (const uint8_t p : pixels.pixels)
+      if (p > 3)
+         inRange = false;
+   CHECK_MSG(inRange, "every shade index within [0,3] for a 4 shade source");
+
+   CHECK(OpenVector("FRAME_REPLY_UNCHANGED", Vectors::FRAME_REPLY_UNCHANGED, msg));
+   Wire::FrameReply unchanged { };
+   CHECK(Wire::Decode(msg.payload, unchanged));
+   CHECK(unchanged.hasPixels == 0);
+   CHECK_MSG(unchanged.width == 128 && unchanged.shades == 4,
+             "unchanged keeps real geometry, unlike the no source reply");
+
+   CHECK(OpenVector("FRAME_REPLY_NO_SOURCE", Vectors::FRAME_REPLY_NO_SOURCE, msg));
+   Wire::FrameReply noSource { };
+   CHECK(Wire::Decode(msg.payload, noSource));
+   CHECK(noSource.hasPixels == 0);
+   CHECK_MSG(noSource.width == 0 && noSource.height == 0 && noSource.shades == 0,
+             "no source is zero geometry with shades 0, which design.md defines as "
+             "nothing available yet");
+
+   // --- Re encoding a decoded capture must reproduce it byte for byte ---------
+   // The assertion that catches encoder drift: this build's output compared against
+   // bytes the real daemon actually accepted, not against our own idea of them.
+   CHECK(OpenVector("FRAME_REPLY_PIXELS", Vectors::FRAME_REPLY_PIXELS, msg));
+   CHECK(Wire::Decode(msg.payload, pixels));
+   CHECK_MSG(Wire::Encode(pixels) == msg.payload, "FrameReply re encode is byte identical");
+
+   CHECK(OpenVector("DECLARE_NO_SOURCE", Vectors::DECLARE_NO_SOURCE, msg));
+   Wire::Declare opening { };
+   CHECK(Wire::Decode(msg.payload, opening));
+   CHECK_MSG(Wire::Encode(opening) == msg.payload, "Declare re encode is byte identical");
+   CHECK_MSG(opening.romId.empty() && opening.width == 0 && opening.sourceGeneration == 0,
+             "the opening declare precedes any ROM");
+
+   CHECK(OpenVector("HELLO_ACK", Vectors::HELLO_ACK, msg));
+   Wire::HelloAck ack { };
+   CHECK(Wire::Decode(msg.payload, ack));
+   CHECK_MSG(Wire::Encode(ack) == msg.payload, "HelloAck re encode is byte identical");
+   CHECK(ack.protoMajor == Wire::PROTO_MAJOR && ack.protoMinor == Wire::PROTO_MINOR);
+
+   // --- The withheld pair, only when the corpus file is pointed at ------------
+   const std::string helloHex = PrivateVector("HELLO");
+   const std::string declareHex = PrivateVector("DECLARE");
+   if (helloHex.empty() || declareHex.empty())
+   {
+      fprintf(stderr, "skip: Hello and populated Declare need SCORBIT_WIRE_VECTORS "
+                      "(they carry a session token and a personal path, so they are "
+                      "not in this repo)\n");
+      return;
+   }
+
+   CHECK(OpenVector("HELLO", helloHex, msg));
+   Wire::Hello hello { };
+   CHECK(Wire::Decode(msg.payload, hello));
+   CHECK_MSG(Wire::Encode(hello) == msg.payload, "Hello re encode is byte identical");
+   CHECK(hello.protoMajor == Wire::PROTO_MAJOR && hello.protoMinor == Wire::PROTO_MINOR);
+   CHECK(hello.vpxRevision == "5589");
+
+   CHECK(OpenVector("DECLARE", declareHex, msg));
+   Wire::Declare declare { };
+   CHECK(Wire::Decode(msg.payload, declare));
+   CHECK_MSG(Wire::Encode(declare) == msg.payload, "Declare re encode is byte identical");
+   CHECK(declare.romId == "tom_13");
+   CHECK(declare.width == 128 && declare.height == 32 && declare.shades == 4);
+   CHECK_MSG(declare.identifyFormat == "BITPLANE2",
+             "names the source format; frame payloads are unpacked one byte per pixel");
+}
+
+// The handshake driven by the daemon's real bytes: the peer replays the captured
+// HelloAck verbatim instead of encoding one, and the worker must accept it and go on
+// to Declare. Nothing the plugin produced takes part in the reply.
+void TestHandshakeAgainstCapturedAck()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   FrameSnapshot frame;
+   Fill(frame, 10, 1, 128, 32, 4);
+   source.Set(MakeDeclare("tom_13", 128, 32, 4, 1), frame);
+   source.SetSession(SessionSnapshot { 1, true });
+
+   SocketWorker worker(source, MakeConfig(peer), Quiet());
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_HELLO, msg, WAIT_MS));
+
+   // The captured ack carries seq 1, which is the seq the worker's first Hello uses.
+   // Asserted rather than assumed: if the worker ever renumbers, this says so plainly
+   // instead of the replay silently failing to match.
+   CHECK_MSG(msg.header.seq == 1, "worker's first Hello is seq 1, so the capture replays as is");
+
+   CHECK_MSG(peer.SendRaw(ScorbitTest::Unhex(Vectors::HELLO_ACK)),
+             "replay the daemon's own HelloAck bytes");
+
+   CHECK_MSG(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS),
+             "worker accepted the captured HelloAck and declared");
+   Wire::Declare declare { };
+   CHECK(Wire::Decode(msg.payload, declare));
+   CHECK(declare.romId == "tom_13");
+
+   worker.Stop();
+}
+
 }
 
 int main()
@@ -567,5 +772,7 @@ int main()
    TestOversizedLength();
    TestMissingToken();
    TestErrorWithOnlyTheErrorBit();
+   TestCapturedWireBytes();
+   TestHandshakeAgainstCapturedAck();
    return ScorbitTest::Summary("socket_worker_test");
 }
