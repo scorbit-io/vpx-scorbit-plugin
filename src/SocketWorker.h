@@ -17,6 +17,7 @@
 // which is what lets the worker run against a scripted peer in the tests.
 
 #include "WireProtocol.h"
+#include "WireDump.h"
 
 #include <atomic>
 #include <chrono>
@@ -153,6 +154,7 @@ private:
    const LogFn m_log;
    const uint64_t m_instanceId;
 
+   WireDump m_wireDump;
    std::string m_socketPath;
    std::string m_tokenPath;
 

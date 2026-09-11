@@ -218,6 +218,15 @@ void SocketWorker::Worker()
 {
    NameThisThread("Scorbit.Socket");
 
+   // Opened here rather than in Start() so the file is owned end to end by the thread
+   // that writes it. Logging goes through Log(), which queues to the API thread.
+   std::string dumpError;
+   m_wireDump.Open(dumpError);
+   if (!dumpError.empty())
+      Log(LOG_LEVEL_ERROR, dumpError);
+   else if (m_wireDump.Enabled())
+      Log(LOG_LEVEL_INFO, "Socket: recording wire frames (SCORBIT_WIRE_DUMP is set)");
+
    while (m_running)
    {
       if (!Connect())
@@ -231,6 +240,8 @@ void SocketWorker::Worker()
       if (m_running)
          Backoff();
    }
+
+   m_wireDump.Close();
 }
 
 void SocketWorker::Backoff()
@@ -482,6 +493,8 @@ bool SocketWorker::ReadMessage(Wire::Message& out, int timeoutMs)
       Log(LOG_LEVEL_ERROR, "Socket: message body of " + std::to_string(length) + " bytes never arrived, closing");
       return false;
    }
+   m_wireDump.Received(lengthBytes, sizeof(lengthBytes), body.data(), body.size());
+
    if (!Wire::DecodeBody(body.data(), body.size(), out))
    {
       Log(LOG_LEVEL_ERROR, "Socket: message shorter than a header, closing");
@@ -499,6 +512,7 @@ bool SocketWorker::SendMessage(uint16_t type, uint16_t flags, uint32_t seq, cons
       Log(LOG_LEVEL_ERROR, "Socket: refusing to send an oversized "s + Wire::TypeName(type) + " message");
       return false;
    }
+   m_wireDump.Sent(bytes.data(), bytes.size());
    return SendAll(bytes.data(), bytes.size(), SEND_TIMEOUT_MS);
 }
 

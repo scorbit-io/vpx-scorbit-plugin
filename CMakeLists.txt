@@ -99,6 +99,8 @@ add_library(scorbit-transport STATIC
    src/WireProtocol.cpp
    src/SocketWorker.h
    src/SocketWorker.cpp
+   src/WireDump.h
+   src/WireDump.cpp
 )
 target_include_directories(scorbit-transport PUBLIC src)
 target_compile_options(scorbit-transport PRIVATE ${SCORBIT_WARNINGS})
