@@ -36,6 +36,7 @@ public:
       unsigned int width = 0;
       unsigned int height = 0;
       unsigned int shades = 0;     // 4 or 16
+      uint64_t generation = 0;     // DmdTap source generation that produced this frame
       std::vector<uint8_t> pixels; // width * height shade indices, row major
    };
 
@@ -56,6 +57,10 @@ public:
    // Any thread. False means no conforming display source is selected, in which
    // case no frame will ever be produced and the caller must fail closed.
    bool HasSource() const { return m_hasSource; }
+
+   // Any thread. Bumped on every source change, including a replacement whose
+   // geometry is identical.
+   uint64_t SourceGeneration() const { std::lock_guard lock(m_sourceMutex); return m_sourceGeneration; }
 
    // Any thread. Frames the source produced that the tap did not capture,
    // counted from gaps in frameId. A poll can miss a frame when the host

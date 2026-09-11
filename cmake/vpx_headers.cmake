@@ -9,6 +9,12 @@
 set(VPX_PLUGIN_API_COMMIT "0bc9838ed5f1bbac869efdfb6e785b829a541d3f") # vpinball/vpinball master, 2026-09-09 (versioned message names; the commit VPinballX_BGFX-5589 was built from)
 set(PINMAME_PLUGIN_API_COMMIT "6a673a2375bf82d1998e92caf7a598f850a94a44") # vpinball/pinmame master, 2026-09-09
 
+# The build the headers above come from. The plugin API exposes no runtime
+# version, so this is what the plugin reports to the Scorbit daemon in Hello and
+# Declare: the VPX it was compiled against, not the VPX it was loaded into.
+set(VPX_PINNED_VERSION "VPinballX_BGFX-5589")
+set(VPX_PINNED_REVISION "5589")
+
 set(VPX_HEADERS_DIR "${CMAKE_BINARY_DIR}/vpx-headers")
 
 function(_fetch_header url dest sha256)

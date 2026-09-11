@@ -99,6 +99,7 @@ dmdDumpFile =
 | `logLevel` | 0 quiet, 1 info, 2 debug |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
+| `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 
 The plugin identifies the running machine by the ROM id PinMAME reports and
 looks it up in `assets/scorbit_machines.json`, which maps ROM ids to Scorbit
@@ -118,6 +119,35 @@ machine's shade depth), and a blank line after each frame. That is the format
 Scorbit's `vpin2bin` tool consumes, so a dump from VPX can be compared directly
 against captures from physical machines. Verified on WPC (128x32, 4 shades),
 SAM (128x32, 16 shades) and Sega 192x64 displays.
+
+## Scorbit daemon transport
+
+`src/SocketWorker.*` connects the plugin to a running Scorbit daemon over a
+user-scoped local socket and serves it DMD frames. The daemon is the
+rendezvous: it listens, the plugin connects, and a plugin that starts first
+simply retries once a second until a daemon appears. Nothing blocks the render
+path, and the worker never touches the VPX plugin bus.
+
+| Platform | Socket | Token |
+|---|---|---|
+| macOS | `$(confstr _CS_DARWIN_USER_TEMP_DIR)/scorbit/vpx.sock` | `vpx.token` beside it |
+| Linux | `$XDG_RUNTIME_DIR/scorbit/vpx.sock`, else `/run/user/<uid>/scorbit/vpx.sock` | `vpx.token` beside it |
+| Windows | `%LOCALAPPDATA%\Scorbit\vpx.sock` | `%LOCALAPPDATA%\Scorbit\vpx.token` |
+
+`socketPath` in `VPinballX.ini` overrides the socket; the token is then read
+from the same directory. The daemon writes the token file, and the plugin reads
+it immediately before every connection attempt, so a daemon that restarts and
+rotates its token is picked up without restarting VPX.
+
+`src/WireProtocol.*` is the whole wire format: little-endian, a `u32` length
+followed by `u16` type, `u16` flags and a `u32` sequence number, then the
+payload. This build speaks protocol 1.0 and serves Hello, Declare, Frame, Ping
+and Bye. Requests for the types reserved for memory access, overlay and status
+are answered with `unsupported_type` rather than ignored. Frames cross as one
+shade index per pixel, row major, exactly as the tap captured them.
+
+`test/` holds a scripted daemon-side peer and two test binaries; `ctest` in the
+build directory runs both. They need neither Visual Pinball nor a daemon.
 
 ## DMD overlay
 
@@ -151,9 +181,16 @@ hides. Both go through the same message.
 
 ```
 src/            plugin sources (ScorbitPluginAPI.h is the message contract)
+test/           transport tests and the scripted daemon-side peer
 assets/         ROM id to Scorbit machine id mapping
 plugin.cfg      VPX plugin manifest (ids and library names per platform)
 cmake/          CPM bootstrap and the pinned VPX/PinMAME header fetch
+```
+
+Run the tests with:
+
+```sh
+cmake --build build -j && (cd build && ctest --output-on-failure)
 ```
 
 ## Credits

@@ -179,6 +179,7 @@ void DmdTap::Worker()
          m_back.width = src.width;
          m_back.height = src.height;
          m_back.shades = src.identifyFormat == CTLPI_DISPLAY_ID_FORMAT_BITPLANE4 ? 16 : 4;
+         m_back.generation = m_sourceGeneration; // the source that produced these pixels
       }
 
       Dump(m_back);

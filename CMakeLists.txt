@@ -86,6 +86,30 @@ else()
    )
 endif()
 
+if(MSVC)
+   set(SCORBIT_WARNINGS /W4 /Zc:__cplusplus)
+else()
+   set(SCORBIT_WARNINGS -Wall -Wextra -Wno-unused-parameter)
+endif()
+
+# The wire protocol and the socket worker carry no Visual Pinball or Scorbit SDK
+# dependency, so they build and test on their own against a scripted peer.
+add_library(scorbit-transport STATIC
+   src/WireProtocol.h
+   src/WireProtocol.cpp
+   src/SocketWorker.h
+   src/SocketWorker.cpp
+   src/WireDump.h
+   src/WireDump.cpp
+)
+target_include_directories(scorbit-transport PUBLIC src)
+target_compile_options(scorbit-transport PRIVATE ${SCORBIT_WARNINGS})
+find_package(Threads REQUIRED)
+target_link_libraries(scorbit-transport PUBLIC Threads::Threads)
+if(WIN32)
+   target_link_libraries(scorbit-transport PUBLIC ws2_32)
+endif()
+
 add_library(plugin-scorbit MODULE
    src/common.h
    src/ScorbitPlugin.cpp
@@ -95,20 +119,24 @@ add_library(plugin-scorbit MODULE
    src/DmdTap.cpp
    src/DmdOverlay.h
    src/DmdOverlay.cpp
+   src/VpxSessionSource.h
+   src/VpxSessionSource.cpp
    src/ScorbitPluginAPI.h
    src/qrcodegen.h
    src/qrcodegen.c
 )
 
 target_include_directories(plugin-scorbit PRIVATE src "${VPX_HEADERS_DIR}")
-target_compile_definitions(plugin-scorbit PRIVATE "SCORBIT_DEFAULT_PROVIDER_KEY=\"$ENV{SCORBIT_PROVIDER_KEY}\"")
-target_link_libraries(plugin-scorbit PRIVATE scorbit_sdk nlohmann_json::nlohmann_json)
+target_compile_definitions(plugin-scorbit PRIVATE
+   "SCORBIT_DEFAULT_PROVIDER_KEY=\"$ENV{SCORBIT_PROVIDER_KEY}\""
+   "SCORBIT_PLUGIN_VERSION=\"${PROJECT_VERSION}\""
+   "SCORBIT_VPX_PLUGIN_API_COMMIT=\"${VPX_PLUGIN_API_COMMIT}\""
+   "SCORBIT_VPX_PINNED_VERSION=\"${VPX_PINNED_VERSION}\""
+   "SCORBIT_VPX_PINNED_REVISION=\"${VPX_PINNED_REVISION}\""
+)
+target_link_libraries(plugin-scorbit PRIVATE scorbit-transport scorbit_sdk nlohmann_json::nlohmann_json)
 
-if(MSVC)
-   target_compile_options(plugin-scorbit PRIVATE /W4 /Zc:__cplusplus)
-else()
-   target_compile_options(plugin-scorbit PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
+target_compile_options(plugin-scorbit PRIVATE ${SCORBIT_WARNINGS})
 
 # Library names must match plugin.cfg.
 set_target_properties(plugin-scorbit PROPERTIES PREFIX "")
@@ -133,6 +161,12 @@ add_custom_command(TARGET plugin-scorbit POST_BUILD
    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:scorbit_sdk>" "${STAGE_DIR}/"
    COMMENT "Staging plugin folder in ${STAGE_DIR}"
 )
+option(SCORBIT_BUILD_TESTS "Build the transport tests" ON)
+if(SCORBIT_BUILD_TESTS)
+   enable_testing()
+   add_subdirectory(test)
+endif()
+
 if(NOT SCORBIT_SDK_ROOT AND (APPLE OR UNIX))
    # The SDK's install name is versioned (libscorbit_sdk.2.dylib / .so.2); stage that name too.
    add_custom_command(TARGET plugin-scorbit POST_BUILD
