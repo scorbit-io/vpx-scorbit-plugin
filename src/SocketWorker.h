@@ -137,7 +137,11 @@ private:
    bool AnswerPing(const Wire::Message& msg);
 
    bool SendAll(const uint8_t* data, size_t size, int timeoutMs);
-   bool SendMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload);
+   // Not SendMessage: windows.h defines that as a macro expanding to SendMessageA
+   // or SendMessageW, so the declaration and the definition textually disagree and
+   // MSVC rejects the member. Renamed rather than #undef'd, because any later
+   // include of windows.h would quietly put the macro back.
+   bool SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload);
    bool SendError(uint16_t type, uint32_t seq, uint16_t code, const std::string& reason);
    bool SendIdlePing();
    // Sends a request and pumps the socket until its response arrives, serving
