@@ -41,13 +41,19 @@ if("$ENV{SCORBIT_SDK_ENCRYPT_SECRET}" STREQUAL "" AND NOT SCORBIT_SDK_ROOT)
    message(WARNING "SCORBIT_SDK_ENCRYPT_SECRET is not set: the SDK built here cannot decrypt provider keys")
 endif()
 
-include(cmake/CPM.cmake)
 # The transport carries no Visual Pinball or Scorbit SDK dependency, so it builds
 # and tests on its own. CI uses that: the SDK fetch needs OpenSSL and libarchive on
-# the host plus a network round trip, and the header fetch needs the network too —
-# none of which a compile gate for the wire protocol should require.
+# the host, and both it and the header fetch need the network, none of which a
+# compile gate for the wire protocol should require.
+#
+# Declared before the CPM bootstrap because it gates it. cmake/CPM.cmake runs an
+# unconditional file(DOWNLOAD) when included, so leaving it above this option would
+# have meant a clean runner still reached the network on a transport-only configure.
 option(SCORBIT_TRANSPORT_ONLY "Build only the transport library and its tests" OFF)
 
+if(NOT SCORBIT_TRANSPORT_ONLY)
+   include(cmake/CPM.cmake)
+endif()
 if(NOT SCORBIT_TRANSPORT_ONLY)
    include(cmake/vpx_headers.cmake)
 endif()
