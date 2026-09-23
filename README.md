@@ -57,6 +57,33 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
   -DLibArchive_ROOT=$(brew --prefix libarchive)
 ```
 
+Windows builds the SDK's dependencies through vcpkg, using `vcpkg.json` at the
+repository root (nothing reads it on other platforms). From PowerShell, check
+vcpkg out at that file's `builtin-baseline` and bootstrap it, since a fresh
+checkout has no `vcpkg.exe` for the toolchain to run:
+
+```powershell
+$baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+git clone https://github.com/microsoft/vcpkg.git ../vcpkg
+git -C ../vcpkg checkout $baseline
+../vcpkg/bootstrap-vcpkg.bat -disableMetrics
+```
+
+Then configure and build. The Visual Studio generator finds MSVC itself, so no
+developer shell is needed:
+
+```powershell
+cmake -S . -B build -A x64 `
+  "-DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+cmake --build build --config Release
+```
+
+The triplet must be `x64-windows-static-md`, not `x64-windows-static`: the
+plugin and the SDK link the dynamic CRT. The first build compiles Boost, curl,
+OpenSSL and libarchive and takes a while; CI caches them. CI also uploads the
+staged Windows plugin as a workflow artifact.
+
 To use a prebuilt or installed SDK instead of building it:
 
 ```sh

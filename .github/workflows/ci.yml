@@ -5,13 +5,14 @@ name: CI
 # of SocketWorker shipped without ever being compiled anywhere, and nothing in this
 # repo could have caught that.
 #
-# Deliberately does NOT build the plugin itself yet. SCORBIT_TRANSPORT_ONLY skips the
-# scorbit_sdk fetch, which needs OpenSSL and libarchive on the host plus a network
-# round trip. The full plugin build is a second job, once this one is reliably green.
+# The transport job skips the plugin: SCORBIT_TRANSPORT_ONLY avoids the scorbit_sdk
+# fetch, which needs Boost, curl, OpenSSL and libarchive, so it stays under a minute.
+# windows-plugin builds the whole plugin on MSVC and uploads the staged folder.
 #
-# No secrets are used or needed. SCORBIT_PROVIDER_KEY and SCORBIT_SDK_ENCRYPT_SECRET
-# only make CMake warn, and the transport does not touch either. That matters on a
-# public repo: a pull request from a fork must never be able to reach a secret.
+# No secrets are used, and none may be added. SCORBIT_PROVIDER_KEY is compiled into
+# the plugin, windows-plugin uploads that plugin as an artifact, and artifacts on a
+# public repo are readable by anyone signed in. Fork pull requests must never reach
+# a secret either.
 
 on:
   pull_request:
@@ -23,7 +24,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   transport:
@@ -72,4 +73,119 @@ jobs:
       # which is still the first time that codec has met MSVC.
       - name: Test
         if: matrix.test
-        run: ctest --test-dir build --build-config Release --output-on-failure
+        run: ctest --test-dir build --build-config Release --no-tests=error --output-on-failure
+
+  # The full plugin on MSVC. The recipe is scorbit_sdk's windows.yml, which is green:
+  # the plugin's only Windows dependencies are the SDK's, and the SDK already builds
+  # there. Kept apart from the transport gate, whose speed is the point of it.
+  windows-plugin:
+    name: windows-x64-plugin
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      # Static libraries against the dynamic CRT, which the plugin and SDK both use.
+      # Plain -static mismatches, and the LNK2038 that follows reads nothing like it.
+      VCPKG_TARGET_TRIPLET: x64-windows-static-md
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg_cache
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg_cache,readwrite"
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_cache
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Create the vcpkg binary cache directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/vcpkg_cache"
+
+      # Restore and save are split, with the saves under always(): a combined
+      # actions/cache saves in a post step that is skipped when the job fails, so it
+      # would never store anything while the build is red, which is when it matters.
+      - name: Restore vcpkg binaries
+        id: vcpkg_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TARGET_TRIPLET }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-${{ env.VCPKG_TARGET_TRIPLET }}-
+
+      - name: Restore CPM sources
+        id: cpm_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/cpm_cache
+          key: cpm-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
+          restore-keys: cpm-${{ runner.os }}-
+
+      # vcpkg is checked out at the manifest's builtin-baseline instead of using the
+      # runner's copy. Mixing the two resolves versions from one commit against ports
+      # from another, and fails with "no version database entry" for ports that exist.
+      - name: Check out vcpkg at the pinned baseline
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if (-not $baseline) { throw "vcpkg.json has no builtin-baseline" }
+          $root = Join-Path $env:RUNNER_TEMP "vcpkg"
+          git init --quiet $root
+          git -C $root remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $root fetch --quiet --depth=1 origin $baseline
+          if ($LASTEXITCODE -ne 0) { throw "could not fetch vcpkg at $baseline" }
+          git -C $root checkout --quiet FETCH_HEAD
+          if ((git -C $root rev-parse HEAD) -ne $baseline) { throw "vcpkg is not at $baseline" }
+          & (Join-Path $root "bootstrap-vcpkg.bat") -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed" }
+          "VCPKG_TOOLCHAIN=$(Join-Path $root 'scripts/buildsystems/vcpkg.cmake')" >> $env:GITHUB_ENV
+
+      # Visual Studio generator, which finds MSVC unaided; Ninja would need a vcvars
+      # step first. SCORBIT_SDK_PRODUCTION is OFF by default at the current SDK pin
+      # and is set anyway: ON requires SCORBIT_SDK_ENCRYPT_SECRET and fails configure.
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_TOOLCHAIN" `
+            "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET" `
+            -DSCORBIT_SDK_PRODUCTION=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --no-tests=error --output-on-failure
+
+      # Checked by name before upload, so a build that stages the wrong thing fails
+      # here rather than in someone's VPX install. plugin.cfg is what VPX reads to
+      # find the DLL, so the name has to match it.
+      - name: Verify the staged plugin
+        shell: pwsh
+        run: |
+          $stage = "build/stage/scorbit"
+          $dll = (Select-String -Path plugin.cfg -Pattern '^windows\.x64\s*=\s*"(.+)"').Matches.Groups[1].Value
+          if (-not $dll) { throw "plugin.cfg declares no windows.x64 library" }
+          foreach ($f in @($dll, "plugin.cfg", "assets/scorbit_machines.json")) {
+            if (-not (Test-Path (Join-Path $stage $f))) { throw "staged folder is missing $f" }
+          }
+          if (-not (Get-ChildItem $stage -Filter "*scorbit_sdk*.dll")) { throw "no scorbit_sdk DLL staged" }
+          Get-ChildItem $stage -Recurse -File | ForEach-Object { "{0,10}  {1}" -f $_.Length, $_.FullName.Substring((Resolve-Path $stage).Path.Length + 1) }
+
+      - name: Upload the staged plugin
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plugin-scorbit-windows-x64
+          path: build/stage/scorbit
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save vcpkg binaries
+        if: always() && steps.vcpkg_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TARGET_TRIPLET }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Save CPM sources
+        if: always() && steps.cpm_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/cpm_cache
+          key: cpm-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
