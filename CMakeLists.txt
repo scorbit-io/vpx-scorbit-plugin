@@ -42,16 +42,28 @@ if("$ENV{SCORBIT_SDK_ENCRYPT_SECRET}" STREQUAL "" AND NOT SCORBIT_SDK_ROOT)
 endif()
 
 include(cmake/CPM.cmake)
-include(cmake/vpx_headers.cmake)
+# The transport carries no Visual Pinball or Scorbit SDK dependency, so it builds
+# and tests on its own. CI uses that: the SDK fetch needs OpenSSL and libarchive on
+# the host plus a network round trip, and the header fetch needs the network too —
+# none of which a compile gate for the wire protocol should require.
+option(SCORBIT_TRANSPORT_ONLY "Build only the transport library and its tests" OFF)
+
+if(NOT SCORBIT_TRANSPORT_ONLY)
+   include(cmake/vpx_headers.cmake)
+endif()
 
 # Same pin as scorbit_sdk, added first so CPM reuses it inside the SDK build.
+if(NOT SCORBIT_TRANSPORT_ONLY)
 CPMAddPackage(
    NAME nlohmann_json
    URL https://github.com/nlohmann/json/archive/3946872265598aed5a7aea68cad4d9d1f168bd4b.tar.gz
    URL_HASH SHA256=4784ccd3b66d46da6723cb69b3328b8b5548cf82b5c6e917a7636f20a4b40adf
 )
+endif()
 
-if(SCORBIT_SDK_ROOT)
+if(SCORBIT_TRANSPORT_ONLY)
+   # No SDK, no plugin target: the transport and its tests are the whole build.
+elseif(SCORBIT_SDK_ROOT)
    add_library(scorbit_sdk SHARED IMPORTED)
    file(GLOB _sdk_lib
       "${SCORBIT_SDK_ROOT}/lib/libscorbit_sdk${CMAKE_SHARED_LIBRARY_SUFFIX}"
@@ -110,6 +122,8 @@ if(WIN32)
    target_link_libraries(scorbit-transport PUBLIC ws2_32)
 endif()
 
+if(NOT SCORBIT_TRANSPORT_ONLY)
+
 add_library(plugin-scorbit MODULE
    src/common.h
    src/ScorbitPlugin.cpp
@@ -161,13 +175,16 @@ add_custom_command(TARGET plugin-scorbit POST_BUILD
    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:scorbit_sdk>" "${STAGE_DIR}/"
    COMMENT "Staging plugin folder in ${STAGE_DIR}"
 )
+
+endif()  # NOT SCORBIT_TRANSPORT_ONLY
+
 option(SCORBIT_BUILD_TESTS "Build the transport tests" ON)
 if(SCORBIT_BUILD_TESTS)
    enable_testing()
    add_subdirectory(test)
 endif()
 
-if(NOT SCORBIT_SDK_ROOT AND (APPLE OR UNIX))
+if(NOT SCORBIT_TRANSPORT_ONLY AND NOT SCORBIT_SDK_ROOT AND (APPLE OR UNIX))
    # The SDK's install name is versioned (libscorbit_sdk.2.dylib / .so.2); stage that name too.
    add_custom_command(TARGET plugin-scorbit POST_BUILD
       COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_SONAME_FILE:scorbit_sdk>" "${STAGE_DIR}/"
