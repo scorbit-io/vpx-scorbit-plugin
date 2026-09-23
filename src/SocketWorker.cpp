@@ -53,6 +53,39 @@ constexpr auto IDLE_PING_AFTER = std::chrono::milliseconds(500);
 
 constexpr size_t TOKEN_CHARS = 64;
 
+#ifdef _WIN32
+// Endpoint paths are UTF-8 on Windows: sun_path is a UTF-8 byte path there, and the
+// daemon resolves its own path that way (SB-4609). The environment and the file APIs
+// are UTF-16, so every crossing is explicit and strict — a path that is not valid
+// UTF-8 is refused rather than silently transcoded, which is what the daemon does.
+std::string ToUtf8(const wchar_t* w, int wlen)
+{
+   const int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, wlen,
+                                     nullptr, 0, nullptr, nullptr);
+   if (n <= 0)
+      return std::string();
+   std::string out(static_cast<size_t>(n), '\0');
+   if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, wlen, out.data(), n,
+                           nullptr, nullptr) != n)
+      return std::string();
+   return out;
+}
+
+std::wstring ToWide(const std::string& utf8)
+{
+   if (utf8.empty())
+      return std::wstring();
+   const int len = static_cast<int>(utf8.size());
+   const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), len, nullptr, 0);
+   if (n <= 0)
+      return std::wstring();
+   std::wstring out(static_cast<size_t>(n), L'\0');
+   if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), len, out.data(), n) != n)
+      return std::wstring();
+   return out;
+}
+#endif
+
 void NameThisThread(const char* name)
 {
 #if defined(_WIN32)
@@ -126,11 +159,17 @@ SocketWorker::~SocketWorker()
 std::string SocketWorker::DefaultSocketPath()
 {
 #if defined(_WIN32)
-   char buf[MAX_PATH] = { };
-   DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", buf, MAX_PATH);
+   // Read wide and convert to UTF-8. Narrow gives the ANSI code page, so any profile
+   // name with a non-ASCII character built a different byte path from the one the
+   // daemon bound and never connected (SB-5007). Fails closed either way.
+   wchar_t wbuf[MAX_PATH] = { };
+   const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", wbuf, MAX_PATH);
    if (n == 0 || n >= MAX_PATH)
       return std::string();
-   return std::string(buf) + "\\Scorbit\\vpx.sock";
+   const std::string base = ToUtf8(wbuf, static_cast<int>(n));
+   if (base.empty())
+      return std::string();
+   return base + "\\Scorbit\\vpx.sock";
 #elif defined(__APPLE__)
    char buf[1024] = { };
    const size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, buf, sizeof(buf));
@@ -255,15 +294,42 @@ bool SocketWorker::ReadToken(std::string& token)
 {
    // Read immediately before every connection attempt: the daemon rotates the
    // token when it rebinds, and a cached one would fail the next handshake.
+   char buf[256] = { };
+   size_t n = 0;
+#ifdef _WIN32
+   // Opened wide: m_tokenPath is UTF-8, and the narrow CRT would read it as the ANSI
+   // code page — missing the file for exactly the non-ASCII profile names the wide
+   // path resolution above exists to fix.
+   //
+   // FILE_SHARE_DELETE is not incidental. The daemon replaces the token by writing a
+   // .tmp and calling MoveFileExW(MOVEFILE_REPLACE_EXISTING); the CRT's fopen omits
+   // that share, so a daemon rebinding inside this open would fail its own Initialize
+   // with a sharing violation. POSIX rename over an open file has no such problem.
+   const std::wstring wpath = ToWide(m_tokenPath);
+   const HANDLE h = wpath.empty()
+      ? INVALID_HANDLE_VALUE
+      : CreateFileW(wpath.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+   if (h == INVALID_HANDLE_VALUE)
+   {
+      LogOnce(LOG_LEVEL_INFO, "Socket: no token at " + m_tokenPath + ", waiting for the daemon");
+      return false;
+   }
+   DWORD got = 0;
+   if (ReadFile(h, buf, static_cast<DWORD>(sizeof(buf) - 1), &got, nullptr))
+      n = got;
+   CloseHandle(h);
+#else
    FILE* f = fopen(m_tokenPath.c_str(), "rb");
    if (f == nullptr)
    {
       LogOnce(LOG_LEVEL_INFO, "Socket: no token at " + m_tokenPath + ", waiting for the daemon");
       return false;
    }
-   char buf[256] = { };
-   const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+   n = fread(buf, 1, sizeof(buf) - 1, f);
    fclose(f);
+#endif
 
    token = Trim(std::string(buf, n));
    if (token.size() != TOKEN_CHARS)
