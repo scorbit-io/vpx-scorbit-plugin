@@ -7,6 +7,7 @@
 #include "qrcodegen.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <cstdio>
 #include <filesystem>
@@ -154,8 +155,15 @@ Scorbit::~Scorbit()
                done->set_exception(std::current_exception());
             }
          }).detach();
-      if (ready.wait_for(std::chrono::seconds(2)) == std::future_status::ready)
+      // At quit, exit() follows and would tear the SDK's statics down under that thread.
+      const auto wait = m_quitting ? std::chrono::seconds(5) : std::chrono::seconds(2);
+      if (ready.wait_for(wait) == std::future_status::ready)
          ready.get();
+      else if (m_quitting)
+      {
+         LOGE("~Scorbit: SDK teardown still running at quit, exiting without static teardown"s);
+         std::_Exit(0);
+      }
    }
    catch (const std::exception& e)
    {

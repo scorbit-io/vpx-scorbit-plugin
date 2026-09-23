@@ -429,6 +429,8 @@ static void UnloadOnQuit()
    if (msgApi == nullptr)
       return;
    LOGI("Scorbit plugin unloading at quit: VPX did not unload it"s);
+   if (scorbit)
+      scorbit->PrepareForQuit();
    ScorbitPluginUnload();
 }
 
