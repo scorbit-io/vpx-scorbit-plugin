@@ -58,13 +58,23 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 ```
 
 Windows builds the SDK's dependencies through vcpkg, using `vcpkg.json` at the
-repository root (nothing reads it on other platforms). Check vcpkg out at that
-file's `builtin-baseline`, then from PowerShell. The Visual Studio generator
-finds MSVC itself, so no developer shell is needed:
+repository root (nothing reads it on other platforms). From PowerShell, check
+vcpkg out at that file's `builtin-baseline` and bootstrap it, since a fresh
+checkout has no `vcpkg.exe` for the toolchain to run:
+
+```powershell
+$baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+git clone https://github.com/microsoft/vcpkg.git ../vcpkg
+git -C ../vcpkg checkout $baseline
+../vcpkg/bootstrap-vcpkg.bat -disableMetrics
+```
+
+Then configure and build. The Visual Studio generator finds MSVC itself, so no
+developer shell is needed:
 
 ```powershell
 cmake -S . -B build -A x64 `
-  "-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake" `
+  "-DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
 cmake --build build --config Release
 ```
