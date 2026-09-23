@@ -16,7 +16,16 @@ endif()
 set(SCORBIT_SDK_ROOT "" CACHE PATH "Prebuilt scorbit_sdk root; empty builds it from source")
 # Pinned to a main commit rather than the 2.0.4 tag: 2.0.4 fails to link on macOS
 # (fmt 12.1 symbols missing from libscorbit_sdk). Move to the next tag once released.
-set(SCORBIT_SDK_GIT_TAG "c2f2045abba6ca5f8cbc911a3ca40ee9a3a1b43b" CACHE STRING "scorbit_sdk tag or commit to build when SCORBIT_SDK_ROOT is empty")
+set(_scorbit_sdk_default_tag "f62880a2e5b9d5507e6c57a161640899c62ec73c")
+# A CACHE default never reaches a tree that already cached an earlier one, so a tree
+# still holding a retired default is moved forward; any other override is kept.
+# When moving the default, add the old one here.
+set(_scorbit_sdk_retired_tags "c2f2045abba6ca5f8cbc911a3ca40ee9a3a1b43b")
+if(SCORBIT_SDK_GIT_TAG IN_LIST _scorbit_sdk_retired_tags)
+   message(STATUS "SCORBIT_SDK_GIT_TAG: moving retired default ${SCORBIT_SDK_GIT_TAG} to ${_scorbit_sdk_default_tag}")
+   set(SCORBIT_SDK_GIT_TAG "${_scorbit_sdk_default_tag}" CACHE STRING "scorbit_sdk tag or commit to build when SCORBIT_SDK_ROOT is empty" FORCE)
+endif()
+set(SCORBIT_SDK_GIT_TAG "${_scorbit_sdk_default_tag}" CACHE STRING "scorbit_sdk tag or commit to build when SCORBIT_SDK_ROOT is empty")
 
 # Secrets come from the environment or an untracked .env file (see .env.example);
 # neither is committed. SCORBIT_PROVIDER_KEY is compiled in as the default
@@ -97,10 +106,9 @@ else()
       GITHUB_REPOSITORY scorbit-io/scorbit_sdk
       GIT_TAG ${SCORBIT_SDK_GIT_TAG}
       OPTIONS
+         # Only options the SDK actually defines. CPM passes unknown ones through
+         # silently, so a stale name reads as a setting while doing nothing.
          "SCORBIT_SDK_SHARED ON"
-         "SCORBIT_SDK_BUILD_TESTS OFF"
-         "SCORBIT_SDK_BUILD_EXAMPLES OFF"
-         "SCORBIT_SDK_ENABLE_NFC_TPM OFF"
    )
 endif()
 
