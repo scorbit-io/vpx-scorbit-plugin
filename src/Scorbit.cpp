@@ -7,6 +7,7 @@
 #include "qrcodegen.h"
 
 #include <chrono>
+#include <exception>
 #include <cstdio>
 #include <filesystem>
 #include <future>
@@ -127,21 +128,34 @@ Scorbit::~Scorbit()
    auto h = static_cast<sb_game_handle_t>(m_handle);
    m_handle = nullptr;
 
-   if (m_sessionActive)
-      sb_set_game_finished(h);
+   // A destructor must not throw, and an SDK reached after its own statics are gone
+   // does (SB-5039). Backstop only: the exit sentinel is meant to keep us from here.
+   try
+   {
+      if (m_sessionActive)
+         sb_set_game_finished(h);
 
-   sb_reset_logger();
+      sb_reset_logger();
 
-   // The SDK flushes pending network traffic on destruction, which may block:
-   // give it a bounded delay, then leave the thread to finish on its own.
-   auto done = std::make_shared<std::promise<void>>();
-   auto ready = done->get_future();
-   std::thread([h, done]()
-      {
-         sb_destroy_game_state(h);
-         done->set_value();
-      }).detach();
-   ready.wait_for(std::chrono::seconds(2));
+      // The SDK flushes pending network traffic on destruction, which may block:
+      // give it a bounded delay, then leave the thread to finish on its own.
+      auto done = std::make_shared<std::promise<void>>();
+      auto ready = done->get_future();
+      std::thread([h, done]()
+         {
+            sb_destroy_game_state(h);
+            done->set_value();
+         }).detach();
+      ready.wait_for(std::chrono::seconds(2));
+   }
+   catch (const std::exception& e)
+   {
+      LOGE("~Scorbit: SDK teardown threw, handle leaked: "s + e.what());
+   }
+   catch (...)
+   {
+      LOGE("~Scorbit: SDK teardown threw, handle leaked"s);
+   }
 }
 
 bool Scorbit::DoInit(int machineId, const string& version, const string& uuidOverride)

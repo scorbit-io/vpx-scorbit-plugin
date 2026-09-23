@@ -4,6 +4,7 @@
 #include "Scorbit.h"
 #include "DmdTap.h"
 #include "DmdOverlay.h"
+#include "QuitHook.h"
 #include "SocketWorker.h"
 #include "VpxSessionSource.h"
 
@@ -418,12 +419,26 @@ static void OnControllersChanged()
 
 using namespace Scorbit;
 
+MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload();
+
+// VPX's application quit exits without unloading plugins. Static teardown then runs
+// libpinmame's exit-time controller broadcast into ~Scorbit after the SDK's statics
+// are gone (SB-5039). Unload while the process is still whole.
+static void UnloadOnQuit()
+{
+   if (msgApi == nullptr)
+      return;
+   LOGI("Scorbit plugin unloading at quit: VPX did not unload it"s);
+   ScorbitPluginUnload();
+}
+
 MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const MsgPluginAPI* api)
 {
    msgApi = api;
    endpointId = sessionId;
    LPISetup(endpointId, msgApi);
    LOGI("Scorbit plugin loading"s);
+   InstallQuitHook(UnloadOnQuit);
 
    msgApi->BroadcastMsg(endpointId, getVpxApiId = msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_MSG_GET_API), &vpxApi);
 
@@ -495,7 +510,10 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
 MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
 {
+   if (msgApi == nullptr)
+      return;
    LOGI("Scorbit plugin unloading"s);
+   RemoveQuitHook();
 
    StopPoll();
    logDrainActive = false;
