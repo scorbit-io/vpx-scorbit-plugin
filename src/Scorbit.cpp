@@ -7,6 +7,8 @@
 #include "qrcodegen.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <exception>
 #include <cstdio>
 #include <filesystem>
 #include <future>
@@ -127,21 +129,50 @@ Scorbit::~Scorbit()
    auto h = static_cast<sb_game_handle_t>(m_handle);
    m_handle = nullptr;
 
-   if (m_sessionActive)
-      sb_set_game_finished(h);
+   // A destructor must not throw, and an SDK reached after its own statics are gone
+   // does (SB-5039). Backstop only: the quit hook is meant to keep us from here.
+   try
+   {
+      if (m_sessionActive)
+         sb_set_game_finished(h);
 
-   sb_reset_logger();
+      sb_reset_logger();
 
-   // The SDK flushes pending network traffic on destruction, which may block:
-   // give it a bounded delay, then leave the thread to finish on its own.
-   auto done = std::make_shared<std::promise<void>>();
-   auto ready = done->get_future();
-   std::thread([h, done]()
+      // The SDK flushes pending network traffic on destruction, which may block:
+      // give it a bounded delay, then leave the thread to finish on its own.
+      auto done = std::make_shared<std::promise<void>>();
+      auto ready = done->get_future();
+      std::thread([h, done]()
+         {
+            // Escaping a thread's entry point is std::terminate: hand it back instead.
+            try
+            {
+               sb_destroy_game_state(h);
+               done->set_value();
+            }
+            catch (...)
+            {
+               done->set_exception(std::current_exception());
+            }
+         }).detach();
+      // At quit, exit() follows and would tear the SDK's statics down under that thread.
+      const auto wait = m_quitting ? std::chrono::seconds(5) : std::chrono::seconds(2);
+      if (ready.wait_for(wait) == std::future_status::ready)
+         ready.get();
+      else if (m_quitting)
       {
-         sb_destroy_game_state(h);
-         done->set_value();
-      }).detach();
-   ready.wait_for(std::chrono::seconds(2));
+         LOGE("~Scorbit: SDK teardown still running at quit, exiting without static teardown"s);
+         std::_Exit(0);
+      }
+   }
+   catch (const std::exception& e)
+   {
+      LOGE("~Scorbit: SDK teardown threw, handle leaked: "s + e.what());
+   }
+   catch (...)
+   {
+      LOGE("~Scorbit: SDK teardown threw, handle leaked"s);
+   }
 }
 
 bool Scorbit::DoInit(int machineId, const string& version, const string& uuidOverride)

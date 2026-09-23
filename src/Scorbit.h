@@ -35,6 +35,9 @@ public:
 
    void HandleEvent(const void* event);
 
+   // The process exits once destruction returns: SDK teardown must finish first (SB-5039).
+   void PrepareForQuit() { m_quitting = true; }
+
 private:
    void ApplyScores(double s1, double s2, double s3, double s4, int numPlayers);
    void MaybeShowPairing();
@@ -48,6 +51,7 @@ private:
    std::atomic<bool> m_sessionActive { false };
    std::atomic<bool> m_paired { false };
    bool m_qrShown = false;
+   bool m_quitting = false;
    int m_machineId = 0;
 };
 
