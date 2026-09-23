@@ -57,6 +57,22 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
   -DLibArchive_ROOT=$(brew --prefix libarchive)
 ```
 
+Windows builds the SDK's dependencies through vcpkg, using `vcpkg.json` at the
+repository root (nothing reads it on other platforms). Check vcpkg out at that
+file's `builtin-baseline`, then from a shell that can find MSVC:
+
+```sh
+cmake -S . -B build ^
+  -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake ^
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+cmake --build build --config Release
+```
+
+The triplet must be `x64-windows-static-md`, not `x64-windows-static`: the
+plugin and the SDK link the dynamic CRT. The first build compiles Boost, curl,
+OpenSSL and libarchive and takes a while; CI caches them. CI also uploads the
+staged Windows plugin as a workflow artifact.
+
 To use a prebuilt or installed SDK instead of building it:
 
 ```sh
