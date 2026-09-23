@@ -3,7 +3,8 @@
   "name": "vpx-scorbit-plugin",
   "$comment": [
     "Windows dependencies of the full plugin build, all of them the SDK's: the plugin fetches scorbit_sdk, which needs these. Inert on Linux and macOS, where nothing passes vcpkg's toolchain file.",
-    "Ports and builtin-baseline mirror scorbit_sdk's own vcpkg.json. Re-check them when SCORBIT_SDK_GIT_TAG moves: a Boost header the SDK includes but no port here provides makes the SDK fetch Boost itself, and that copy collides with vcpkg's targets.",
+    "Ports and builtin-baseline are copied from scorbit_sdk main's vcpkg.json. The SDK revision pinned by SCORBIT_SDK_GIT_TAG predates that file and has no manifest of its own, so the Boost ports were checked against the pinned source tree instead: every Boost header family it includes has a port here.",
+    "Re-check when SCORBIT_SDK_GIT_TAG moves. A Boost header the SDK includes but no port here provides makes the SDK fetch Boost itself, and that copy collides with vcpkg's targets.",
     "Use triplet x64-windows-static-md, not x64-windows-static. The plugin and the SDK link the dynamic CRT."
   ],
   "builtin-baseline": "e6f9e70a29a3e80a1fc510d8503304315447112f",

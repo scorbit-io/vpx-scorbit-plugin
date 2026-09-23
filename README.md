@@ -59,11 +59,12 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 
 Windows builds the SDK's dependencies through vcpkg, using `vcpkg.json` at the
 repository root (nothing reads it on other platforms). Check vcpkg out at that
-file's `builtin-baseline`, then from a shell that can find MSVC:
+file's `builtin-baseline`, then from PowerShell. The Visual Studio generator
+finds MSVC itself, so no developer shell is needed:
 
-```sh
-cmake -S . -B build ^
-  -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake ^
+```powershell
+cmake -S . -B build -A x64 `
+  "-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
 cmake --build build --config Release
 ```

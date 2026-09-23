@@ -142,7 +142,7 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          cmake -S . -B build `
+          cmake -S . -B build -A x64 `
             "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_TOOLCHAIN" `
             "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET" `
             -DSCORBIT_SDK_PRODUCTION=OFF
