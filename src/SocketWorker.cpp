@@ -570,7 +570,7 @@ bool SocketWorker::ReadMessage(Wire::Message& out, int timeoutMs)
    return true;
 }
 
-bool SocketWorker::SendMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload)
+bool SocketWorker::SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload)
 {
    const std::vector<uint8_t> bytes = Wire::EncodeMessage(type, flags, seq, payload);
    if (bytes.empty())
@@ -587,13 +587,13 @@ bool SocketWorker::SendError(uint16_t type, uint32_t seq, uint16_t code, const s
    Wire::ErrorPayload e;
    e.code = code;
    e.reason = reason;
-   return SendMessage(type, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, seq, Wire::Encode(e));
+   return SendWireMessage(type, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, seq, Wire::Encode(e));
 }
 
 bool SocketWorker::Exchange(uint16_t type, const std::vector<uint8_t>& payload, int timeoutMs, Wire::Message& reply)
 {
    const uint32_t seq = ++m_seq;
-   if (!SendMessage(type, 0, seq, payload))
+   if (!SendWireMessage(type, 0, seq, payload))
    {
       Log(LOG_LEVEL_WARN, "Socket: sending "s + Wire::TypeName(type) + " failed");
       return false;
@@ -806,7 +806,7 @@ void SocketWorker::Serve()
 
    // Stopping on purpose: tell the daemon rather than letting it discover a
    // closed socket. Bye expects no response.
-   SendMessage(Wire::TYPE_BYE, 0, ++m_seq, Wire::Encode(Wire::Bye { "plugin unloading" }));
+   SendWireMessage(Wire::TYPE_BYE, 0, ++m_seq, Wire::Encode(Wire::Bye { "plugin unloading" }));
    Log(LOG_LEVEL_INFO, "Socket: sent Bye");
 }
 
@@ -878,7 +878,7 @@ bool SocketWorker::AnswerFrame(const Wire::Message& msg)
          + " does not fit the one mebibyte message bound");
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "frame exceeds the message bound");
    }
-   return SendMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, payload);
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, payload);
 }
 
 bool SocketWorker::AnswerPing(const Wire::Message& msg)
@@ -892,7 +892,7 @@ bool SocketWorker::AnswerPing(const Wire::Message& msg)
    pong.renderedFrame = session.renderedFrame;
    pong.playerRunning = session.playerRunning ? 1 : 0;
    pong.writesSupported = 0; // memory writes arrive in slice 2
-   return SendMessage(Wire::TYPE_PONG, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(pong));
+   return SendWireMessage(Wire::TYPE_PONG, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(pong));
 }
 
 }

@@ -63,6 +63,17 @@ To use a prebuilt or installed SDK instead of building it:
 cmake -B build -DSCORBIT_SDK_ROOT=/path/to/scorbit_sdk
 ```
 
+To build and test only the transport — the wire protocol, socket worker and wire
+dump — with no SDK, no VPX headers and no network fetch:
+
+```sh
+cmake -B build -DSCORBIT_TRANSPORT_ONLY=ON
+cmake --build build -j && (cd build && ctest --output-on-failure)
+```
+
+That is what CI builds on every platform in `plugin.cfg`. It needs neither
+OpenSSL nor libarchive, because it never reaches the SDK.
+
 The build stages a complete plugin folder at `build/stage/scorbit/`: the
 plugin library, `plugin.cfg`, the SDK library and `assets/`.
 

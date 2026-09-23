@@ -1,0 +1,75 @@
+name: CI
+
+# Compile gate for the transport: the wire protocol, the socket worker and the wire
+# dump, on every platform plugin.cfg declares. It exists because the Windows branch
+# of SocketWorker shipped without ever being compiled anywhere, and nothing in this
+# repo could have caught that.
+#
+# Deliberately does NOT build the plugin itself yet. SCORBIT_TRANSPORT_ONLY skips the
+# scorbit_sdk fetch, which needs OpenSSL and libarchive on the host plus a network
+# round trip. The full plugin build is a second job, once this one is reliably green.
+#
+# No secrets are used or needed. SCORBIT_PROVIDER_KEY and SCORBIT_SDK_ENCRYPT_SECRET
+# only make CMake warn, and the transport does not touch either. That matters on a
+# public repo: a pull request from a fork must never be able to reach a secret.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transport:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform reports. One red leg should not hide the state of the others,
+      # which is the whole point of a matrix on a repo with no other gate.
+      fail-fast: false
+      matrix:
+        include:
+          # Runner choices follow vpinball/pinmame's libpinmame.yml, the closest
+          # analogue in the programme. Its matrix covers twelve targets including
+          # Android, iOS and tvOS; this one covers the five in plugin.cfg.
+          #
+          # pinmame uses windows-2025-vs2026 to match the toolchain VPX itself is
+          # built with. windows-2025 is used here because it is a standard label with
+          # no availability question; switch if the VS version ever matters.
+          - { os: windows-2025,     platform: windows, arch: x64,     test: true }
+          - { os: ubuntu-24.04,     platform: linux,   arch: x64,     test: true }
+          # Native arm64, not cross-compiled, so the tests actually run on the target.
+          - { os: ubuntu-24.04-arm, platform: linux,   arch: aarch64, test: true }
+          - { os: macos-15,         platform: macos,   arch: arm64,   test: true }
+          # macos-15 is arm64, so the x64 leg cross-compiles and cannot run what it
+          # builds. Compile-only, and honest about it rather than relying on Rosetta
+          # being present.
+          - { os: macos-15,         platform: macos,   arch: x64,     test: false,
+              cmake_extra: "-DCMAKE_OSX_ARCHITECTURES=x86_64" }
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DSCORBIT_TRANSPORT_ONLY=ON
+          ${{ matrix.cmake_extra }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # socket_worker_test is guarded behind NOT WIN32 in test/CMakeLists.txt, because
+      # TestPeer speaks POSIX sockets directly. On Windows this runs wire_codec alone,
+      # which is still the first time that codec has met MSVC.
+      - name: Test
+        if: matrix.test
+        run: ctest --test-dir build --build-config Release --output-on-failure
