@@ -122,6 +122,13 @@ add_library(scorbit-transport STATIC
 )
 target_include_directories(scorbit-transport PUBLIC src)
 target_compile_options(scorbit-transport PRIVATE ${SCORBIT_WARNINGS})
+if(MSVC)
+   # getenv and fopen in WireDump draw C4996, MSVC's deprecation nag for the CRT.
+   # Both calls are checked before use, and the _s replacements it suggests are
+   # Microsoft-only, so taking them would put platform branching into a file that
+   # has none. scorbitd sets the same definition for every MSVC target.
+   target_compile_definitions(scorbit-transport PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(scorbit-transport PUBLIC Threads::Threads)
 if(WIN32)
