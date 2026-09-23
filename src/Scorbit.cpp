@@ -129,7 +129,7 @@ Scorbit::~Scorbit()
    m_handle = nullptr;
 
    // A destructor must not throw, and an SDK reached after its own statics are gone
-   // does (SB-5039). Backstop only: the exit sentinel is meant to keep us from here.
+   // does (SB-5039). Backstop only: the quit hook is meant to keep us from here.
    try
    {
       if (m_sessionActive)
@@ -143,10 +143,19 @@ Scorbit::~Scorbit()
       auto ready = done->get_future();
       std::thread([h, done]()
          {
-            sb_destroy_game_state(h);
-            done->set_value();
+            // Escaping a thread's entry point is std::terminate: hand it back instead.
+            try
+            {
+               sb_destroy_game_state(h);
+               done->set_value();
+            }
+            catch (...)
+            {
+               done->set_exception(std::current_exception());
+            }
          }).detach();
-      ready.wait_for(std::chrono::seconds(2));
+      if (ready.wait_for(std::chrono::seconds(2)) == std::future_status::ready)
+         ready.get();
    }
    catch (const std::exception& e)
    {

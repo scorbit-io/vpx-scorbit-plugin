@@ -1,3 +1,5 @@
+// license:GPLv3+
+
 #include "QuitHook.h"
 
 #import <AppKit/AppKit.h>
