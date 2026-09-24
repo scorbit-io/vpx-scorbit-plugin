@@ -128,6 +128,17 @@ private:
 
    bool ReadToken(std::string& token);
    bool Connect();
+   enum class ConnectOutcome { Connected, Stopped, NoSuchPath, Refused, NotAccepting, Failed };
+   struct ConnectResult
+   {
+      ConnectOutcome outcome;
+      int error; // errno, or a WSA code on Windows; 0 when there is none
+   };
+   // Connects a nonblocking socket, waiting in stop-aware slices for one that is in progress.
+   ConnectResult ConnectNonBlocking(uintptr_t socket, const void* addr, int addrLen);
+   std::string DescribeConnectFailure(const ConnectResult& result) const;
+   // False only when the endpoint path is definitely absent.
+   bool PathExists() const;
    void Disconnect();
    bool Handshake();
    void Serve();

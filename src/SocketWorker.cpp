@@ -7,6 +7,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <system_error>
 
 using namespace std::string_literals;
 
@@ -43,6 +44,8 @@ constexpr int RECONNECT_INTERVAL_MS = 1000;
 // including Windows where there is no self pipe to wake a poll early.
 constexpr int POLL_SLICE_MS = 100;
 constexpr int HELLO_TIMEOUT_MS = 1000;
+// A nonblocking connect still in progress after this is treated as a daemon not accepting.
+constexpr int CONNECT_TIMEOUT_MS = 1000;
 constexpr int DECLARE_TIMEOUT_MS = 1000;
 constexpr int PONG_TIMEOUT_MS = 2000;
 constexpr int SEND_TIMEOUT_MS = 1000;
@@ -368,24 +371,42 @@ bool SocketWorker::Connect()
       return false;
    }
 
-   if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
+   // Nonblocking before connect: on Linux a blocking connect to a listener whose
+   // backlog is full waits until it accepts, which a stalled daemon never does,
+   // and Stop() would then never join this thread (SB-5083).
+#ifdef _WIN32
+   u_long nonblocking = 1;
+   const bool nonblockingSet = ioctlsocket(s, FIONBIO, &nonblocking) == 0;
+#else
+   const int flags = fcntl(s, F_GETFL, 0);
+   const bool nonblockingSet = flags >= 0 && fcntl(s, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
+   if (!nonblockingSet)
    {
-      LogOnce(LOG_LEVEL_INFO, "Socket: no daemon at " + m_socketPath + ", retrying every second");
+      const int error = SOCKET_ERRNO;
 #ifdef _WIN32
       closesocket(s);
 #else
       close(s);
 #endif
+      LogOnce(LOG_LEVEL_ERROR, "Socket: cannot make the socket nonblocking (" + std::to_string(error) + ')');
       return false;
    }
 
+   const ConnectResult result = ConnectNonBlocking(static_cast<uintptr_t>(s), &addr, static_cast<int>(sizeof(addr)));
+   if (result.outcome != ConnectOutcome::Connected)
+   {
 #ifdef _WIN32
-   u_long nonblocking = 1;
-   ioctlsocket(s, FIONBIO, &nonblocking);
+      closesocket(s);
 #else
-   const int flags = fcntl(s, F_GETFL, 0);
-   if (flags >= 0)
-      fcntl(s, F_SETFL, flags | O_NONBLOCK);
+      close(s);
+#endif
+      if (result.outcome != ConnectOutcome::Stopped)
+         LogOnce(LOG_LEVEL_INFO, DescribeConnectFailure(result));
+      return false;
+   }
+
+#ifndef _WIN32
    #ifdef SO_NOSIGPIPE
    // macOS has no MSG_NOSIGNAL; without this a daemon that hangs up mid write
    // would take the whole VPX process down with SIGPIPE.
@@ -403,6 +424,120 @@ bool SocketWorker::Connect()
    m_haveDeclared = false;
    m_declared = { };
    return true;
+}
+
+SocketWorker::ConnectResult SocketWorker::ConnectNonBlocking(uintptr_t socket, const void* addr, int addrLen)
+{
+   const socket_t s = static_cast<socket_t>(socket);
+   if (connect(s, static_cast<const sockaddr*>(addr), addrLen) == 0)
+      return { ConnectOutcome::Connected, 0 };
+
+   int error = SOCKET_ERRNO;
+#ifdef _WIN32
+   const bool inProgress = error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
+#else
+   // Linux returns EAGAIN from a nonblocking AF_UNIX connect when the listen queue is
+   // full: the connection was never started, so there is nothing to wait for.
+   if (error == EAGAIN || error == EWOULDBLOCK)
+      return { ConnectOutcome::NotAccepting, error };
+   const bool inProgress = error == EINPROGRESS;
+#endif
+
+   if (inProgress)
+   {
+      const auto deadline = Clock::now() + std::chrono::milliseconds(CONNECT_TIMEOUT_MS);
+      for (;;)
+      {
+         if (!m_running)
+            return { ConnectOutcome::Stopped, 0 };
+         const int left = MillisUntil(deadline);
+         if (left == 0)
+         {
+            // Windows before 10 2004 never reports a failed connect to WSAPoll, so
+            // an absent path can end up here too.
+            return { PathExists() ? ConnectOutcome::NotAccepting : ConnectOutcome::NoSuchPath, 0 };
+         }
+#ifdef _WIN32
+         WSAPOLLFD pfd { };
+         pfd.fd = s;
+         pfd.events = POLLWRNORM;
+         const int rc = WSAPoll(&pfd, 1, left < POLL_SLICE_MS ? left : POLL_SLICE_MS);
+#else
+         pollfd pfd { };
+         pfd.fd = s;
+         pfd.events = POLLOUT;
+         const int rc = poll(&pfd, 1, left < POLL_SLICE_MS ? left : POLL_SLICE_MS);
+         if (rc < 0 && errno == EINTR)
+            continue;
+#endif
+         if (rc < 0)
+            return { ConnectOutcome::Failed, SOCKET_ERRNO };
+         if (rc > 0)
+            break;
+      }
+      int soError = 0;
+#ifdef _WIN32
+      int soLen = static_cast<int>(sizeof(soError));
+      const int got = getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &soLen);
+#else
+      socklen_t soLen = sizeof(soError);
+      const int got = getsockopt(s, SOL_SOCKET, SO_ERROR, &soError, &soLen);
+#endif
+      if (got != 0)
+         return { ConnectOutcome::Failed, SOCKET_ERRNO };
+      if (soError == 0)
+         return { ConnectOutcome::Connected, 0 };
+      error = soError;
+   }
+
+   // Decided by looking at the path, not the errno: that holds on every platform,
+   // including Windows, where the code for a missing AF_UNIX path is not measured.
+#ifdef _WIN32
+   const bool refused = error == WSAECONNREFUSED;
+#else
+   const bool refused = error == ECONNREFUSED;
+#endif
+   if (!PathExists())
+      return { ConnectOutcome::NoSuchPath, error };
+   if (refused)
+      return { ConnectOutcome::Refused, error };
+   return { ConnectOutcome::Failed, error };
+}
+
+bool SocketWorker::PathExists() const
+{
+#ifdef _WIN32
+   // Only a definite "not there" counts as absent; access denied means something is.
+   const std::wstring wpath = ToWide(m_socketPath);
+   if (wpath.empty() || GetFileAttributesW(wpath.c_str()) != INVALID_FILE_ATTRIBUTES)
+      return true;
+   const DWORD e = GetLastError();
+   return e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND;
+#else
+   // stat, not lstat: a symlink to a socket that is gone is as absent as no file.
+   struct stat st { };
+   return stat(m_socketPath.c_str(), &st) == 0 || errno != ENOENT;
+#endif
+}
+
+std::string SocketWorker::DescribeConnectFailure(const ConnectResult& result) const
+{
+   const std::string code = result.error == 0 ? std::string()
+      : " (" + std::system_category().message(result.error) + ", error " + std::to_string(result.error) + ')';
+   switch (result.outcome)
+   {
+   case ConnectOutcome::NoSuchPath:
+      return "Socket: nothing at " + m_socketPath + ", the daemon is not running; retrying every second";
+   case ConnectOutcome::Refused:
+      // macOS reports a full listen queue this way too, so a live daemon stays possible.
+      return "Socket: " + m_socketPath + " refused the connection" + code
+         + ": a stale socket from a daemon that exited, or a daemon that is not accepting; retrying every second";
+   case ConnectOutcome::NotAccepting:
+      return "Socket: a daemon is listening at " + m_socketPath + " but not accepting connections" + code
+         + "; retrying every second";
+   default:
+      return "Socket: cannot connect to " + m_socketPath + code + "; retrying every second";
+   }
 }
 
 void SocketWorker::Disconnect()

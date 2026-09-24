@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 #include <unistd.h>
 
 using namespace Scorbit;
@@ -765,6 +766,187 @@ void TestHandshakeAgainstCapturedAck()
 
 }
 
+// Collects the worker's log so a test can wait for a line and read it back.
+class LogCapture final
+{
+public:
+   SocketWorker::LogFn Fn()
+   {
+      return [this](int, const std::string& message)
+      {
+         std::lock_guard lock(m_mutex);
+         m_lines.push_back(message);
+      };
+   }
+
+   // The first line containing needle, or empty after timeoutMs.
+   std::string WaitFor(const std::string& needle, int timeoutMs)
+   {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+      while (std::chrono::steady_clock::now() < deadline)
+      {
+         {
+            std::lock_guard lock(m_mutex);
+            for (const std::string& line : m_lines)
+               if (line.find(needle) != std::string::npos)
+                  return line;
+         }
+         std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      return { };
+   }
+
+   std::string WaitForAny(const std::vector<std::string>& needles, int timeoutMs)
+   {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+      while (std::chrono::steady_clock::now() < deadline)
+      {
+         for (const std::string& needle : needles)
+            if (Any(needle))
+               return needle;
+         std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      return { };
+   }
+
+   bool Any(const std::string& needle)
+   {
+      std::lock_guard lock(m_mutex);
+      for (const std::string& line : m_lines)
+         if (line.find(needle) != std::string::npos)
+            return true;
+      return false;
+   }
+
+private:
+   std::mutex m_mutex;
+   std::vector<std::string> m_lines;
+};
+
+SocketWorkerConfig MakeConfigAt(const std::string& dir)
+{
+   SocketWorkerConfig cfg;
+   cfg.socketPath = dir + "/vpx.sock";
+   cfg.tokenPath = dir + "/vpx.token";
+   cfg.pluginVersion = "0.1.0";
+   cfg.pluginApiCommit = "0bc9838ed5f1bbac869efdfb6e785b829a541d3f";
+   return cfg;
+}
+
+int BindUnix(const std::string& path)
+{
+   const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+   sockaddr_un addr { };
+   addr.sun_family = AF_UNIX;
+   memcpy(addr.sun_path, path.c_str(), path.size());
+   if (fd < 0 || bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
+   {
+      if (fd >= 0)
+         close(fd);
+      return -1;
+   }
+   return fd;
+}
+
+// Nothing at the path: the one case where "the daemon is not running" is true.
+void TestConnectNoSuchPath()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+
+   FakeSource source;
+   LogCapture log;
+   SocketWorker worker(source, MakeConfigAt(dir), log.Fn());
+   worker.Start();
+   CHECK_MSG(!log.WaitFor("nothing at " + dir + "/vpx.sock", WAIT_MS).empty(), "missing path not reported as such");
+   worker.Stop();
+   CHECK(!log.Any("refused") && !log.Any("not accepting"));
+   rmdir(dir.c_str());
+}
+
+// A socket file nobody listens on, as a daemon that exited leaves behind.
+void TestConnectRefused()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   const std::string path = dir + "/vpx.sock";
+   const int bound = BindUnix(path);
+   CHECK(bound >= 0);
+
+   FakeSource source;
+   LogCapture log;
+   SocketWorker worker(source, MakeConfigAt(dir), log.Fn());
+   worker.Start();
+   const std::string line = log.WaitFor("refused the connection", WAIT_MS);
+   CHECK_MSG(!line.empty(), "stale socket not reported as refused");
+   CHECK_MSG(line.find("error ") != std::string::npos, "no error code in '" + line + "'");
+   worker.Stop();
+   CHECK(!log.Any("nothing at"));
+
+   if (bound >= 0)
+      close(bound);
+   unlink(path.c_str());
+   rmdir(dir.c_str());
+}
+
+// SB-4692's daemon: listening, never accepting, queue already full. A blocking
+// connect waits forever for this on Linux, so Stop() would never return (SB-5083).
+void TestConnectToListenerThatNeverAccepts()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   const std::string path = dir + "/vpx.sock";
+   const int listener = BindUnix(path);
+   CHECK(listener >= 0 && listen(listener, 1) == 0);
+
+   // Fill the queue the way earlier unaccepted connections would.
+   sockaddr_un addr { };
+   addr.sun_family = AF_UNIX;
+   memcpy(addr.sun_path, path.c_str(), path.size());
+   std::vector<int> queued;
+   for (int i = 0; i < 64; i++)
+   {
+      const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+      if (fd < 0)
+         break;
+      fcntl(fd, F_SETFL, O_NONBLOCK);
+      if (connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
+      {
+         close(fd);
+         break;
+      }
+      queued.push_back(fd);
+   }
+
+   FakeSource source;
+   LogCapture log;
+   SocketWorker worker(source, MakeConfigAt(dir), log.Fn());
+   worker.Start();
+   // Linux reports a full queue as "not accepting"; macOS refuses it.
+   const std::string line = log.WaitForAny({ "not accepting", "refused the connection" }, WAIT_MS);
+   const bool reported = !line.empty();
+   CHECK_MSG(reported, "a listener that never accepts was not reported");
+
+   const auto before = std::chrono::steady_clock::now();
+   worker.Stop();
+   const auto stopMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - before).count();
+   CHECK_MSG(stopMs < 1500, "Stop() took " + std::to_string(stopMs) + " ms");
+   CHECK(!log.Any("nothing at"));
+
+   for (const int fd : queued)
+      close(fd);
+   if (listener >= 0)
+      close(listener);
+   unlink(path.c_str());
+   rmdir(dir.c_str());
+}
+
 int main()
 {
    TestSession();
@@ -774,5 +956,8 @@ int main()
    TestErrorWithOnlyTheErrorBit();
    TestCapturedWireBytes();
    TestHandshakeAgainstCapturedAck();
+   TestConnectNoSuchPath();
+   TestConnectRefused();
+   TestConnectToListenerThatNeverAccepts();
    return ScorbitTest::Summary("socket_worker_test");
 }
