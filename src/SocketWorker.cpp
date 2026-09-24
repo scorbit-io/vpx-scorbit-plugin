@@ -491,7 +491,12 @@ SocketWorker::ConnectResult SocketWorker::ConnectNonBlocking(uintptr_t socket, c
             return { ConnectOutcome::Connected, 0 };
          // Still pending. Windows before 10 2004 never reports a failed connect to
          // WSAPoll, so an absent path can end up here too.
-         return { PathExists() ? ConnectOutcome::NotAccepting : ConnectOutcome::NoSuchPath, 0 };
+#ifdef _WIN32
+         const int timeoutCode = WSAETIMEDOUT;
+#else
+         const int timeoutCode = ETIMEDOUT;
+#endif
+         return { PathExists() ? ConnectOutcome::NotAccepting : ConnectOutcome::NoSuchPath, timeoutCode };
       }
       error = soError;
    }
