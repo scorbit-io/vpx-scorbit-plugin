@@ -113,7 +113,10 @@ else()
 endif()
 
 if(MSVC)
-   set(SCORBIT_WARNINGS /W4 /Zc:__cplusplus)
+   # Mirror the POSIX set: C4100 is -Wunused-parameter, which POSIX turns off; C4201
+   # (nameless struct/union) needs -pedantic and C4459 (hides a global) -Wshadow,
+   # neither of which POSIX enables. All three fire in VPX and nlohmann headers too.
+   set(SCORBIT_WARNINGS /W4 /Zc:__cplusplus /wd4100 /wd4201 /wd4459)
 else()
    set(SCORBIT_WARNINGS -Wall -Wextra -Wno-unused-parameter)
 endif()
@@ -177,6 +180,10 @@ target_compile_definitions(plugin-scorbit PRIVATE
    "SCORBIT_VPX_PINNED_REVISION=\"${VPX_PINNED_REVISION}\""
 )
 target_link_libraries(plugin-scorbit PRIVATE scorbit-transport scorbit_sdk nlohmann_json::nlohmann_json)
+if(MSVC)
+   # Same reason as scorbit-transport: fopen in DmdTap and Scorbit is checked before use.
+   target_compile_definitions(plugin-scorbit PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 target_compile_options(plugin-scorbit PRIVATE ${SCORBIT_WARNINGS})
 
