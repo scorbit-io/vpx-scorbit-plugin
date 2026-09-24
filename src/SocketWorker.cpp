@@ -446,6 +446,7 @@ SocketWorker::ConnectResult SocketWorker::ConnectNonBlocking(uintptr_t socket, c
    if (inProgress)
    {
       const auto deadline = Clock::now() + std::chrono::milliseconds(CONNECT_TIMEOUT_MS);
+      bool timedOut = false;
       for (;;)
       {
          if (!m_running)
@@ -453,9 +454,8 @@ SocketWorker::ConnectResult SocketWorker::ConnectNonBlocking(uintptr_t socket, c
          const int left = MillisUntil(deadline);
          if (left == 0)
          {
-            // Windows before 10 2004 never reports a failed connect to WSAPoll, so
-            // an absent path can end up here too.
-            return { PathExists() ? ConnectOutcome::NotAccepting : ConnectOutcome::NoSuchPath, 0 };
+            timedOut = true;
+            break;
          }
 #ifdef _WIN32
          WSAPOLLFD pfd { };
@@ -486,7 +486,13 @@ SocketWorker::ConnectResult SocketWorker::ConnectNonBlocking(uintptr_t socket, c
       if (got != 0)
          return { ConnectOutcome::Failed, SOCKET_ERRNO };
       if (soError == 0)
-         return { ConnectOutcome::Connected, 0 };
+      {
+         if (!timedOut)
+            return { ConnectOutcome::Connected, 0 };
+         // Still pending. Windows before 10 2004 never reports a failed connect to
+         // WSAPoll, so an absent path can end up here too.
+         return { PathExists() ? ConnectOutcome::NotAccepting : ConnectOutcome::NoSuchPath, 0 };
+      }
       error = soError;
    }
 
@@ -527,7 +533,7 @@ std::string SocketWorker::DescribeConnectFailure(const ConnectResult& result) co
    switch (result.outcome)
    {
    case ConnectOutcome::NoSuchPath:
-      return "Socket: nothing at " + m_socketPath + ", the daemon is not running; retrying every second";
+      return "Socket: nothing at " + m_socketPath + code + ", the daemon is not running; retrying every second";
    case ConnectOutcome::Refused:
       // macOS reports a full listen queue this way too, so a live daemon stays possible.
       return "Socket: " + m_socketPath + " refused the connection" + code
