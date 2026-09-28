@@ -16,14 +16,15 @@ endif()
 set(SCORBIT_SDK_ROOT "" CACHE PATH "Prebuilt scorbit_sdk root; empty builds it from source")
 # Pinned to a main commit rather than the 2.0.4 tag: 2.0.4 fails to link on macOS
 # (fmt 12.1 symbols missing from libscorbit_sdk). Move to the next tag once released.
-set(_scorbit_sdk_default_tag "8010fc15e0a9662ed41d96cbf745d9377dcb8e97") # same SDK as scorbitd 0.7.2
+set(_scorbit_sdk_default_tag "8ce6eb4f8c6e73ccec0a4c139650da0e0a46214e") # release CRT fix, SB-5150
 # A CACHE default never reaches a tree that already cached an earlier one, so a tree
 # still holding a retired default is moved forward; any other override is kept.
 # When moving the default, add the old one here.
 set(_scorbit_sdk_retired_tags
    "c2f2045abba6ca5f8cbc911a3ca40ee9a3a1b43b"
    "f62880a2e5b9d5507e6c57a161640899c62ec73c"
-   "c0d2f94582b250dde32072edabdf3e4da4fd7d43")
+   "c0d2f94582b250dde32072edabdf3e4da4fd7d43"
+   "8010fc15e0a9662ed41d96cbf745d9377dcb8e97")
 if(SCORBIT_SDK_GIT_TAG IN_LIST _scorbit_sdk_retired_tags)
    message(STATUS "SCORBIT_SDK_GIT_TAG: moving retired default ${SCORBIT_SDK_GIT_TAG} to ${_scorbit_sdk_default_tag}")
    set(SCORBIT_SDK_GIT_TAG "${_scorbit_sdk_default_tag}" CACHE STRING "scorbit_sdk tag or commit to build when SCORBIT_SDK_ROOT is empty" FORCE)
