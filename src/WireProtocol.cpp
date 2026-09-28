@@ -409,4 +409,128 @@ bool Decode(const std::vector<uint8_t>& payload, ErrorPayload& out)
    return r.Ok();
 }
 
+std::vector<uint8_t> Encode(const Subscription& v)
+{
+   if (v.ranges.size() > 0xFFFF)
+      return { };
+   Writer w;
+   w.U16(static_cast<uint16_t>(v.ranges.size()));
+   for (const MemoryRange& range : v.ranges)
+   {
+      w.U32(range.address);
+      w.U32(range.length);
+   }
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, Subscription& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint16_t count = 0;
+   out.ranges.clear();
+   if (!r.U16(count))
+      return false;
+   // Checked before reserving, so a hostile count cannot make us allocate.
+   if (r.Remaining() < static_cast<size_t>(count) * 8)
+      return false;
+   out.ranges.resize(count);
+   for (MemoryRange& range : out.ranges)
+   {
+      r.U32(range.address);
+      r.U32(range.length);
+   }
+   return r.Ok();
+}
+
+std::vector<uint8_t> Encode(const PollReply& v)
+{
+   if (v.blocks.size() > 0xFFFF)
+      return { };
+   Writer w;
+   w.U64(v.frame);
+   w.U8(v.playerRunning);
+   w.U16(static_cast<uint16_t>(v.blocks.size()));
+   for (const MemoryBlock& block : v.blocks)
+   {
+      w.U32(block.address);
+      w.U32(static_cast<uint32_t>(block.bytes.size()));
+      w.Bytes(block.bytes.data(), block.bytes.size());
+   }
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, PollReply& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint16_t count = 0;
+   out.blocks.clear();
+   r.U64(out.frame);
+   r.U8(out.playerRunning);
+   if (!r.U16(count))
+      return false;
+   for (uint16_t i = 0; i < count && r.Ok(); i++)
+   {
+      MemoryBlock block;
+      uint32_t length = 0;
+      r.U32(block.address);
+      if (!r.U32(length) || length > r.Remaining())
+         return false;
+      r.Bytes(block.bytes, length);
+      out.blocks.push_back(std::move(block));
+   }
+   return r.Ok();
+}
+
+std::vector<uint8_t> Encode(const ReadDirectRequest& v)
+{
+   Writer w;
+   w.U32(v.address);
+   w.U32(v.length);
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, ReadDirectRequest& out)
+{
+   Reader r(payload.data(), payload.size());
+   r.U32(out.address);
+   r.U32(out.length);
+   return r.Ok();
+}
+
+std::vector<uint8_t> Encode(const ReadDirectReply& v)
+{
+   if (v.unstableOffsets.size() > 0xFFFF)
+      return { };
+   Writer w;
+   w.U64(v.frame);
+   w.U32(v.address);
+   w.U32(static_cast<uint32_t>(v.bytes.size()));
+   w.U16(static_cast<uint16_t>(v.unstableOffsets.size()));
+   for (const uint32_t offset : v.unstableOffsets)
+      w.U32(offset);
+   w.Bytes(v.bytes.data(), v.bytes.size());
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, ReadDirectReply& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint32_t length = 0;
+   uint16_t unstable = 0;
+   out.unstableOffsets.clear();
+   out.bytes.clear();
+   r.U64(out.frame);
+   r.U32(out.address);
+   r.U32(length);
+   if (!r.U16(unstable) || r.Remaining() < static_cast<size_t>(unstable) * 4)
+      return false;
+   out.unstableOffsets.resize(unstable);
+   for (uint32_t& offset : out.unstableOffsets)
+      r.U32(offset);
+   if (!r.Ok() || length > r.Remaining())
+      return false;
+   r.Bytes(out.bytes, length);
+   return r.Ok();
+}
+
 }
