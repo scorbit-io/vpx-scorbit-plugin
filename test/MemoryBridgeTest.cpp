@@ -9,6 +9,7 @@
 
 #include "Check.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -290,6 +291,104 @@ void TestSnapshotRefreshesEachFrame()
    CHECK_MSG(later.frame > first.frame, "the snapshot was not refreshed per frame");
 }
 
+// Copilot on #14: the worker's deadline must hold while the API thread is mid-read,
+// and what it gave up on must never be installed afterwards.
+void TestDeadlineHoldsDuringASlowRead()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   std::atomic<int> reads { 0 };
+   const MemoryBridge::ReadFn slow = [&memory, &reads](uint32_t a, uint8_t* o, uint32_t s)
+   {
+      reads++;
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      return memory.Read(a, o, s);
+   };
+   bridge.SetGameRunning(true);
+
+   auto timed = [&](auto request)
+   {
+      auto pending = std::async(std::launch::async, request);
+      CHECK(WaitQueued(bridge, 1));
+      reads = 0;
+      // Retried, since a single Service can lose its try_lock to the waiting worker.
+      std::thread api([&]
+         {
+            for (int i = 0; i < 40 && reads == 0 && bridge.QueuedForTest() != 0; i++)
+            {
+               bridge.Service(slow, 1, true, true);
+               std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+         });
+      const auto t0 = std::chrono::steady_clock::now();
+      const Result result = pending.get();
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+      api.join();
+      CHECK_MSG(reads > 0, "the request was never read, so the deadline was not tested");
+      CHECK_MSG(ms < 100, "the worker waited " + std::to_string(ms) + " ms behind a read");
+      return result;
+   };
+
+   Wire::ReadDirectReply out;
+   CHECK(timed([&] { return bridge.ReadDirect(0x0100, 4, out, BUDGET_MS, g_running); }) == Result::Busy);
+
+   std::vector<Wire::MemoryRange> accepted;
+   CHECK(timed([&] { return bridge.Subscribe({ { 0x0100, 8 } }, accepted, BUDGET_MS, g_running); }) == Result::Busy);
+   // The set the daemon was told failed is not the set Poll serves.
+   Wire::PollReply poll;
+   CHECK(bridge.Poll(poll) == Result::Ok);
+   CHECK(poll.blocks.empty());
+}
+
+// Copilot on #14: a request queued when the game ends gets its no-game answer at
+// once, not busy at the end of its budget, since no Service follows OnGameEnd.
+void TestGameEndAnswersTheQueue()
+{
+   MemoryBridge bridge;
+   bridge.SetGameRunning(true);
+   std::vector<Wire::MemoryRange> accepted;
+   Wire::ReadDirectReply out;
+   auto subscribe = std::async(std::launch::async, [&]
+      { return bridge.Subscribe({ { 0x0100, 8 } }, accepted, 2000, g_running); });
+   auto readDirect = std::async(std::launch::async, [&]
+      { return bridge.ReadDirect(0x0100, 4, out, 2000, g_running); });
+   CHECK(WaitQueued(bridge, 2));
+
+   const auto t0 = std::chrono::steady_clock::now();
+   bridge.SetGameRunning(false);
+   CHECK(readDirect.get() == Result::NoGame);
+   CHECK(subscribe.get() == Result::Ok);
+   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+   CHECK(accepted.empty());
+   CHECK(bridge.QueuedForTest() == 0);
+   CHECK_MSG(ms < 50, "queued requests took " + std::to_string(ms) + " ms to learn the game ended");
+}
+
+// Copilot on #14: a chunk is readable only as far as both of its reads got.
+void TestShortSecondReadStops()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   uint32_t calls = 0;
+   const MemoryBridge::ReadFn read = [&](uint32_t a, uint8_t* o, uint32_t s)
+   {
+      const uint32_t n = memory.Read(a, o, s);
+      return ++calls % 2 == 0 ? std::min<uint32_t>(n, 0x80) : n;
+   };
+   bridge.SetGameRunning(true);
+   Wire::ReadDirectReply out;
+   auto pending = std::async(std::launch::async, [&]
+      { return bridge.ReadDirect(0x0100, 0x200, out, 2000, g_running); });
+   CHECK(WaitQueued(bridge, 1));
+   // Until answered: one Service can lose its try_lock. Later ones read nothing.
+   while (pending.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
+      bridge.Service(read, 1, true, true);
+   CHECK(pending.get() == Result::Ok);
+   CHECK(out.bytes.size() == 0x80);
+   CHECK(out.unstableOffsets == std::vector<uint32_t> { 0 });
+   CHECK(calls == 2);
+}
+
 }
 
 int main()
@@ -302,5 +401,8 @@ int main()
    TestBusyWhenTheApiThreadIsSilent();
    TestSnapshotRefreshesEachFrame();
    TestNoGameWhileNothingRenders();
+   TestDeadlineHoldsDuringASlowRead();
+   TestGameEndAnswersTheQueue();
+   TestShortSecondReadStops();
    return ScorbitTest::Summary("memory_bridge_test");
 }

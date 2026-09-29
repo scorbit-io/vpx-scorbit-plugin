@@ -10,10 +10,11 @@
 // of the subscribed ranges that Poll is served from (scorbitd design.md,
 // "Threading and the REQ-8.3 handoff").
 //
-// Service only ever try_locks, so the render path never waits on the worker: a
-// contended frame is skipped and picked up on the next one. Requests are shared
-// with the queue, so one the worker gave up on (timeout, unload) is still safe
-// for the API thread to complete.
+// Service takes the queue with a try_lock, so a contended frame is skipped and
+// picked up on the next one, and reads with the lock released, so a worker at its
+// deadline never waits behind a read. Requests are shared, so one the worker
+// gave up on (timeout, unload) is still safe for the API thread to complete; it
+// is only never installed.
 
 #include "WireProtocol.h"
 
@@ -65,7 +66,8 @@ public:
    // --- API thread ------------------------------------------------------------
 
    // When PinMAME starts or stops running a ROM. Service stops being called once
-   // the player closes, so it cannot be what tells the worker there is no game.
+   // the player closes, so it cannot be what tells the worker there is no game;
+   // stopping also answers whatever is still queued.
    void SetGameRunning(bool running);
 
    // Once per rendered frame.
@@ -90,16 +92,26 @@ private:
       std::vector<Wire::MemoryRange> accepted;
       Wire::ReadDirectReply reply;
       Result result = Result::Busy;
-      std::atomic<bool> done { false };
+
+      // Under m_mutex.
+      bool done = false;
+      bool abandoned = false;   // the worker answered busy; never install it
    };
 
+   using Queue = std::deque<std::shared_ptr<Request>>;
+
    Result Submit(const std::shared_ptr<Request>& request, int budgetMs, const std::atomic<bool>& running);
-   void Answer(Request& request, const ReadFn& read, uint64_t frame, bool gameRunning);
-   void TakeSnapshot(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning);
+   // Reads only; touches no shared state, so it runs without the lock.
+   static void Answer(Request& request, const ReadFn& read, uint64_t frame, bool gameRunning);
+   // Under m_mutex.
+   void Complete(Queue& requests);
+   // Reads only, into m_nextSnapshot; true when every range read in full.
+   bool TakeSnapshot(const ReadFn& read, const std::vector<Wire::MemoryRange>& ranges, uint64_t frame,
+      bool playerRunning, bool gameRunning);
 
    std::mutex m_mutex;
    std::condition_variable m_answered;
-   std::deque<std::shared_ptr<Request>> m_queue;
+   Queue m_queue;
 
    // The subscription and the snapshot of it, under m_mutex. An id ties a
    // snapshot to the subscription it was taken for, so a Poll never answers with
@@ -110,6 +122,7 @@ private:
    bool m_haveSnapshot = false;
    uint64_t m_snapshotId = 0;
    Wire::PollReply m_snapshot;
+   Wire::PollReply m_nextSnapshot;   // API thread only; swapped into m_snapshot
 
    std::atomic<bool> m_gameRunning { false };
 };

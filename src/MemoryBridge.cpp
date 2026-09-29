@@ -113,6 +113,15 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
 {
    {
       std::lock_guard lock(m_mutex);
+      // Checked again here, under the lock SetGameRunning drains the queue with:
+      // a game ending since the caller's check left no Service to answer this.
+      if (!m_gameRunning)
+      {
+         Answer(*request, { }, 0, false);
+         Queue one { request };
+         Complete(one);
+         return request->result;
+      }
       if (m_queue.size() >= QUEUE_LIMIT)
          return Result::Busy;
       m_queue.push_back(request);
@@ -120,28 +129,40 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
 
    // Woken by Service; the short slice is only so a stopping worker notices. A
    // plain sleep would add up to 16 ms per request on Windows' default timer.
+   // Service never reads under the lock, so waking up late is never a read's doing.
    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
    std::unique_lock lock(m_mutex);
    while (!request->done && running && std::chrono::steady_clock::now() < deadline)
       m_answered.wait_for(lock, std::chrono::milliseconds(5));
 
-   // Decided under the lock the API thread drains with: either it finished the
-   // request, or it never will, because the request leaves the queue here.
+   // Decided under the lock Complete runs under: either it finished the request,
+   // or it never will install it. The request may already be out of the queue and
+   // mid-read on the API thread, which is why this marks it rather than erasing only.
    if (request->done)
       return request->result;
+   request->abandoned = true;
    m_queue.erase(std::remove(m_queue.begin(), m_queue.end(), request), m_queue.end());
    return Result::Busy;
 }
 
 void MemoryBridge::SetGameRunning(bool running)
 {
-   std::lock_guard lock(m_mutex);
-   m_gameRunning = running;
-   if (!running)
    {
+      std::lock_guard lock(m_mutex);
+      m_gameRunning = running;
+      if (running)
+         return;
       m_haveSnapshot = false;
       m_snapshot.playerRunning = 0;
+      // No Service is coming to answer these, so answer them now: without a game
+      // nothing is read, and each gets its no-game answer.
+      Queue pending;
+      pending.swap(m_queue);
+      for (const std::shared_ptr<Request>& request : pending)
+         Answer(*request, { }, 0, false);
+      Complete(pending);
    }
+   m_answered.notify_all();
 }
 
 size_t MemoryBridge::QueuedForTest()
@@ -152,21 +173,41 @@ size_t MemoryBridge::QueuedForTest()
 
 void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning)
 {
+   Queue work;
+   std::vector<Wire::MemoryRange> ranges;
+   uint64_t rangesId = 0;
    {
       std::unique_lock lock(m_mutex, std::try_to_lock);
       if (!lock.owns_lock())
          return;
-
       m_gameRunning = gameRunning;
-      for (const std::shared_ptr<Request>& request : m_queue)
-      {
-         Answer(*request, read, frame, gameRunning);
-         request->done = true;
-      }
-      m_queue.clear();
-      TakeSnapshot(read, frame, playerRunning, gameRunning);
+      work.swap(m_queue);
+      ranges = m_ranges;
+      rangesId = m_subscriptionId;
    }
-   // Never blocks: waking a waiting worker is all this does.
+
+   for (const std::shared_ptr<Request>& request : work)
+   {
+      Answer(*request, read, frame, gameRunning);
+      // Snapshot the set this batch installs, so a Poll right after the
+      // Subscribe reply already has it.
+      if (request->kind == Request::Kind::Subscribe && request->subscriptionId > rangesId)
+      {
+         ranges = request->accepted;
+         rangesId = request->subscriptionId;
+      }
+   }
+   const bool haveSnapshot = TakeSnapshot(read, ranges, frame, playerRunning, gameRunning);
+
+   {
+      // Blocking, but the worker only ever holds this for bookkeeping, never a read.
+      std::lock_guard lock(m_mutex);
+      Complete(work);
+      std::swap(m_snapshot, m_nextSnapshot);
+      // Not the installed set if Clear replaced it meanwhile, or its Subscribe was abandoned.
+      m_haveSnapshot = haveSnapshot && rangesId == m_subscriptionId;
+      m_snapshotId = rangesId;
+   }
    m_answered.notify_all();
 }
 
@@ -185,12 +226,6 @@ void MemoryBridge::Answer(Request& request, const ReadFn& read, uint64_t frame, 
             request.accepted.push_back(range);
       }
       request.result = Result::Ok;
-      if (request.subscriptionId > m_subscriptionId)
-      {
-         m_ranges = request.accepted;
-         m_subscriptionId = request.subscriptionId;
-         m_haveSnapshot = false;
-      }
       return;
    }
 
@@ -212,7 +247,8 @@ void MemoryBridge::Answer(Request& request, const ReadFn& read, uint64_t frame, 
       const uint32_t want = std::min(Wire::READ_CHUNK_BYTES, request.length - offset);
       const uint32_t first = read(request.address + offset, reply.bytes.data() + offset, want);
       const uint32_t again = read(request.address + offset, second.data(), want);
-      const uint32_t got = std::min(first, want);
+      // Readable only as far as both reads got.
+      const uint32_t got = std::min({ first, again, want });
       if (got == 0)
          break;
       if (again != first || std::memcmp(reply.bytes.data() + offset, second.data(), got) != 0)
@@ -225,34 +261,45 @@ void MemoryBridge::Answer(Request& request, const ReadFn& read, uint64_t frame, 
    request.result = total == 0 ? Result::OutOfRange : Result::Ok;
 }
 
-void MemoryBridge::TakeSnapshot(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning)
+void MemoryBridge::Complete(Queue& requests)
 {
-   m_snapshot.frame = frame;
-   m_snapshot.playerRunning = static_cast<uint8_t>(playerRunning);
-   if (m_ranges.empty() || !gameRunning)
+   for (const std::shared_ptr<Request>& request : requests)
    {
-      m_snapshot.blocks.clear();
-      m_haveSnapshot = false;
-      return;
+      if (!request->abandoned && request->kind == Request::Kind::Subscribe
+         && request->subscriptionId > m_subscriptionId)
+      {
+         m_ranges = request->accepted;
+         m_subscriptionId = request->subscriptionId;
+         m_haveSnapshot = false;
+      }
+      request->done = true;
+   }
+}
+
+bool MemoryBridge::TakeSnapshot(const ReadFn& read, const std::vector<Wire::MemoryRange>& ranges, uint64_t frame,
+   bool playerRunning, bool gameRunning)
+{
+   m_nextSnapshot.frame = frame;
+   m_nextSnapshot.playerRunning = static_cast<uint8_t>(playerRunning);
+   if (ranges.empty() || !gameRunning)
+   {
+      m_nextSnapshot.blocks.clear();
+      return false;
    }
 
-   m_snapshot.blocks.resize(m_ranges.size());
-   for (size_t i = 0; i < m_ranges.size(); i++)
+   m_nextSnapshot.blocks.resize(ranges.size());
+   for (size_t i = 0; i < ranges.size(); i++)
    {
-      Wire::MemoryBlock& block = m_snapshot.blocks[i];
-      block.address = m_ranges[i].address;
-      block.bytes.resize(m_ranges[i].length);
+      Wire::MemoryBlock& block = m_nextSnapshot.blocks[i];
+      block.address = ranges[i].address;
+      block.bytes.resize(ranges[i].length);
       // A range that read in full at Subscribe but not now is no snapshot at all:
       // Poll must carry the set exactly, so it answers busy until it reads again;
       // a daemon that keeps seeing busy re-subscribes, which drops the range.
-      if (read(block.address, block.bytes.data(), m_ranges[i].length) != m_ranges[i].length)
-      {
-         m_haveSnapshot = false;
-         return;
-      }
+      if (read(block.address, block.bytes.data(), ranges[i].length) != ranges[i].length)
+         return false;
    }
-   m_snapshotId = m_subscriptionId;
-   m_haveSnapshot = true;
+   return true;
 }
 
 }
