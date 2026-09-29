@@ -3,6 +3,8 @@
 #include "common.h"
 #include "VpxSessionSource.h"
 
+#include "pinmame/PinMAMEPlugin.h"
+
 // The plugin API carries no runtime version, so what the plugin can honestly
 // declare is the build its headers were pinned to. cmake/vpx_headers.cmake owns
 // these values and CMakeLists.txt passes them in.
@@ -28,6 +30,7 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    , m_gameStartMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_START))
    , m_gameEndMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_END))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
+   , m_readMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_READ_MEMORY))
 {
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_gameEndMsgId, OnGameEnd, this);
@@ -39,6 +42,7 @@ VpxSessionSource::~VpxSessionSource()
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_gameEndMsgId, OnGameEnd, this);
    m_msgApi->UnsubscribeMsg(m_gameStartMsgId, OnGameStart, this);
+   m_msgApi->ReleaseMsgID(m_readMemoryMsgId);
    m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
    m_msgApi->ReleaseMsgID(m_gameEndMsgId);
    m_msgApi->ReleaseMsgID(m_gameStartMsgId);
@@ -63,7 +67,11 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
       // A table restart with the same ROM and the same display changes nothing
       // on the wire, so the epoch is what makes Declare go out again anyway.
       self->m_epoch++;
+      // Restored from the ROM: a restart with the same ROM sends no SetRomId to
+      // undo the OnGameEnd that cleared it.
+      self->m_gameRunning = !self->m_romId.empty();
    }
+   self->m_memory.SetGameRunning(self->m_gameRunning);
    // Published last, so the worker never sees a running player with no table
    // path: it reads the flag and the path in two separate steps.
    self->m_playerRunning = true;
@@ -74,6 +82,9 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    VpxSessionSource* self = static_cast<VpxSessionSource*>(userData);
    // Cleared first here, for the same reason it is set last above.
    self->m_playerRunning = false;
+   // The per-frame Service stops with the player, so say so here.
+   self->m_gameRunning = false;
+   self->m_memory.SetGameRunning(false);
    std::lock_guard lock(self->m_mutex);
    self->m_tablePath.clear();
    self->m_epoch++;
@@ -81,16 +92,32 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
 
 void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
 {
-   // Counts what Pong reports. The log is drained from the plugin's own timer
-   // instead, because this fires only while a player is running and the
+   // Counts what Pong reports, and services the memory reads, since this is the
+   // API thread once per rendered frame. The log is drained from the plugin's own
+   // timer instead, because this fires only while a player is running and the
    // interesting lines happen while VPX sits at the table chooser.
-   static_cast<VpxSessionSource*>(userData)->m_renderedFrame++;
+   VpxSessionSource* self = static_cast<VpxSessionSource*>(userData);
+   const uint64_t frame = ++self->m_renderedFrame;
+   self->m_memory.Service(
+      [self](uint32_t address, uint8_t* out, uint32_t size)
+      {
+         PinMAMEReadMemoryMsg msg { };
+         msg.version = 1;
+         msg.address = address;
+         msg.size = size;
+         msg.data = out;
+         self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_readMemoryMsgId, &msg);
+         return msg.read;
+      },
+      frame, self->m_playerRunning, self->m_gameRunning);
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)
 {
    std::lock_guard lock(m_mutex);
    m_romId = romId;
+   m_gameRunning = !romId.empty();
+   m_memory.SetGameRunning(!romId.empty());
 }
 
 void VpxSessionSource::PushLog(int level, const std::string& message)
