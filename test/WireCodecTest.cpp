@@ -421,6 +421,76 @@ void TestTableFileName()
 
 }
 
+// The slice 2 byte strings are copied verbatim from scorbitd main (ffd58ca)
+// scorbitd/test/source/test_vpx_wire_layout.cpp, "The slice two reply encodings
+// match their golden vectors" and "The slice two requests the daemon sends match
+// their golden vectors". Replies are what this side encodes; requests are what the
+// daemon sends and this side must decode.
+void TestSliceTwoGoldenVectors()
+{
+   const std::vector<uint8_t> marker { 0xde, 0xad, 0xbe, 0xef };
+   const Wire::MemoryRange range { 0x1c93, 4 };
+   constexpr uint64_t FRAME = 0x0102030405060708ULL;
+
+   const std::vector<uint8_t> subscribe = Wire::Encode(Wire::Subscription { { range } });
+   CHECK_MSG(ScorbitTest::Hex(subscribe) == "0100" "931c0000" "04000000", ScorbitTest::Hex(subscribe));
+
+   const std::vector<uint8_t> poll = Wire::Encode(Wire::PollReply { FRAME, 1, { { 0x1c93, marker } } });
+   CHECK_MSG(ScorbitTest::Hex(poll) == "0807060504030201" "01" "0100" "931c0000" "04000000" "deadbeef",
+      ScorbitTest::Hex(poll));
+
+   const std::vector<uint8_t> stable = Wire::Encode(Wire::ReadDirectReply { FRAME, 0x1c93, { }, marker });
+   CHECK_MSG(ScorbitTest::Hex(stable) == "0807060504030201" "931c0000" "04000000" "0000" "deadbeef",
+      ScorbitTest::Hex(stable));
+
+   // One unstable chunk, at offset 0 from the range start.
+   const std::vector<uint8_t> unstable = Wire::Encode(Wire::ReadDirectReply { FRAME, 0x1c93, { 0 }, marker });
+   CHECK_MSG(ScorbitTest::Hex(unstable) == "0807060504030201" "931c0000" "04000000" "0100" "00000000" "deadbeef",
+      ScorbitTest::Hex(unstable));
+
+   // Requests, as the daemon puts them on the wire.
+   Wire::ReadDirectRequest readDirect;
+   CHECK(Wire::Decode(ScorbitTest::Unhex("931c0000" "04000000"), readDirect));
+   CHECK(readDirect == (Wire::ReadDirectRequest { 0x1c93, 4 }));
+
+   Wire::Subscription subscribed;
+   CHECK(Wire::Decode(ScorbitTest::Unhex("0200" "931c0000" "04000000" "00010000" "08000000"), subscribed));
+   CHECK(subscribed == (Wire::Subscription { { { 0x1c93, 4 }, { 0x0100, 8 } } }));
+
+   Wire::Subscription cleared;
+   CHECK(Wire::Decode(ScorbitTest::Unhex("0000"), cleared));
+   CHECK(cleared.ranges.empty());
+}
+
+// Round trips, plus the truncations a decoder must refuse rather than read as zeroes.
+void TestSliceTwoRoundTripsAndTruncation()
+{
+   const Wire::PollReply poll { 7, 0, { { 0x10, { 1, 2, 3 } }, { 0x2000, { } } } };
+   Wire::PollReply pollBack;
+   CHECK(Wire::Decode(Wire::Encode(poll), pollBack));
+   CHECK(pollBack == poll);
+
+   const Wire::ReadDirectReply read { 9, 0x8000, { 0, 256 }, std::vector<uint8_t>(300, 0x5a) };
+   Wire::ReadDirectReply readBack;
+   CHECK(Wire::Decode(Wire::Encode(read), readBack));
+   CHECK(readBack == read);
+
+   // A count promising more ranges than the payload holds.
+   Wire::Subscription sub;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0200" "931c0000" "04000000"), sub));
+   // A count so large that trusting it would mean a huge allocation.
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("ffff"), sub));
+   // A ReadDirect request short of its length field.
+   Wire::ReadDirectRequest req;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("931c0000"), req));
+   // A block whose length runs past the end of the payload.
+   Wire::PollReply shortPoll;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0807060504030201" "01" "0100" "931c0000" "08000000" "deadbeef"), shortPoll));
+   // An unstable count the payload cannot hold.
+   Wire::ReadDirectReply shortRead;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0807060504030201" "931c0000" "00000000" "ffff"), shortRead));
+}
+
 int main()
 {
    TestFraming();
@@ -433,5 +503,7 @@ int main()
    TestForwardCompatibility();
    TestCountersAreDistinct();
    TestTableFileName();
+   TestSliceTwoGoldenVectors();
+   TestSliceTwoRoundTripsAndTruncation();
    return ScorbitTest::Summary("wire_codec_test");
 }

@@ -130,6 +130,8 @@ endif()
 add_library(scorbit-transport STATIC
    src/WireProtocol.h
    src/WireProtocol.cpp
+   src/MemoryBridge.h
+   src/MemoryBridge.cpp
    src/SocketWorker.h
    src/SocketWorker.cpp
    src/WireDump.h

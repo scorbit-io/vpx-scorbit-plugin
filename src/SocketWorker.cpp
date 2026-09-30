@@ -51,6 +51,9 @@ constexpr int PONG_TIMEOUT_MS = 2000;
 constexpr int SEND_TIMEOUT_MS = 1000;
 // Reading the rest of a message whose length header has already arrived.
 constexpr int BODY_TIMEOUT_MS = 1000;
+// How long a memory request waits for the API thread. The daemon allows 100 ms
+// per request, so answering busy inside this leaves it time to ask again.
+constexpr int MEMORY_BUDGET_MS = 50;
 // The daemon polls; this only exists so a half open socket is noticed.
 constexpr auto IDLE_PING_AFTER = std::chrono::milliseconds(500);
 
@@ -139,8 +142,9 @@ int MillisUntil(std::chrono::steady_clock::time_point deadline)
 
 }
 
-SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log)
+SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory)
    : m_source(source)
+   , m_memory(memory)
    , m_config(std::move(config))
    , m_log(std::move(log))
    , m_instanceId([]
@@ -797,7 +801,7 @@ bool SocketWorker::Handshake()
    hello.pluginApiCommit = m_config.pluginApiCommit;
    hello.token = token;
    hello.instanceId = m_instanceId;
-   hello.capabilities = Wire::CAP_IDENTIFY_FRAMES;
+   hello.capabilities = Wire::CAP_IDENTIFY_FRAMES | (m_memory != nullptr ? Wire::CAP_MEMORY_READ : 0u);
 
    // Hello's vpx_revision is the build the plugin API headers were pinned to.
    // The plugin API exposes no runtime version, so this is what the plugin
@@ -850,6 +854,9 @@ bool SocketWorker::Handshake()
 
    m_connected = true;
    m_lastOnce.clear();
+   // Every session starts with no subscription (design.md, subscription lifetime).
+   if (m_memory != nullptr)
+      m_memory->Clear();
    Log(LOG_LEVEL_INFO, "Socket: connected to daemon " + ack.daemonVersion + " (protocol "
       + std::to_string(ack.protoMajor) + '.' + std::to_string(ack.protoMinor)
       + ", session " + std::to_string(ack.sessionId) + ')');
@@ -862,6 +869,11 @@ bool SocketWorker::MaybeDeclare()
    m_source.GetDeclare(now);
    if (m_haveDeclared && now == m_declared)
       return true;
+
+   // A Declare clears the subscription on both sides; cleared before it goes out,
+   // so a Poll crossing it never serves the previous ROM's addresses.
+   if (m_memory != nullptr)
+      m_memory->Clear();
 
    Wire::Message reply;
    if (!Exchange(Wire::TYPE_DECLARE, Wire::Encode(now.declare), DECLARE_TIMEOUT_MS, reply))
@@ -964,6 +976,18 @@ bool SocketWorker::Dispatch(const Wire::Message& msg)
       return AnswerFrame(msg);
    case Wire::TYPE_PING:
       return AnswerPing(msg);
+   case Wire::TYPE_SUBSCRIBE:
+      if (m_memory != nullptr)
+         return AnswerSubscribe(msg);
+      break;
+   case Wire::TYPE_POLL:
+      if (m_memory != nullptr)
+         return AnswerPoll(msg);
+      break;
+   case Wire::TYPE_READ_DIRECT:
+      if (m_memory != nullptr)
+         return AnswerReadDirect(msg);
+      break;
    case Wire::TYPE_BYE:
    {
       Wire::Bye bye;
@@ -972,13 +996,73 @@ bool SocketWorker::Dispatch(const Wire::Message& msg)
       return false;
    }
    default:
-      // Everything else, including the types reserved for memory, overlay and
-      // status, is refused explicitly so the daemon learns at once what this
-      // build serves instead of waiting out a timeout.
-      Log(LOG_LEVEL_DEBUG, "Socket: refusing "s + Wire::TypeName(msg.header.type) + " request");
-      return SendError(msg.header.type, msg.header.seq, Wire::ERR_UNSUPPORTED_TYPE,
-         std::string(Wire::TypeName(msg.header.type)) + " is not served by this plugin");
+      break;
    }
+   // Everything else, including Write, NvRam, overlay, status and the memory reads
+   // when there is no bridge, is refused explicitly so the daemon learns at once
+   // what this build serves instead of waiting out a timeout.
+   Log(LOG_LEVEL_DEBUG, "Socket: refusing "s + Wire::TypeName(msg.header.type) + " request");
+   return SendError(msg.header.type, msg.header.seq, Wire::ERR_UNSUPPORTED_TYPE,
+      std::string(Wire::TypeName(msg.header.type)) + " is not served by this plugin");
+}
+
+bool SocketWorker::SendMemoryError(const Wire::Message& msg, MemoryBridge::Result result)
+{
+   switch (result)
+   {
+   case MemoryBridge::Result::NoGame:
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_NO_GAME, "no ROM is running");
+   case MemoryBridge::Result::OutOfRange:
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_OUT_OF_RANGE, "range is outside readable memory");
+   case MemoryBridge::Result::TooLarge:
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_TOO_LARGE, "request exceeds the slice 2 limits");
+   default:
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_BUSY, "memory was not serviced in time, ask again");
+   }
+}
+
+bool SocketWorker::AnswerSubscribe(const Wire::Message& msg)
+{
+   Wire::Subscription req;
+   if (!Wire::Decode(msg.payload, req))
+   {
+      Log(LOG_LEVEL_ERROR, "Socket: malformed Subscribe request, closing");
+      SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "Subscribe request payload");
+      return false;
+   }
+   Wire::Subscription accepted;
+   const MemoryBridge::Result result = m_memory->Subscribe(req.ranges, accepted.ranges, MEMORY_BUDGET_MS, m_running);
+   if (result != MemoryBridge::Result::Ok)
+      return SendMemoryError(msg, result);
+   if (accepted.ranges.size() != req.ranges.size())
+      Log(LOG_LEVEL_DEBUG, "Socket: subscribed " + std::to_string(accepted.ranges.size()) + " of "
+         + std::to_string(req.ranges.size()) + " ranges; the rest are not readable in full");
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(accepted));
+}
+
+bool SocketWorker::AnswerPoll(const Wire::Message& msg)
+{
+   Wire::PollReply out;
+   const MemoryBridge::Result result = m_memory->Poll(out);
+   if (result != MemoryBridge::Result::Ok)
+      return SendMemoryError(msg, result);
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(out));
+}
+
+bool SocketWorker::AnswerReadDirect(const Wire::Message& msg)
+{
+   Wire::ReadDirectRequest req;
+   if (!Wire::Decode(msg.payload, req))
+   {
+      Log(LOG_LEVEL_ERROR, "Socket: malformed ReadDirect request, closing");
+      SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "ReadDirect request payload");
+      return false;
+   }
+   Wire::ReadDirectReply out;
+   const MemoryBridge::Result result = m_memory->ReadDirect(req.address, req.length, out, MEMORY_BUDGET_MS, m_running);
+   if (result != MemoryBridge::Result::Ok)
+      return SendMemoryError(msg, result);
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(out));
 }
 
 bool SocketWorker::AnswerFrame(const Wire::Message& msg)

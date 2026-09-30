@@ -16,6 +16,7 @@
 // The dependency on Visual Pinball is therefore in VpxSessionSource, not here,
 // which is what lets the worker run against a scripted peer in the tests.
 
+#include "MemoryBridge.h"
 #include "WireProtocol.h"
 #include "WireDump.h"
 
@@ -98,7 +99,9 @@ class SocketWorker final
 public:
    using LogFn = std::function<void(int level, const std::string& message)>;
 
-   SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log);
+   // memory, when given, serves the slice 2 reads and makes Hello advertise
+   // memory_read; it must outlive the worker.
+   SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory = nullptr);
    ~SocketWorker();
 
    SocketWorker(const SocketWorker&) = delete;
@@ -146,6 +149,11 @@ private:
    bool Dispatch(const Wire::Message& msg);
    bool AnswerFrame(const Wire::Message& msg);
    bool AnswerPing(const Wire::Message& msg);
+   bool AnswerSubscribe(const Wire::Message& msg);
+   bool AnswerPoll(const Wire::Message& msg);
+   bool AnswerReadDirect(const Wire::Message& msg);
+   // Sends the error for a bridge result other than Ok.
+   bool SendMemoryError(const Wire::Message& msg, MemoryBridge::Result result);
 
    bool SendAll(const uint8_t* data, size_t size, int timeoutMs);
    // Not SendMessage: windows.h defines that as a macro expanding to SendMessageA
@@ -165,6 +173,7 @@ private:
    void Backoff();
 
    ISessionSource& m_source;
+   MemoryBridge* const m_memory;
    const SocketWorkerConfig m_config;
    const LogFn m_log;
    const uint64_t m_instanceId;

@@ -16,6 +16,7 @@
 // drained back on the API thread.
 
 #include "DmdTap.h"
+#include "MemoryBridge.h"
 #include "SocketWorker.h"
 
 #include "plugins/ControllerPlugin.h"
@@ -50,6 +51,10 @@ public:
    // Any thread. The socket worker's log sink.
    void PushLog(int level, const std::string& message);
 
+   // The slice 2 memory reads, serviced here once per rendered frame. Owned here
+   // so it outlives the socket worker, which is deleted first at unload.
+   MemoryBridge& Memory() { return m_memory; }
+
    // ISessionSource, worker thread.
    void GetDeclare(DeclareSnapshot& out) override;
    void GetFrame(FrameSnapshot& out) override;
@@ -70,9 +75,13 @@ private:
    const unsigned int m_gameStartMsgId;
    const unsigned int m_gameEndMsgId;
    const unsigned int m_prepareFrameMsgId;
+   const unsigned int m_readMemoryMsgId;
 
    std::atomic<uint64_t> m_renderedFrame { 0 };
    std::atomic<bool> m_playerRunning { false };
+   // A ROM is running in PinMAME: SetRomId's argument is not empty.
+   std::atomic<bool> m_gameRunning { false };
+   MemoryBridge m_memory;
 
    std::mutex m_mutex;
    std::string m_romId;

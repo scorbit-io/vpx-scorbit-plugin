@@ -766,6 +766,192 @@ void TestHandshakeAgainstCapturedAck()
 
 }
 
+// A flat 64 KiB main CPU memory, served by a thread standing in for VPX's API
+// thread, which calls MemoryBridge::Service once per "frame".
+class ServedMemory
+{
+public:
+   explicit ServedMemory(MemoryBridge& bridge, bool serve = true)
+      : m_bytes(0x10000)
+   {
+      for (size_t i = 0; i < m_bytes.size(); i++)
+         m_bytes[i] = static_cast<uint8_t>(i ^ 0x5a);
+      bridge.SetGameRunning(true); // as SetRomId would, before any frame
+      if (!serve)
+         return;
+      m_thread = std::thread([this, &bridge]
+         {
+            const MemoryBridge::ReadFn read = [this](uint32_t a, uint8_t* out, uint32_t n)
+            {
+               uint32_t i = 0;
+               for (; i < n && a + i < m_bytes.size(); i++)
+                  out[i] = m_bytes[a + i];
+               return i;
+            };
+            uint64_t frame = 0;
+            while (m_running)
+            {
+               bridge.Service(read, ++frame, true, true);
+               std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+         });
+   }
+
+   ~ServedMemory()
+   {
+      m_running = false;
+      if (m_thread.joinable())
+         m_thread.join();
+   }
+
+   uint8_t At(uint32_t address) const { return m_bytes[address]; }
+
+private:
+   std::vector<uint8_t> m_bytes;
+   std::atomic<bool> m_running { true };
+   std::thread m_thread;
+};
+
+// Reads the response to seq, or the error it carries.
+bool Reply(ScorbitTest::TestPeer& peer, uint16_t type, uint32_t seq, Wire::Message& msg, uint16_t& errorCode)
+{
+   errorCode = 0;
+   if (!peer.ReadOfType(type, msg, WAIT_MS) || msg.header.seq != seq || !msg.header.IsResponse())
+      return false;
+   if (msg.header.IsError())
+   {
+      Wire::ErrorPayload err;
+      if (!Wire::Decode(msg.payload, err) || err.reason.empty())
+         return false; // a refusal must carry a full code and reason
+      errorCode = err.code;
+   }
+   return true;
+}
+
+// Slice 2 end to end: advertised, Subscribe echoes, Poll carries the set,
+// ReadDirect reads, Write is still refused, and a Declare clears the set.
+void TestMemoryReadsOverTheSocket()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeDeclare("ij_l7", 128, 32, 4, 1), { });
+   MemoryBridge bridge;
+   ServedMemory memory(bridge);
+   SocketWorker worker(source, MakeConfig(peer), Quiet(), &bridge);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   Wire::Declare declare;
+   CHECK(Handshake(peer, hello, declare));
+   CHECK(hello.capabilities == (Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_MEMORY_READ));
+
+   Wire::Message msg;
+   uint16_t code = 0;
+
+   // Subscribe: echoed exactly, in order.
+   const Wire::Subscription want { { { 0x1c93, 4 }, { 0x0100, 8 } } };
+   CHECK(peer.Send(Wire::TYPE_SUBSCRIBE, 0, 50, Wire::Encode(want)));
+   CHECK(Reply(peer, Wire::TYPE_SUBSCRIBE, 50, msg, code) && code == 0);
+   Wire::Subscription echoed;
+   CHECK(Wire::Decode(msg.payload, echoed) && echoed == want);
+
+   // Poll: the subscribed set exactly, bytes and all.
+   CHECK(peer.Send(Wire::TYPE_POLL, 0, 51, { }));
+   CHECK(Reply(peer, Wire::TYPE_POLL, 51, msg, code) && code == 0);
+   Wire::PollReply poll;
+   CHECK(Wire::Decode(msg.payload, poll));
+   CHECK(poll.blocks.size() == 2);
+   if (poll.blocks.size() == 2)
+   {
+      CHECK(poll.blocks[0].address == 0x1c93 && poll.blocks[0].bytes.size() == 4);
+      CHECK(poll.blocks[0].bytes[3] == memory.At(0x1c96));
+      CHECK(poll.blocks[1].address == 0x0100 && poll.blocks[1].bytes.size() == 8);
+   }
+
+   // ReadDirect: a signature-sized window, all of it stable.
+   CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 52, Wire::Encode(Wire::ReadDirectRequest { 0x8000, 0x8000 })));
+   CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 52, msg, code) && code == 0);
+   Wire::ReadDirectReply read;
+   CHECK(Wire::Decode(msg.payload, read));
+   CHECK(read.address == 0x8000 && read.bytes.size() == 0x8000 && read.unstableOffsets.empty());
+   CHECK(read.bytes.size() == 0x8000 && read.bytes[0x7fff] == memory.At(0xffff));
+
+   // Past the end of the address space: short, not refused.
+   CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 53, Wire::Encode(Wire::ReadDirectRequest { 0xfff0, 0x100 })));
+   CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 53, msg, code) && code == 0);
+   CHECK(Wire::Decode(msg.payload, read) && read.bytes.size() == 0x10);
+
+   // Over the limit: too_large, with a reason.
+   CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 54, Wire::Encode(Wire::ReadDirectRequest { 0, 0x10001 })));
+   CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 54, msg, code) && code == Wire::ERR_TOO_LARGE);
+
+   // memory_write was not advertised, so Write is refused as a type.
+   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 55, { }));
+   CHECK(Reply(peer, Wire::TYPE_WRITE, 55, msg, code) && code == Wire::ERR_UNSUPPORTED_TYPE);
+
+   // A new Declare clears the set on both sides.
+   source.Set(MakeDeclare("tom_13", 128, 32, 4, 2), { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_POLL, 0, 56, { }));
+   CHECK(Reply(peer, Wire::TYPE_POLL, 56, msg, code) && code == 0);
+   CHECK(Wire::Decode(msg.payload, poll));
+   CHECK_MSG(poll.blocks.empty(), "the previous ROM's subscription survived a Declare");
+
+   worker.Stop();
+}
+
+// Nothing services memory (VPX stopped rendering): the plugin answers busy within
+// the daemon's 100 ms, and unload with a read in flight returns promptly.
+void TestMemoryReadWithoutAnApiThread()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeDeclare("ij_l7", 128, 32, 4, 1), { });
+   MemoryBridge bridge;
+   // A game is running, but no frame renders, so nothing ever calls Service.
+   bridge.SetGameRunning(true);
+   SocketWorker worker(source, MakeConfig(peer), Quiet(), &bridge);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   Wire::Declare declare;
+   CHECK(Handshake(peer, hello, declare));
+
+   Wire::Message msg;
+   uint16_t code = 0;
+   const auto t0 = std::chrono::steady_clock::now();
+   CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 60, Wire::Encode(Wire::ReadDirectRequest { 0x0100, 4 })));
+   CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 60, msg, code) && code == Wire::ERR_BUSY);
+   const auto busyMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+   CHECK_MSG(busyMs < 100, "busy arrived after " + std::to_string(busyMs) + " ms, past the daemon's timeout");
+
+   // A read in flight when unload arrives.
+   CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 61, Wire::Encode(Wire::ReadDirectRequest { 0x0100, 4 })));
+   std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   const auto t1 = std::chrono::steady_clock::now();
+   worker.Stop();
+   const auto stopMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
+   CHECK_MSG(stopMs < 500, "Stop() with a read in flight took " + std::to_string(stopMs) + " ms");
+}
+
 // Collects the worker's log so a test can wait for a line and read it back.
 class LogCapture final
 {
@@ -959,5 +1145,7 @@ int main()
    TestConnectNoSuchPath();
    TestConnectRefused();
    TestConnectToListenerThatNeverAccepts();
+   TestMemoryReadsOverTheSocket();
+   TestMemoryReadWithoutAnApiThread();
    return ScorbitTest::Summary("socket_worker_test");
 }

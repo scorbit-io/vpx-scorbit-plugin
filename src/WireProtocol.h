@@ -298,6 +298,68 @@ struct ErrorPayload
    bool operator==(const ErrorPayload&) const = default;
 };
 
+// --- Slice 2 memory reads (scorbitd design.md "Message layouts, slice 2") -------
+
+// Limits the daemon and the plugin both enforce. A subscription replaces the
+// previous one wholesale; ReadDirect is one range per message.
+inline constexpr size_t MAX_SUBSCRIBE_RANGES = 64;
+inline constexpr size_t MAX_SUBSCRIBE_BYTES = 16 * 1024;
+inline constexpr uint32_t MAX_READ_DIRECT_BYTES = 64 * 1024;
+// ReadDirect reads each chunk of this size twice and reports those that disagreed.
+inline constexpr uint32_t READ_CHUNK_BYTES = 256;
+
+struct MemoryRange
+{
+   uint32_t address = 0;
+   uint32_t length = 0;
+
+   bool operator==(const MemoryRange&) const = default;
+};
+
+// Subscribe request, and its reply: the set the plugin will serve, echoed exactly.
+struct Subscription
+{
+   std::vector<MemoryRange> ranges;
+
+   bool operator==(const Subscription&) const = default;
+};
+
+struct MemoryBlock
+{
+   uint32_t address = 0;
+   std::vector<uint8_t> bytes;      // its length is the range's length on the wire
+
+   bool operator==(const MemoryBlock&) const = default;
+};
+
+// Poll reply. The request has an empty payload.
+struct PollReply
+{
+   uint64_t frame = 0;              // rendered-frame counter, Pong's value; not the DMD frame id
+   uint8_t playerRunning = 0;
+   std::vector<MemoryBlock> blocks; // exactly the subscribed set, in subscription order
+
+   bool operator==(const PollReply&) const = default;
+};
+
+struct ReadDirectRequest
+{
+   uint32_t address = 0;
+   uint32_t length = 0;             // 1 to MAX_READ_DIRECT_BYTES
+
+   bool operator==(const ReadDirectRequest&) const = default;
+};
+
+struct ReadDirectReply
+{
+   uint64_t frame = 0;
+   uint32_t address = 0;
+   std::vector<uint32_t> unstableOffsets; // multiples of READ_CHUNK_BYTES from address
+   std::vector<uint8_t> bytes;            // may be shorter than requested
+
+   bool operator==(const ReadDirectReply&) const = default;
+};
+
 std::vector<uint8_t> Encode(const Hello& v);
 std::vector<uint8_t> Encode(const HelloAck& v);
 std::vector<uint8_t> Encode(const Declare& v);
@@ -306,6 +368,10 @@ std::vector<uint8_t> Encode(const FrameReply& v);
 std::vector<uint8_t> Encode(const Pong& v);
 std::vector<uint8_t> Encode(const Bye& v);
 std::vector<uint8_t> Encode(const ErrorPayload& v);
+std::vector<uint8_t> Encode(const Subscription& v);
+std::vector<uint8_t> Encode(const PollReply& v);
+std::vector<uint8_t> Encode(const ReadDirectRequest& v);
+std::vector<uint8_t> Encode(const ReadDirectReply& v);
 
 // Every Decode requires each field it declares to be present and ignores any
 // bytes trailing them. That is the compatibility rule: appending a field is a
@@ -318,5 +384,9 @@ bool Decode(const std::vector<uint8_t>& payload, FrameReply& out);
 bool Decode(const std::vector<uint8_t>& payload, Pong& out);
 bool Decode(const std::vector<uint8_t>& payload, Bye& out);
 bool Decode(const std::vector<uint8_t>& payload, ErrorPayload& out);
+bool Decode(const std::vector<uint8_t>& payload, Subscription& out);
+bool Decode(const std::vector<uint8_t>& payload, PollReply& out);
+bool Decode(const std::vector<uint8_t>& payload, ReadDirectRequest& out);
+bool Decode(const std::vector<uint8_t>& payload, ReadDirectReply& out);
 
 }

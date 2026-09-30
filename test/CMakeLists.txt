@@ -6,6 +6,13 @@ target_link_libraries(wire_codec_test PRIVATE scorbit-transport)
 target_compile_options(wire_codec_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME wire_codec COMMAND wire_codec_test)
 
+# No sockets, so this one runs on every platform, Windows included.
+add_executable(memory_bridge_test MemoryBridgeTest.cpp Check.h)
+target_link_libraries(memory_bridge_test PRIVATE scorbit-transport)
+target_compile_options(memory_bridge_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME memory_bridge COMMAND memory_bridge_test)
+set_tests_properties(memory_bridge PROPERTIES TIMEOUT 60)
+
 if(NOT WIN32)
    # The peer speaks POSIX sockets directly. The worker's Windows path is
    # written but nothing in CI compiles it yet, so this test does not claim to
