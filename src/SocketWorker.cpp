@@ -54,6 +54,9 @@ constexpr int BODY_TIMEOUT_MS = 1000;
 // How long a memory request waits for the API thread. The daemon allows 100 ms
 // per request, so answering busy inside this leaves it time to ask again.
 constexpr int MEMORY_BUDGET_MS = 50;
+// Write waits longer: the daemon allows it 300 ms (design.md), and a write answered busy
+// must not be applied anyway, so the budget is close to that.
+constexpr int WRITE_BUDGET_MS = 280;
 // The daemon polls; this only exists so a half open socket is noticed.
 constexpr auto IDLE_PING_AFTER = std::chrono::milliseconds(500);
 
@@ -982,7 +985,7 @@ bool SocketWorker::AnswerWrite(const Wire::Message& msg)
       return false;
    }
    Wire::WriteReply out;
-   const MemoryBridge::Result result = m_memory->Write(req.ops, out, MEMORY_BUDGET_MS, m_running);
+   const MemoryBridge::Result result = m_memory->Write(req.ops, out, WRITE_BUDGET_MS, m_running);
    if (result == MemoryBridge::Result::Unsupported)
       LogOnce(LOG_LEVEL_WARN, "Socket: this PinMAME applies no memory writes (needs pinmame #634); answering unsupported_operation");
    if (result != MemoryBridge::Result::Ok)

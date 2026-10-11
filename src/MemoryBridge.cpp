@@ -125,6 +125,7 @@ MemoryBridge::Result MemoryBridge::Write(const std::vector<Wire::WriteOp>& ops, 
 void MemoryBridge::Clear()
 {
    std::lock_guard lock(m_mutex);
+   m_writesUnsupported = false;
    m_ranges.clear();
    // A fresh id, so a Subscribe already queued from before this point cannot
    // install its set once the API thread gets to it.
@@ -156,7 +157,16 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
    // Service never reads under the lock, so waking up late is never a read's doing.
    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
    std::unique_lock lock(m_mutex);
-   while (!request->done && running && std::chrono::steady_clock::now() < deadline)
+   const auto waiting = [&]
+   {
+      if (request->done || !running)
+         return false;
+      // A write already taken is going to be applied: answering busy now would report a
+      // failure that did not happen.
+      return std::chrono::steady_clock::now() < deadline
+         || (request->kind == Request::Kind::Write && request->taken);
+   };
+   while (waiting())
       m_answered.wait_for(lock, std::chrono::milliseconds(5));
 
    // Decided under the lock Complete runs under: either it finished the request,
@@ -207,6 +217,8 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
          return;
       m_gameRunning = gameRunning;
       work.swap(m_queue);
+      for (const std::shared_ptr<Request>& request : work)
+         request->taken = true;
       ranges = m_ranges;
       rangesId = m_subscriptionId;
    }
@@ -305,7 +317,7 @@ void MemoryBridge::Complete(Queue& requests)
 {
    for (const std::shared_ptr<Request>& request : requests)
    {
-      // Recorded even for a request the worker gave up on: the host still has no handler.
+      // Recorded even for a request the worker stopped waiting on: the host still answered.
       if (request->kind == Request::Kind::Write && request->result == Result::Unsupported)
          m_writesUnsupported = true;
       if (!request->abandoned && request->kind == Request::Kind::Subscribe

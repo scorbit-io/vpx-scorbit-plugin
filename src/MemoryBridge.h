@@ -46,7 +46,7 @@ public:
       NoGame,
       OutOfRange,
       TooLarge,
-      Unsupported, // the host applied no write; remembered, since it is a property of the build
+      Unsupported, // the host applied no write; remembered until the next Clear
    };
 
    // --- worker thread ---------------------------------------------------------
@@ -64,12 +64,17 @@ public:
    Result ReadDirect(uint32_t address, uint32_t length, Wire::ReadDirectReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
-   // One Write: its ops applied in order in one pass. Once the host has applied
-   // nothing, every later Write answers Unsupported at once, without asking it again.
+   // One Write: its ops applied in order in one pass. Once VPX's thread has taken it,
+   // the worker waits for the real answer past budgetMs (only a stop ends that wait), so
+   // a write is never answered busy and then applied. Once the host has applied nothing,
+   // every Write until the next Clear answers Unsupported at once. A zero cannot tell "no
+   // handler" (no pinmame #634) from a table that is stopping, so this is per session
+   // rather than for the plugin's life.
    Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
-   // Empties the subscription: a new session and every Declare start from none.
+   // Empties the subscription: a new session and every Declare start from none. Also
+   // forgets an Unsupported write, for the same reason.
    void Clear();
 
    // --- API thread ------------------------------------------------------------
@@ -79,9 +84,9 @@ public:
    // stopping also answers whatever is still queued.
    void SetGameRunning(bool running);
 
-   // Once per rendered frame. With no write function, writes are answered Unsupported.
+   // Once per rendered frame. An empty write function answers writes Unsupported.
    void Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning,
-      const WriteFn& write = { });
+      const WriteFn& write);
 
    // Tests only: requests waiting for Service.
    size_t QueuedForTest();
@@ -108,6 +113,7 @@ private:
       // Under m_mutex.
       bool done = false;
       bool abandoned = false;   // the worker answered busy; never install it
+      bool taken = false;       // Service swapped it out; a write is then waited on to the end
    };
 
    using Queue = std::deque<std::shared_ptr<Request>>;

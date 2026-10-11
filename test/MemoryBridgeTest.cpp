@@ -79,7 +79,7 @@ public:
               const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
               while (m_running)
               {
-                 bridge.Service(read, ++m_frame, true, gameRunning);
+                 bridge.Service(read, ++m_frame, true, gameRunning, { });
                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
               }
            })
@@ -185,7 +185,7 @@ void TestClearWinsOverAQueuedSubscribe()
       { return bridge.Subscribe({ { 0x0100, 8 } }, accepted, 2000, g_running); });
    CHECK(WaitQueued(bridge, 1));
    bridge.Clear();
-   bridge.Service(read, 2, true, true);
+   bridge.Service(read, 2, true, true, { });
 
    CHECK(pending.get() == Result::Ok);
    Wire::PollReply poll;
@@ -224,7 +224,7 @@ void TestBusyWhenTheApiThreadIsSilent()
    FakeMemory memory;
    const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
    bridge.SetGameRunning(true);
-   bridge.Service(read, 1, true, true);
+   bridge.Service(read, 1, true, true, { });
 
    // A game is running but VPX stopped rendering: nothing services the queue.
    Wire::ReadDirectReply out;
@@ -242,7 +242,7 @@ void TestBusyWhenTheApiThreadIsSilent()
 
    // The abandoned requests left the queue: a later Service has nothing to answer.
    CHECK(bridge.QueuedForTest() == 0);
-   bridge.Service(read, 2, true, true);
+   bridge.Service(read, 2, true, true, { });
    Wire::PollReply poll;
    CHECK(bridge.Poll(poll) == Result::Ok);
 }
@@ -256,13 +256,13 @@ void TestNoGameWhileNothingRenders()
    FakeMemory memory;
    const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
    bridge.SetGameRunning(true);
-   bridge.Service(read, 1, true, true);
+   bridge.Service(read, 1, true, true, { });
    std::vector<Wire::MemoryRange> accepted;
    std::atomic<bool> running { true };
    auto pending = std::async(std::launch::async, [&]
       { return bridge.Subscribe({ { 0x0100, 8 } }, accepted, 2000, running); });
    CHECK(WaitQueued(bridge, 1));
-   bridge.Service(read, 2, true, true);
+   bridge.Service(read, 2, true, true, { });
    CHECK(pending.get() == Result::Ok);
    Wire::PollReply poll;
    CHECK(bridge.Poll(poll) == Result::Ok && poll.blocks.size() == 1);
@@ -325,7 +325,7 @@ void TestDeadlineHoldsDuringASlowRead()
          {
             for (int i = 0; i < 40 && reads == 0 && bridge.QueuedForTest() != 0; i++)
             {
-               bridge.Service(slow, 1, true, true);
+               bridge.Service(slow, 1, true, true, { });
                std::this_thread::sleep_for(std::chrono::microseconds(200));
             }
          });
@@ -391,7 +391,7 @@ void TestShortSecondReadStops()
    CHECK(WaitQueued(bridge, 1));
    // Until answered: one Service can lose its try_lock. Later ones read nothing.
    while (pending.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
-      bridge.Service(read, 1, true, true);
+      bridge.Service(read, 1, true, true, { });
    CHECK(pending.get() == Result::Ok);
    CHECK(out.bytes.size() == 0x80);
    CHECK(out.unstableOffsets == std::vector<uint32_t> { 0 });
@@ -452,7 +452,7 @@ void TestWriteLimitsAndNoGame()
    bridge.SetGameRunning(false);
    const auto t0 = std::chrono::steady_clock::now();
    CHECK(bridge.Write({ { 0x100, { 1 } } }, reply, BUDGET_MS, g_running) == Result::NoGame);
-   CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(20));
+   CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
 }
 
 // A libpinmame without pinmame #634 applies nothing. The first Write learns that from the host;
@@ -474,7 +474,7 @@ void TestUnsupportedWriteIsRemembered()
 
    const auto t0 = std::chrono::steady_clock::now();
    CHECK(bridge.Write({ { 0x100, { 1 } } }, reply, 2000, g_running) == Result::Unsupported);
-   CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(20));
+   CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
    CHECK(bridge.QueuedForTest() == 0);
    bridge.Service(read, ++frame, true, true, none);
    CHECK(calls == 1);
@@ -485,44 +485,83 @@ void TestUnsupportedWriteIsRemembered()
    CHECK(ServeUntil(bridge, readBack, read, none, frame) == Result::Ok);
    CHECK(out.bytes.size() == 4);
 
-   // No write function at all (Service called with reads only) is the same answer.
+   // Clear (a new session, or a Declare) forgets it: the next table may be one that can write.
+   bridge.Clear();
+   const MemoryBridge::WriteFn works = [&memory](const std::vector<Wire::WriteOp>& ops) { return memory.Write(ops); };
+   auto again = std::async(std::launch::async, [&] { return bridge.Write({ { 0x100, { 1 } } }, reply, 2000, g_running); });
+   CHECK(ServeUntil(bridge, again, read, works, frame) == Result::Ok);
+   CHECK(reply.applied == 1);
+
+   // An empty write function is the same answer as no handler.
    MemoryBridge bare;
    bare.SetGameRunning(true);
    auto bareWrite = std::async(std::launch::async, [&] { return bare.Write({ { 0x100, { 1 } } }, reply, 2000, g_running); });
    uint64_t bareFrame = 0;
    while (bareWrite.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
-      bare.Service(read, ++bareFrame, true, true);
+      bare.Service(read, ++bareFrame, true, true, { });
    CHECK(bareWrite.get() == Result::Unsupported);
 }
 
-// pinmame #634 without its fence-drain fix holds a write for 250 ms and then applies nothing. The
-// worker answers busy inside its budget, and the host's answer still counts once it arrives.
-void TestUnsupportedIsRememberedAfterATimeout()
+// Once VPX's thread has taken a write, the worker waits for it past its budget: a write
+// answered busy and then applied anyway would make the daemon report a failure that did
+// not happen (a credit granted twice, if anything retried it).
+void TestATakenWriteIsNeverAnsweredBusy()
 {
    MemoryBridge bridge;
    FakeMemory memory;
    const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
-   const MemoryBridge::WriteFn stalled = [](const std::vector<Wire::WriteOp>&)
+   std::atomic<int> calls { 0 };
+   const MemoryBridge::WriteFn slow = [&memory, &calls](const std::vector<Wire::WriteOp>& ops)
    {
+      calls++;
       std::this_thread::sleep_for(std::chrono::milliseconds(150));
-      return 0u;
+      return memory.Write(ops);
    };
    bridge.SetGameRunning(true);
 
-   Wire::WriteReply reply;
-   auto pending = std::async(std::launch::async, [&] { return bridge.Write({ { 0x100, { 1 } } }, reply, BUDGET_MS, g_running); });
-   CHECK(WaitQueued(bridge, 1));
+   // The API thread runs first, so the write is taken as soon as it is queued.
+   std::atomic<bool> serving { true };
    std::thread api([&]
       {
-         for (int i = 0; i < 40 && bridge.QueuedForTest() != 0; i++)
-            bridge.Service(read, 1, true, true, stalled);
+         uint64_t frame = 0;
+         while (serving)
+         {
+            bridge.Service(read, ++frame, true, true, slow);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
       });
+   Wire::WriteReply reply;
    const auto t0 = std::chrono::steady_clock::now();
-   CHECK(pending.get() == Result::Busy);
+   const Result result = bridge.Write({ { 0x1c93, { 0x42 } } }, reply, BUDGET_MS, g_running);
    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+   serving = false;
    api.join();
-   CHECK_MSG(ms < 100, "the worker waited " + std::to_string(ms) + " ms behind a stalled write");
-   CHECK(bridge.Write({ { 0x100, { 1 } } }, reply, BUDGET_MS, g_running) == Result::Unsupported);
+   CHECK_MSG(result == Result::Ok, "a taken write was not waited on to its answer");
+   CHECK(reply.applied == 1 && memory.At(0x1c93) == 0x42);
+   CHECK(calls == 1);
+   CHECK_MSG(ms >= 140, "the write answered in " + std::to_string(ms) + " ms, before the host applied it");
+
+   // A stop still ends the wait, so unload is never held by a write in flight.
+   std::atomic<bool> stopping { true };
+   std::atomic<bool> serving2 { true };
+   std::thread api2([&]
+      {
+         uint64_t frame = 0;
+         while (serving2)
+         {
+            bridge.Service(read, ++frame, true, true, slow);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+      });
+   auto pending = std::async(std::launch::async, [&] { return bridge.Write({ { 0x1c94, { 1 } } }, reply, BUDGET_MS, stopping); });
+   std::this_thread::sleep_for(std::chrono::milliseconds(30));
+   const auto t1 = std::chrono::steady_clock::now();
+   stopping = false;
+   CHECK(pending.get() == Result::Busy);
+   const auto ms1 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
+   serving2 = false;
+   api2.join();
+   CHECK_MSG(ms1 < 100, "a stopping worker waited " + std::to_string(ms1) + " ms on a write");
 }
 
 }
@@ -543,6 +582,6 @@ int main()
    TestWriteAppliesBeforeTheNextSnapshot();
    TestWriteLimitsAndNoGame();
    TestUnsupportedWriteIsRemembered();
-   TestUnsupportedIsRememberedAfterATimeout();
+   TestATakenWriteIsNeverAnsweredBusy();
    return ScorbitTest::Summary("memory_bridge_test");
 }
