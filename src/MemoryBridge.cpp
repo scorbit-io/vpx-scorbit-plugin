@@ -40,7 +40,8 @@ MemoryBridge::Result MemoryBridge::Subscribe(const std::vector<Wire::MemoryRange
    // say so: answer at once with nothing kept, which the daemon allows.
    if (ranges.empty() || !m_gameRunning)
    {
-      Clear();
+      std::lock_guard lock(m_mutex);
+      ResetSubscription();
       return Result::Ok;
    }
 
@@ -126,6 +127,11 @@ void MemoryBridge::Clear()
 {
    std::lock_guard lock(m_mutex);
    m_writesUnsupported = false;
+   ResetSubscription();
+}
+
+void MemoryBridge::ResetSubscription()
+{
    m_ranges.clear();
    // A fresh id, so a Subscribe already queued from before this point cannot
    // install its set once the API thread gets to it.
@@ -155,26 +161,22 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
    // Woken by Service; the short slice is only so a stopping worker notices. A
    // plain sleep would add up to 16 ms per request on Windows' default timer.
    // Service never reads under the lock, so waking up late is never a read's doing.
-   const auto start = std::chrono::steady_clock::now();
-   const auto deadline = start + std::chrono::milliseconds(budgetMs);
-   const auto hardDeadline = start + std::chrono::milliseconds(WRITE_TOTAL_MS);
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
    std::unique_lock lock(m_mutex);
    const auto waiting = [&]
    {
       if (request->done || !running)
          return false;
-      // A write already taken is going to be applied: answering busy now would report a
-      // failure that did not happen.
-      return std::chrono::steady_clock::now() < deadline
-         || (request->kind == Request::Kind::Write && request->taken
-            && std::chrono::steady_clock::now() < hardDeadline);
+      // A write already taken may still be applied: answering busy would report a failure
+      // that did not happen, and a retry would apply it twice. The host bounds the wait.
+      return (request->kind == Request::Kind::Write && request->taken)
+         || std::chrono::steady_clock::now() < deadline;
    };
    while (waiting())
    {
-      // Wake at the limit that applies, not on the next 5 ms tick past it.
-      const auto limit = (request->kind == Request::Kind::Write && request->taken) ? hardDeadline : deadline;
+      // Wake at the budget, not on the next 5 ms tick past it.
       const auto tick = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
-      m_answered.wait_until(lock, tick < limit ? tick : limit);
+      m_answered.wait_until(lock, tick < deadline || request->taken ? tick : deadline);
    }
 
    // Decided under the lock Complete runs under: either it finished the request,

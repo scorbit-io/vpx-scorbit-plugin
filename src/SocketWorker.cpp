@@ -54,8 +54,8 @@ constexpr int BODY_TIMEOUT_MS = 1000;
 // How long a memory request waits for the API thread. The daemon allows 100 ms
 // per request, so answering busy inside this leaves it time to ask again.
 constexpr int MEMORY_BUDGET_MS = 50;
-// The wait for VPX's thread to take a Write. Once taken, it is waited on to its answer, which
-// the host bounds at 250 ms, inside MemoryBridge::WRITE_TOTAL_MS and the daemon's 300 ms.
+// The wait for VPX's thread to take a Write; an untaken write answers busy with nothing
+// applied. Once taken, it is waited on to its answer, which pinmame #634 bounds at 250 ms.
 constexpr int WRITE_BUDGET_MS = 40;
 // The daemon polls; this only exists so a half open socket is noticed.
 constexpr auto IDLE_PING_AFTER = std::chrono::milliseconds(500);

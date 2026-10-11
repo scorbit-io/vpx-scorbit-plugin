@@ -40,9 +40,6 @@ public:
    // handler applied nothing (its wait timed out, the emulator being paused or stalled).
    using WriteFn = std::function<uint32_t(const std::vector<Wire::WriteOp>& ops)>;
    static constexpr uint32_t NO_WRITE_HANDLER = 0xFFFFFFFFu;
-   // A Write's whole life, queue wait included, under the daemon's 300 ms (design.md), with
-   // 30 ms left for the worker to be scheduled after its wake-up and for the reply to go out.
-   static constexpr int WRITE_TOTAL_MS = 270;
 
    enum class Result
    {
@@ -70,17 +67,19 @@ public:
       const std::atomic<bool>& running);
 
    // One Write: its ops applied in order in one pass. budgetMs bounds the wait for VPX's
-   // thread to take it; once taken, the worker waits for the real answer (bounded by the
-   // host's own timeout and WRITE_TOTAL_MS), so a write is not answered busy and then
-   // applied. A host with no write handler answers Unsupported, and every Write until the
+   // thread to take it, and a write not taken by then answers Busy with nothing applied.
+   // Once taken, the worker waits for the real answer, which the host bounds (pinmame #634
+   // gives up at 250 ms); only a stop ends that wait. A taken write is never answered Busy,
+   // because it may still be applied, and a daemon that retried would apply it twice. A host with no write handler answers Unsupported, and every Write until the
    // next Clear then answers it at once; a handler that applied nothing answers Busy and is
    // not remembered, since it is transient. Per session rather than for the plugin's life,
    // because a table that is stopping also leaves the message unhandled.
    Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
-   // Empties the subscription: a new session and every Declare start from none. Also
-   // forgets an Unsupported write, for the same reason.
+   // Starts a session's memory state over: a new session and every Declare start from no
+   // subscription, and forget an Unsupported write (the next table may be able to write).
+   // An empty Subscribe only empties the subscription.
    void Clear();
 
    // --- API thread ------------------------------------------------------------
@@ -125,6 +124,8 @@ private:
    using Queue = std::deque<std::shared_ptr<Request>>;
 
    Result Submit(const std::shared_ptr<Request>& request, int budgetMs, const std::atomic<bool>& running);
+   // Under m_mutex: empties the subscription and invalidates its snapshot.
+   void ResetSubscription();
    // Reads only; touches no shared state, so it runs without the lock.
    static void Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
       bool gameRunning);

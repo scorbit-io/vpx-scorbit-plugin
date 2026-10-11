@@ -489,6 +489,12 @@ void TestUnsupportedWriteIsRemembered()
    CHECK(ServeUntil(bridge, readBack, read, none, frame) == Result::Ok);
    CHECK(out.bytes.size() == 4);
 
+   // An empty Subscribe only cancels the read subscription: the latch holds.
+   std::vector<Wire::MemoryRange> none2;
+   CHECK(bridge.Subscribe({ }, none2, 2000, g_running) == Result::Ok);
+   CHECK(bridge.Write({ { 0x100, { 1 } } }, reply, 2000, g_running) == Result::Unsupported);
+   CHECK(calls == 1);
+
    // Clear (a new session, or a Declare) forgets it: the next table may be one that can write.
    bridge.Clear();
    const MemoryBridge::WriteFn works = [&memory](const std::vector<Wire::WriteOp>& ops) { return memory.Write(ops); };
@@ -504,40 +510,6 @@ void TestUnsupportedWriteIsRemembered()
    while (bareWrite.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
       bare.Service(read, ++bareFrame, true, true, { });
    CHECK(bareWrite.get() == Result::Unsupported);
-}
-
-// A host slower than anything the daemon still waits for: the worker gives up at
-// WRITE_TOTAL_MS, so its reply lands inside the daemon's 300 ms. The upper bound is that
-// contract, not the cap: the cap leaves 30 ms for scheduling on a loaded machine.
-void TestAWriteIsBoundedByTheTotal()
-{
-   MemoryBridge bridge;
-   FakeMemory memory;
-   const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
-   const MemoryBridge::WriteFn stuck = [&memory](const std::vector<Wire::WriteOp>& ops)
-   {
-      std::this_thread::sleep_for(std::chrono::milliseconds(MemoryBridge::WRITE_TOTAL_MS + 150));
-      return memory.Write(ops);
-   };
-   bridge.SetGameRunning(true);
-   std::atomic<bool> serving { true };
-   std::thread api([&]
-      {
-         uint64_t frame = 0;
-         while (serving)
-         {
-            bridge.Service(read, ++frame, true, true, stuck);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-         }
-      });
-   Wire::WriteReply reply;
-   const auto t0 = std::chrono::steady_clock::now();
-   CHECK(bridge.Write({ { 0x100, { 1 } } }, reply, 40, g_running) == Result::Busy);
-   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-   serving = false;
-   api.join();
-   CHECK_MSG(ms >= MemoryBridge::WRITE_TOTAL_MS - 10 && ms < 300,
-      "the worker answered a stuck write after " + std::to_string(ms) + " ms");
 }
 
 // A handler that applied nothing (#634 timing out while the emulator is paused or stalled)
@@ -642,7 +614,6 @@ int main()
    TestWriteAppliesBeforeTheNextSnapshot();
    TestWriteLimitsAndNoGame();
    TestUnsupportedWriteIsRemembered();
-   TestAWriteIsBoundedByTheTotal();
    TestATimedOutWriteIsNotRemembered();
    TestATakenWriteIsNeverAnsweredBusy();
    return ScorbitTest::Summary("memory_bridge_test");
