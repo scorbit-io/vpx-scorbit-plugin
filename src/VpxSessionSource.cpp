@@ -20,8 +20,8 @@ namespace
 
 // PinMAME's write message, pinmame #634, mirrored here because the headers pinned for VPX
 // 5589 predate it. Field for field it must match PMPI_WRITE_MEMORY in PinMAMEPlugin.h once
-// that merges. On a libpinmame without it nobody subscribes, so a broadcast applies nothing
-// and `applied` stays 0, which the bridge reports as unsupported.
+// that merges. On a libpinmame without it nobody subscribes, so a broadcast leaves `applied`
+// as it was sent, which is how the bridge tells "no handler" from "applied nothing".
 constexpr const char* PMPI_WRITE_MEMORY_NAME = "WriteMemory:1";
 
 struct PinMAMEWriteMemoryOp
@@ -144,7 +144,9 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
          host.reserve(ops.size());
          for (const Wire::WriteOp& op : ops)
             host.push_back({ op.address, static_cast<uint32_t>(op.bytes.size()), op.bytes.data() });
-         PinMAMEWriteMemoryMsg msg { 1, static_cast<uint32_t>(host.size()), host.data(), 0 };
+         // Pre-filled with the sentinel: #634's handler always overwrites it (0 on a timeout),
+         // while an unsubscribed broadcast, or one during a table stop, leaves it untouched.
+         PinMAMEWriteMemoryMsg msg { 1, static_cast<uint32_t>(host.size()), host.data(), MemoryBridge::NO_WRITE_HANDLER };
          self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_writeMemoryMsgId, &msg);
          return msg.applied;
       });

@@ -792,7 +792,7 @@ public:
             const MemoryBridge::WriteFn write = [this, canWrite](const std::vector<Wire::WriteOp>& ops)
             {
                if (!canWrite)
-                  return 0u;
+                  return MemoryBridge::NO_WRITE_HANDLER;
                for (const Wire::WriteOp& op : ops)
                   for (size_t i = 0; i < op.bytes.size() && op.address + i < m_bytes.size(); i++)
                      m_bytes[op.address + i] = op.bytes[i];

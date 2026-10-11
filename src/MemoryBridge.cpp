@@ -155,7 +155,9 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
    // Woken by Service; the short slice is only so a stopping worker notices. A
    // plain sleep would add up to 16 ms per request on Windows' default timer.
    // Service never reads under the lock, so waking up late is never a read's doing.
-   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+   const auto start = std::chrono::steady_clock::now();
+   const auto deadline = start + std::chrono::milliseconds(budgetMs);
+   const auto hardDeadline = start + std::chrono::milliseconds(WRITE_TOTAL_MS);
    std::unique_lock lock(m_mutex);
    const auto waiting = [&]
    {
@@ -164,7 +166,8 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
       // A write already taken is going to be applied: answering busy now would report a
       // failure that did not happen.
       return std::chrono::steady_clock::now() < deadline
-         || (request->kind == Request::Kind::Write && request->taken);
+         || (request->kind == Request::Kind::Write && request->taken
+            && std::chrono::steady_clock::now() < hardDeadline);
    };
    while (waiting())
       m_answered.wait_for(lock, std::chrono::milliseconds(5));
@@ -259,9 +262,16 @@ void MemoryBridge::Answer(Request& request, const ReadFn& read, const WriteFn& w
          return;
       }
       // Applied before this frame's snapshot is taken, so the next Poll shows the write.
-      const uint32_t applied = write ? write(request.ops) : 0;
-      request.writeReply = { frame, static_cast<uint16_t>(applied) };
-      request.result = applied == 0 ? Result::Unsupported : Result::Ok;
+      const uint32_t applied = write ? write(request.ops) : NO_WRITE_HANDLER;
+      if (applied == NO_WRITE_HANDLER)
+         request.result = Result::Unsupported;
+      else if (applied == 0)
+         request.result = Result::Busy;   // a handler that timed out: transient, not remembered
+      else
+      {
+         request.writeReply = { frame, static_cast<uint16_t>(applied) };
+         request.result = Result::Ok;
+      }
       return;
    }
 

@@ -463,7 +463,11 @@ void TestUnsupportedWriteIsRemembered()
    FakeMemory memory;
    const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
    std::atomic<int> calls { 0 };
-   const MemoryBridge::WriteFn none = [&calls](const std::vector<Wire::WriteOp>&) { calls++; return 0u; };
+   const MemoryBridge::WriteFn none = [&calls](const std::vector<Wire::WriteOp>&)
+   {
+      calls++;
+      return MemoryBridge::NO_WRITE_HANDLER;
+   };
    bridge.SetGameRunning(true);
    uint64_t frame = 0;
 
@@ -500,6 +504,61 @@ void TestUnsupportedWriteIsRemembered()
    while (bareWrite.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
       bare.Service(read, ++bareFrame, true, true, { });
    CHECK(bareWrite.get() == Result::Unsupported);
+}
+
+// A host slower than anything the daemon still waits for: the worker gives up at
+// WRITE_TOTAL_MS, so its reply lands inside the daemon's 300 ms.
+void TestAWriteIsBoundedByTheTotal()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
+   const MemoryBridge::WriteFn stuck = [&memory](const std::vector<Wire::WriteOp>& ops)
+   {
+      std::this_thread::sleep_for(std::chrono::milliseconds(MemoryBridge::WRITE_TOTAL_MS + 150));
+      return memory.Write(ops);
+   };
+   bridge.SetGameRunning(true);
+   std::atomic<bool> serving { true };
+   std::thread api([&]
+      {
+         uint64_t frame = 0;
+         while (serving)
+         {
+            bridge.Service(read, ++frame, true, true, stuck);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+      });
+   Wire::WriteReply reply;
+   const auto t0 = std::chrono::steady_clock::now();
+   CHECK(bridge.Write({ { 0x100, { 1 } } }, reply, 40, g_running) == Result::Busy);
+   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+   serving = false;
+   api.join();
+   CHECK_MSG(ms >= MemoryBridge::WRITE_TOTAL_MS - 10 && ms < 300,
+      "the worker answered a stuck write after " + std::to_string(ms) + " ms");
+}
+
+// A handler that applied nothing (#634 timing out while the emulator is paused or stalled)
+// is transient: busy, and the next Write asks the host again.
+void TestATimedOutWriteIsNotRemembered()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
+   std::atomic<int> calls { 0 };
+   const MemoryBridge::WriteFn flaky = [&memory, &calls](const std::vector<Wire::WriteOp>& ops)
+   {
+      return calls++ == 0 ? 0u : memory.Write(ops);
+   };
+   bridge.SetGameRunning(true);
+   uint64_t frame = 0;
+   Wire::WriteReply reply;
+   auto first = std::async(std::launch::async, [&] { return bridge.Write({ { 0x100, { 7 } } }, reply, 2000, g_running); });
+   CHECK(ServeUntil(bridge, first, read, flaky, frame) == Result::Busy);
+   auto second = std::async(std::launch::async, [&] { return bridge.Write({ { 0x100, { 7 } } }, reply, 2000, g_running); });
+   CHECK(ServeUntil(bridge, second, read, flaky, frame) == Result::Ok);
+   CHECK(reply.applied == 1 && memory.At(0x100) == 7 && calls == 2);
 }
 
 // Once VPX's thread has taken a write, the worker waits for it past its budget: a write
@@ -582,6 +641,8 @@ int main()
    TestWriteAppliesBeforeTheNextSnapshot();
    TestWriteLimitsAndNoGame();
    TestUnsupportedWriteIsRemembered();
+   TestAWriteIsBoundedByTheTotal();
+   TestATimedOutWriteIsNotRemembered();
    TestATakenWriteIsNeverAnsweredBusy();
    return ScorbitTest::Summary("memory_bridge_test");
 }

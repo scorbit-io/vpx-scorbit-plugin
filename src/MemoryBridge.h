@@ -35,9 +35,13 @@ class MemoryBridge final
 public:
    // Reads main CPU memory; returns the bytes actually read, 0 when unavailable.
    using ReadFn = std::function<uint32_t(uint32_t address, uint8_t* out, uint32_t size)>;
-   // Applies the ops in order as one batch; returns how many were applied, 0 when the
-   // host has no write handler (a libpinmame without pinmame #634).
+   // Applies the ops in order as one batch and returns how many were applied: NO_WRITE_HANDLER
+   // when nothing handled the message at all (a libpinmame without pinmame #634), 0 when a
+   // handler applied nothing (its wait timed out, the emulator being paused or stalled).
    using WriteFn = std::function<uint32_t(const std::vector<Wire::WriteOp>& ops)>;
+   static constexpr uint32_t NO_WRITE_HANDLER = 0xFFFFFFFFu;
+   // A Write's whole life, queue wait included, stays under the daemon's 300 ms (design.md).
+   static constexpr int WRITE_TOTAL_MS = 290;
 
    enum class Result
    {
@@ -46,7 +50,7 @@ public:
       NoGame,
       OutOfRange,
       TooLarge,
-      Unsupported, // the host applied no write; remembered until the next Clear
+      Unsupported, // the host has no write handler; remembered until the next Clear
    };
 
    // --- worker thread ---------------------------------------------------------
@@ -64,12 +68,13 @@ public:
    Result ReadDirect(uint32_t address, uint32_t length, Wire::ReadDirectReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
-   // One Write: its ops applied in order in one pass. Once VPX's thread has taken it,
-   // the worker waits for the real answer past budgetMs (only a stop ends that wait), so
-   // a write is never answered busy and then applied. Once the host has applied nothing,
-   // every Write until the next Clear answers Unsupported at once. A zero cannot tell "no
-   // handler" (no pinmame #634) from a table that is stopping, so this is per session
-   // rather than for the plugin's life.
+   // One Write: its ops applied in order in one pass. budgetMs bounds the wait for VPX's
+   // thread to take it; once taken, the worker waits for the real answer (bounded by the
+   // host's own timeout and WRITE_TOTAL_MS), so a write is not answered busy and then
+   // applied. A host with no write handler answers Unsupported, and every Write until the
+   // next Clear then answers it at once; a handler that applied nothing answers Busy and is
+   // not remembered, since it is transient. Per session rather than for the plugin's life,
+   // because a table that is stopping also leaves the message unhandled.
    Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
       const std::atomic<bool>& running);
 

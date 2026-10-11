@@ -54,9 +54,9 @@ constexpr int BODY_TIMEOUT_MS = 1000;
 // How long a memory request waits for the API thread. The daemon allows 100 ms
 // per request, so answering busy inside this leaves it time to ask again.
 constexpr int MEMORY_BUDGET_MS = 50;
-// Write waits longer: the daemon allows it 300 ms (design.md), and a write answered busy
-// must not be applied anyway, so the budget is close to that.
-constexpr int WRITE_BUDGET_MS = 280;
+// The wait for VPX's thread to take a Write. Once taken, it is waited on to its answer, which
+// the host bounds at 250 ms, inside MemoryBridge::WRITE_TOTAL_MS and the daemon's 300 ms.
+constexpr int WRITE_BUDGET_MS = 40;
 // The daemon polls; this only exists so a half open socket is noticed.
 constexpr auto IDLE_PING_AFTER = std::chrono::milliseconds(500);
 
@@ -988,6 +988,9 @@ bool SocketWorker::AnswerWrite(const Wire::Message& msg)
    const MemoryBridge::Result result = m_memory->Write(req.ops, out, WRITE_BUDGET_MS, m_running);
    if (result == MemoryBridge::Result::Unsupported)
       LogOnce(LOG_LEVEL_WARN, "Socket: this PinMAME applies no memory writes (needs pinmame #634); answering unsupported_operation");
+   if (result == MemoryBridge::Result::OutOfRange)
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_OUT_OF_RANGE,
+         "the Write names no ops, or an op runs past the end of the address space");
    if (result != MemoryBridge::Result::Ok)
       return SendMemoryError(msg, result);
    return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(out));
