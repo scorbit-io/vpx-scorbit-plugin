@@ -491,6 +491,45 @@ void TestSliceTwoRoundTripsAndTruncation()
    CHECK(!Wire::Decode(ScorbitTest::Unhex("0807060504030201" "931c0000" "00000000" "ffff"), shortRead));
 }
 
+// scorbitd test_vpx_wire_layout.cpp, verbatim: a WPC credit write, the daemon putting the
+// unlock in the batch, and the NvRam it sends just before.
+void TestWriteGoldenVectors()
+{
+   Wire::WriteRequest write;
+   CHECK(Wire::Decode(ScorbitTest::Unhex("0200" "fd3f0000" "0100" "b4" "931c0000" "0200" "0801"), write));
+   CHECK(write == (Wire::WriteRequest { { { 0x3ffd, { 0xb4 } }, { 0x1c93, { 0x08, 0x01 } } } }));
+
+   const std::vector<uint8_t> reply = Wire::Encode(Wire::WriteReply { 0x0102030405060708ULL, 2 });
+   CHECK_MSG(ScorbitTest::Hex(reply) == "0807060504030201" "0200", ScorbitTest::Hex(reply));
+
+   Wire::NvRamParameters nvram;
+   CHECK(Wire::Decode(ScorbitTest::Unhex("00180000" "00080000" "fd3f0000" "b4" "b4"), nvram));
+   CHECK(nvram == (Wire::NvRamParameters { 0x1800, 0x800, 0x3ffd, 0xb4, 0xb4 }));
+}
+
+void TestWriteRoundTripsAndTruncation()
+{
+   const Wire::WriteRequest write { { { 0x10, { 1, 2, 3 } }, { 0x2000, { } } } };
+   Wire::WriteRequest writeBack;
+   CHECK(Wire::Decode(Wire::Encode(write), writeBack));
+   CHECK(writeBack == write);
+
+   const Wire::NvRamParameters nvram { 1, 2, 3, 4, 5 };
+   Wire::NvRamParameters nvramBack;
+   CHECK(Wire::Decode(Wire::Encode(nvram), nvramBack));
+   CHECK(nvramBack == nvram);
+
+   // A count promising more ops than the payload holds, and one too large to trust.
+   Wire::WriteRequest req;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0200" "fd3f0000" "0100" "b4"), req));
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("ffff"), req));
+   // An op whose length runs past the end of the payload.
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0100" "931c0000" "0400" "0801"), req));
+   // NvRam short of its lock value.
+   Wire::NvRamParameters shortNvram;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("00180000" "00080000" "fd3f0000" "b4"), shortNvram));
+}
+
 int main()
 {
    TestFraming();
@@ -505,5 +544,7 @@ int main()
    TestTableFileName();
    TestSliceTwoGoldenVectors();
    TestSliceTwoRoundTripsAndTruncation();
+   TestWriteGoldenVectors();
+   TestWriteRoundTripsAndTruncation();
    return ScorbitTest::Summary("wire_codec_test");
 }

@@ -771,7 +771,7 @@ void TestHandshakeAgainstCapturedAck()
 class ServedMemory
 {
 public:
-   explicit ServedMemory(MemoryBridge& bridge, bool serve = true)
+   explicit ServedMemory(MemoryBridge& bridge, bool serve = true, bool canWrite = true)
       : m_bytes(0x10000)
    {
       for (size_t i = 0; i < m_bytes.size(); i++)
@@ -779,7 +779,7 @@ public:
       bridge.SetGameRunning(true); // as SetRomId would, before any frame
       if (!serve)
          return;
-      m_thread = std::thread([this, &bridge]
+      m_thread = std::thread([this, &bridge, canWrite]
          {
             const MemoryBridge::ReadFn read = [this](uint32_t a, uint8_t* out, uint32_t n)
             {
@@ -788,10 +788,20 @@ public:
                   out[i] = m_bytes[a + i];
                return i;
             };
+            // Like PinMAME with pinmame #634, or without it (applies nothing).
+            const MemoryBridge::WriteFn write = [this, canWrite](const std::vector<Wire::WriteOp>& ops)
+            {
+               if (!canWrite)
+                  return 0u;
+               for (const Wire::WriteOp& op : ops)
+                  for (size_t i = 0; i < op.bytes.size() && op.address + i < m_bytes.size(); i++)
+                     m_bytes[op.address + i] = op.bytes[i];
+               return static_cast<uint32_t>(ops.size());
+            };
             uint64_t frame = 0;
             while (m_running)
             {
-               bridge.Service(read, ++frame, true, true);
+               bridge.Service(read, ++frame, true, true, write);
                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
          });
@@ -829,7 +839,7 @@ bool Reply(ScorbitTest::TestPeer& peer, uint16_t type, uint32_t seq, Wire::Messa
 }
 
 // Slice 2 end to end: advertised, Subscribe echoes, Poll carries the set,
-// ReadDirect reads, Write is still refused, and a Declare clears the set.
+// ReadDirect reads, NvRam and Write are served, and a Declare clears the set.
 void TestMemoryReadsOverTheSocket()
 {
    const std::string dir = MakeTempDir();
@@ -852,7 +862,7 @@ void TestMemoryReadsOverTheSocket()
    Wire::Hello hello;
    Wire::Declare declare;
    CHECK(Handshake(peer, hello, declare));
-   CHECK(hello.capabilities == (Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_MEMORY_READ));
+   CHECK(hello.capabilities == (Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE));
 
    Wire::Message msg;
    uint16_t code = 0;
@@ -894,9 +904,28 @@ void TestMemoryReadsOverTheSocket()
    CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 54, Wire::Encode(Wire::ReadDirectRequest { 0, 0x10001 })));
    CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 54, msg, code) && code == Wire::ERR_TOO_LARGE);
 
-   // memory_write was not advertised, so Write is refused as a type.
-   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 55, { }));
-   CHECK(Reply(peer, Wire::TYPE_WRITE, 55, msg, code) && code == Wire::ERR_UNSUPPORTED_TYPE);
+   // NvRam, as the daemon sends it before its first Write: served, with an empty reply.
+   CHECK(peer.Send(Wire::TYPE_NVRAM, 0, 55, ScorbitTest::Unhex("00180000" "00080000" "fd3f0000" "b4" "b4")));
+   CHECK(Reply(peer, Wire::TYPE_NVRAM, 55, msg, code) && code == 0 && msg.payload.empty());
+
+   // Write, scorbitd's golden request: the unlock and a two-byte payload, both applied, and the
+   // payload is in the next Poll of the subscribed range.
+   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 57, ScorbitTest::Unhex("0200" "fd3f0000" "0100" "b4" "931c0000" "0200" "0801")));
+   CHECK(Reply(peer, Wire::TYPE_WRITE, 57, msg, code) && code == 0);
+   Wire::WriteReply written;
+   CHECK(Wire::Decode(msg.payload, written) && written.applied == 2 && written.frame != 0);
+   CHECK(peer.Send(Wire::TYPE_POLL, 0, 58, { }));
+   CHECK(Reply(peer, Wire::TYPE_POLL, 58, msg, code) && code == 0);
+   CHECK(Wire::Decode(msg.payload, poll) && poll.blocks.size() == 2);
+   if (poll.blocks.size() == 2)
+      CHECK(poll.blocks[0].bytes[0] == 0x08 && poll.blocks[0].bytes[1] == 0x01);
+
+   // Seventeen ops is past the limit; an empty Write names nothing to write.
+   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 59, Wire::Encode(Wire::WriteRequest {
+      std::vector<Wire::WriteOp>(Wire::MAX_WRITE_OPS + 1, { 0x100, { 1 } }) })));
+   CHECK(Reply(peer, Wire::TYPE_WRITE, 59, msg, code) && code == Wire::ERR_TOO_LARGE);
+   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 60, Wire::Encode(Wire::WriteRequest { })));
+   CHECK(Reply(peer, Wire::TYPE_WRITE, 60, msg, code) && code == Wire::ERR_OUT_OF_RANGE);
 
    // A new Declare clears the set on both sides.
    source.Set(MakeDeclare("tom_13", 128, 32, 4, 2), { });
@@ -906,6 +935,50 @@ void TestMemoryReadsOverTheSocket()
    CHECK(Reply(peer, Wire::TYPE_POLL, 56, msg, code) && code == 0);
    CHECK(Wire::Decode(msg.payload, poll));
    CHECK_MSG(poll.blocks.empty(), "the previous ROM's subscription survived a Declare");
+
+   worker.Stop();
+}
+
+// Stock VPX: PinMAME has no write handler. Writes answer unsupported_operation, at once and
+// every time, while reads go on working.
+void TestWriteOnAHostWithoutWriteSupport()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeDeclare("ij_l7", 128, 32, 4, 1), { });
+   MemoryBridge bridge;
+   ServedMemory memory(bridge, true, false);
+   SocketWorker worker(source, MakeConfig(peer), Quiet(), &bridge);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   Wire::Declare declare;
+   CHECK(Handshake(peer, hello, declare));
+
+   Wire::Message msg;
+   uint16_t code = 0;
+   const std::vector<uint8_t> write = ScorbitTest::Unhex("0100" "931c0000" "0100" "08");
+   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 70, write));
+   CHECK(Reply(peer, Wire::TYPE_WRITE, 70, msg, code) && code == Wire::ERR_UNSUPPORTED_OPERATION);
+
+   const auto t0 = std::chrono::steady_clock::now();
+   CHECK(peer.Send(Wire::TYPE_WRITE, 0, 71, write));
+   CHECK(Reply(peer, Wire::TYPE_WRITE, 71, msg, code) && code == Wire::ERR_UNSUPPORTED_OPERATION);
+   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+   CHECK_MSG(ms < 50, "a remembered unsupported write took " + std::to_string(ms) + " ms");
+
+   CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 72, Wire::Encode(Wire::ReadDirectRequest { 0x1c93, 1 })));
+   CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 72, msg, code) && code == 0);
+   Wire::ReadDirectReply read;
+   CHECK(Wire::Decode(msg.payload, read) && read.bytes.size() == 1 && read.bytes[0] == memory.At(0x1c93));
 
    worker.Stop();
 }
@@ -1146,6 +1219,7 @@ int main()
    TestConnectRefused();
    TestConnectToListenerThatNeverAccepts();
    TestMemoryReadsOverTheSocket();
+   TestWriteOnAHostWithoutWriteSupport();
    TestMemoryReadWithoutAnApiThread();
    return ScorbitTest::Summary("socket_worker_test");
 }

@@ -360,6 +360,48 @@ struct ReadDirectReply
    bool operator==(const ReadDirectReply&) const = default;
 };
 
+// --- Slice 2 memory writes ---------------------------------------------------
+
+// One Write is one PMPI_WRITE_MEMORY: its ops are applied in order, in one pass on
+// the emulation thread. The daemon puts any NVRAM unlock inside the batch itself.
+inline constexpr size_t MAX_WRITE_OPS = 16;
+
+struct WriteOp
+{
+   uint32_t address = 0;
+   std::vector<uint8_t> bytes;      // u16 length on the wire
+
+   bool operator==(const WriteOp&) const = default;
+};
+
+struct WriteRequest
+{
+   std::vector<WriteOp> ops;        // 1 to MAX_WRITE_OPS
+
+   bool operator==(const WriteRequest&) const = default;
+};
+
+struct WriteReply
+{
+   uint64_t frame = 0;
+   uint16_t applied = 0;            // ops applied: count on success
+
+   bool operator==(const WriteReply&) const = default;
+};
+
+// Informational: the protected window and its lock, as setNvRamParameters has them.
+// The reply is empty, and the plugin adds no unlock of its own.
+struct NvRamParameters
+{
+   uint32_t start = 0;
+   uint32_t length = 0;
+   uint32_t unlockAddress = 0;
+   uint8_t unlockValue = 0;
+   uint8_t lockValue = 0;
+
+   bool operator==(const NvRamParameters&) const = default;
+};
+
 std::vector<uint8_t> Encode(const Hello& v);
 std::vector<uint8_t> Encode(const HelloAck& v);
 std::vector<uint8_t> Encode(const Declare& v);
@@ -372,6 +414,9 @@ std::vector<uint8_t> Encode(const Subscription& v);
 std::vector<uint8_t> Encode(const PollReply& v);
 std::vector<uint8_t> Encode(const ReadDirectRequest& v);
 std::vector<uint8_t> Encode(const ReadDirectReply& v);
+std::vector<uint8_t> Encode(const WriteRequest& v);
+std::vector<uint8_t> Encode(const WriteReply& v);
+std::vector<uint8_t> Encode(const NvRamParameters& v);
 
 // Every Decode requires each field it declares to be present and ignores any
 // bytes trailing them. That is the compatibility rule: appending a field is a
@@ -388,5 +433,8 @@ bool Decode(const std::vector<uint8_t>& payload, Subscription& out);
 bool Decode(const std::vector<uint8_t>& payload, PollReply& out);
 bool Decode(const std::vector<uint8_t>& payload, ReadDirectRequest& out);
 bool Decode(const std::vector<uint8_t>& payload, ReadDirectReply& out);
+bool Decode(const std::vector<uint8_t>& payload, WriteRequest& out);
+bool Decode(const std::vector<uint8_t>& payload, WriteReply& out);
+bool Decode(const std::vector<uint8_t>& payload, NvRamParameters& out);
 
 }

@@ -98,6 +98,30 @@ MemoryBridge::Result MemoryBridge::ReadDirect(uint32_t address, uint32_t length,
    return result;
 }
 
+MemoryBridge::Result MemoryBridge::Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out,
+   int budgetMs, const std::atomic<bool>& running)
+{
+   if (ops.size() > Wire::MAX_WRITE_OPS)
+      return Result::TooLarge;
+   if (ops.empty())
+      return Result::OutOfRange;
+   for (const Wire::WriteOp& op : ops)
+      if (Wraps(op.address, static_cast<uint32_t>(op.bytes.size())))
+         return Result::OutOfRange;
+   if (m_writesUnsupported)
+      return Result::Unsupported;
+   if (!m_gameRunning)
+      return Result::NoGame;
+
+   auto request = std::make_shared<Request>();
+   request->kind = Request::Kind::Write;
+   request->ops = ops;
+   const Result result = Submit(request, budgetMs, running);
+   if (result == Result::Ok)
+      out = request->writeReply;
+   return result;
+}
+
 void MemoryBridge::Clear()
 {
    std::lock_guard lock(m_mutex);
@@ -117,7 +141,7 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
       // a game ending since the caller's check left no Service to answer this.
       if (!m_gameRunning)
       {
-         Answer(*request, { }, 0, false);
+         Answer(*request, { }, { }, 0, false);
          Queue one { request };
          Complete(one);
          return request->result;
@@ -159,7 +183,7 @@ void MemoryBridge::SetGameRunning(bool running)
       Queue pending;
       pending.swap(m_queue);
       for (const std::shared_ptr<Request>& request : pending)
-         Answer(*request, { }, 0, false);
+         Answer(*request, { }, { }, 0, false);
       Complete(pending);
    }
    m_answered.notify_all();
@@ -171,7 +195,8 @@ size_t MemoryBridge::QueuedForTest()
    return m_queue.size();
 }
 
-void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning)
+void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning,
+   const WriteFn& write)
 {
    Queue work;
    std::vector<Wire::MemoryRange> ranges;
@@ -188,7 +213,7 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
 
    for (const std::shared_ptr<Request>& request : work)
    {
-      Answer(*request, read, frame, gameRunning);
+      Answer(*request, read, write, frame, gameRunning);
       // Snapshot the set this batch installs, so a Poll right after the
       // Subscribe reply already has it.
       if (request->kind == Request::Kind::Subscribe && request->subscriptionId > rangesId)
@@ -211,8 +236,23 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
    m_answered.notify_all();
 }
 
-void MemoryBridge::Answer(Request& request, const ReadFn& read, uint64_t frame, bool gameRunning)
+void MemoryBridge::Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
+   bool gameRunning)
 {
+   if (request.kind == Request::Kind::Write)
+   {
+      if (!gameRunning)
+      {
+         request.result = Result::NoGame;
+         return;
+      }
+      // Applied before this frame's snapshot is taken, so the next Poll shows the write.
+      const uint32_t applied = write ? write(request.ops) : 0;
+      request.writeReply = { frame, static_cast<uint16_t>(applied) };
+      request.result = applied == 0 ? Result::Unsupported : Result::Ok;
+      return;
+   }
+
    if (request.kind == Request::Kind::Subscribe)
    {
       request.accepted.clear();
@@ -265,6 +305,9 @@ void MemoryBridge::Complete(Queue& requests)
 {
    for (const std::shared_ptr<Request>& request : requests)
    {
+      // Recorded even for a request the worker gave up on: the host still has no handler.
+      if (request->kind == Request::Kind::Write && request->result == Result::Unsupported)
+         m_writesUnsupported = true;
       if (!request->abandoned && request->kind == Request::Kind::Subscribe
          && request->subscriptionId > m_subscriptionId)
       {

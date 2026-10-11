@@ -15,6 +15,32 @@
 #define SCORBIT_VPX_PINNED_REVISION ""
 #endif
 
+namespace
+{
+
+// PinMAME's write message, pinmame #634, mirrored here because the headers pinned for VPX
+// 5589 predate it. Field for field it must match PMPI_WRITE_MEMORY in PinMAMEPlugin.h once
+// that merges. On a libpinmame without it nobody subscribes, so a broadcast applies nothing
+// and `applied` stays 0, which the bridge reports as unsupported.
+constexpr const char* PMPI_WRITE_MEMORY_NAME = "WriteMemory:1";
+
+struct PinMAMEWriteMemoryOp
+{
+   uint32_t address;
+   uint32_t size;
+   const uint8_t* data;
+};
+
+struct PinMAMEWriteMemoryMsg
+{
+   int version;
+   uint32_t count;
+   const PinMAMEWriteMemoryOp* ops;
+   uint32_t applied;
+};
+
+}
+
 namespace Scorbit
 {
 
@@ -31,6 +57,7 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    , m_gameEndMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_END))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
    , m_readMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_READ_MEMORY))
+   , m_writeMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_WRITE_MEMORY_NAME))
 {
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_gameEndMsgId, OnGameEnd, this);
@@ -42,6 +69,7 @@ VpxSessionSource::~VpxSessionSource()
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_gameEndMsgId, OnGameEnd, this);
    m_msgApi->UnsubscribeMsg(m_gameStartMsgId, OnGameStart, this);
+   m_msgApi->ReleaseMsgID(m_writeMemoryMsgId);
    m_msgApi->ReleaseMsgID(m_readMemoryMsgId);
    m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
    m_msgApi->ReleaseMsgID(m_gameEndMsgId);
@@ -109,7 +137,17 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
          self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_readMemoryMsgId, &msg);
          return msg.read;
       },
-      frame, self->m_playerRunning, self->m_gameRunning);
+      frame, self->m_playerRunning, self->m_gameRunning,
+      [self](const std::vector<Wire::WriteOp>& ops)
+      {
+         std::vector<PinMAMEWriteMemoryOp> host;
+         host.reserve(ops.size());
+         for (const Wire::WriteOp& op : ops)
+            host.push_back({ op.address, static_cast<uint32_t>(op.bytes.size()), op.bytes.data() });
+         PinMAMEWriteMemoryMsg msg { 1, static_cast<uint32_t>(host.size()), host.data(), 0 };
+         self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_writeMemoryMsgId, &msg);
+         return msg.applied;
+      });
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)
