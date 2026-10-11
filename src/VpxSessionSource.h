@@ -76,6 +76,7 @@ private:
    const unsigned int m_gameEndMsgId;
    const unsigned int m_prepareFrameMsgId;
    const unsigned int m_readMemoryMsgId;
+   const unsigned int m_writeMemoryMsgId;
 
    std::atomic<uint64_t> m_renderedFrame { 0 };
    std::atomic<bool> m_playerRunning { false };

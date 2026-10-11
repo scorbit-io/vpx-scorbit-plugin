@@ -54,6 +54,9 @@ constexpr int BODY_TIMEOUT_MS = 1000;
 // How long a memory request waits for the API thread. The daemon allows 100 ms
 // per request, so answering busy inside this leaves it time to ask again.
 constexpr int MEMORY_BUDGET_MS = 50;
+// The wait for VPX's thread to take a Write; an untaken write answers busy with nothing
+// applied. Once taken, it is waited on to its answer, which pinmame #634 bounds at 250 ms.
+constexpr int WRITE_BUDGET_MS = 40;
 // The daemon polls; this only exists so a half open socket is noticed.
 constexpr auto IDLE_PING_AFTER = std::chrono::milliseconds(500);
 
@@ -801,7 +804,10 @@ bool SocketWorker::Handshake()
    hello.pluginApiCommit = m_config.pluginApiCommit;
    hello.token = token;
    hello.instanceId = m_instanceId;
-   hello.capabilities = Wire::CAP_IDENTIFY_FRAMES | (m_memory != nullptr ? Wire::CAP_MEMORY_READ : 0u);
+   // memory_write is advertised whenever reads are: whether the host can write is only known
+   // from the first Write, which answers unsupported_operation on a libpinmame without #634.
+   hello.capabilities = Wire::CAP_IDENTIFY_FRAMES
+      | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u);
 
    // Hello's vpx_revision is the build the plugin API headers were pinned to.
    // The plugin API exposes no runtime version, so this is what the plugin
@@ -854,6 +860,7 @@ bool SocketWorker::Handshake()
 
    m_connected = true;
    m_lastOnce.clear();
+   m_loggedNvRam = false;
    // Every session starts with no subscription (design.md, subscription lifetime).
    if (m_memory != nullptr)
       m_memory->Clear();
@@ -968,6 +975,52 @@ void SocketWorker::Serve()
    Log(LOG_LEVEL_INFO, "Socket: sent Bye");
 }
 
+bool SocketWorker::AnswerWrite(const Wire::Message& msg)
+{
+   Wire::WriteRequest req;
+   if (!Wire::Decode(msg.payload, req))
+   {
+      Log(LOG_LEVEL_ERROR, "Socket: malformed Write request, closing");
+      SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "Write request payload");
+      return false;
+   }
+   Wire::WriteReply out;
+   const MemoryBridge::Result result = m_memory->Write(req.ops, out, WRITE_BUDGET_MS, m_running);
+   if (result == MemoryBridge::Result::Unsupported)
+      LogOnce(LOG_LEVEL_WARN, "Socket: this PinMAME applies no memory writes (needs pinmame #634); answering unsupported_operation");
+   if (result == MemoryBridge::Result::OutOfRange)
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_OUT_OF_RANGE,
+         "the Write names no ops, or an op runs past the end of the address space");
+   if (result != MemoryBridge::Result::Ok)
+      return SendMemoryError(msg, result);
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(out));
+}
+
+// Informational (design.md): the daemon puts the unlock inside each Write, so nothing here
+// changes how a Write is applied. It is served rather than refused, because code 1 in answer
+// to any slice 2 type ends the session's memory traffic.
+bool SocketWorker::AnswerNvRam(const Wire::Message& msg)
+{
+   Wire::NvRamParameters nvram;
+   if (!Wire::Decode(msg.payload, nvram))
+   {
+      Log(LOG_LEVEL_ERROR, "Socket: malformed NvRam request, closing");
+      SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "NvRam request payload");
+      return false;
+   }
+   if (!m_loggedNvRam)
+   {
+      char line[160];
+      std::snprintf(line, sizeof(line), "Socket: NvRam window 0x%04x+0x%x, unlock 0x%02x at 0x%04x, lock 0x%02x",
+         static_cast<unsigned>(nvram.start), static_cast<unsigned>(nvram.length),
+         static_cast<unsigned>(nvram.unlockValue), static_cast<unsigned>(nvram.unlockAddress),
+         static_cast<unsigned>(nvram.lockValue));
+      Log(LOG_LEVEL_INFO, line);
+      m_loggedNvRam = true;
+   }
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, { });
+}
+
 bool SocketWorker::Dispatch(const Wire::Message& msg)
 {
    switch (msg.header.type)
@@ -987,6 +1040,14 @@ bool SocketWorker::Dispatch(const Wire::Message& msg)
    case Wire::TYPE_READ_DIRECT:
       if (m_memory != nullptr)
          return AnswerReadDirect(msg);
+      break;
+   case Wire::TYPE_WRITE:
+      if (m_memory != nullptr)
+         return AnswerWrite(msg);
+      break;
+   case Wire::TYPE_NVRAM:
+      if (m_memory != nullptr)
+         return AnswerNvRam(msg);
       break;
    case Wire::TYPE_BYE:
    {
@@ -1016,6 +1077,9 @@ bool SocketWorker::SendMemoryError(const Wire::Message& msg, MemoryBridge::Resul
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_OUT_OF_RANGE, "range is outside readable memory");
    case MemoryBridge::Result::TooLarge:
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_TOO_LARGE, "request exceeds the slice 2 limits");
+   case MemoryBridge::Result::Unsupported:
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_UNSUPPORTED_OPERATION,
+         "this PinMAME applies no memory writes (needs pinmame #634)");
    default:
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_BUSY, "memory was not serviced in time, ask again");
    }

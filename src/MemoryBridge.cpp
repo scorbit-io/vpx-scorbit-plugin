@@ -40,7 +40,8 @@ MemoryBridge::Result MemoryBridge::Subscribe(const std::vector<Wire::MemoryRange
    // say so: answer at once with nothing kept, which the daemon allows.
    if (ranges.empty() || !m_gameRunning)
    {
-      Clear();
+      std::lock_guard lock(m_mutex);
+      ResetSubscription();
       return Result::Ok;
    }
 
@@ -98,9 +99,39 @@ MemoryBridge::Result MemoryBridge::ReadDirect(uint32_t address, uint32_t length,
    return result;
 }
 
+MemoryBridge::Result MemoryBridge::Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out,
+   int budgetMs, const std::atomic<bool>& running)
+{
+   if (ops.size() > Wire::MAX_WRITE_OPS)
+      return Result::TooLarge;
+   if (ops.empty())
+      return Result::OutOfRange;
+   for (const Wire::WriteOp& op : ops)
+      if (Wraps(op.address, static_cast<uint32_t>(op.bytes.size())))
+         return Result::OutOfRange;
+   if (m_writesUnsupported)
+      return Result::Unsupported;
+   if (!m_gameRunning)
+      return Result::NoGame;
+
+   auto request = std::make_shared<Request>();
+   request->kind = Request::Kind::Write;
+   request->ops = ops;
+   const Result result = Submit(request, budgetMs, running);
+   if (result == Result::Ok)
+      out = request->writeReply;
+   return result;
+}
+
 void MemoryBridge::Clear()
 {
    std::lock_guard lock(m_mutex);
+   m_writesUnsupported = false;
+   ResetSubscription();
+}
+
+void MemoryBridge::ResetSubscription()
+{
    m_ranges.clear();
    // A fresh id, so a Subscribe already queued from before this point cannot
    // install its set once the API thread gets to it.
@@ -117,7 +148,7 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
       // a game ending since the caller's check left no Service to answer this.
       if (!m_gameRunning)
       {
-         Answer(*request, { }, 0, false);
+         Answer(*request, { }, { }, 0, false);
          Queue one { request };
          Complete(one);
          return request->result;
@@ -132,8 +163,21 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
    // Service never reads under the lock, so waking up late is never a read's doing.
    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
    std::unique_lock lock(m_mutex);
-   while (!request->done && running && std::chrono::steady_clock::now() < deadline)
-      m_answered.wait_for(lock, std::chrono::milliseconds(5));
+   const auto waiting = [&]
+   {
+      if (request->done || !running)
+         return false;
+      // A write already taken may still be applied: answering busy would report a failure
+      // that did not happen, and a retry would apply it twice. The host bounds the wait.
+      return (request->kind == Request::Kind::Write && request->taken)
+         || std::chrono::steady_clock::now() < deadline;
+   };
+   while (waiting())
+   {
+      // Wake at the budget, not on the next 5 ms tick past it.
+      const auto tick = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+      m_answered.wait_until(lock, tick < deadline || request->taken ? tick : deadline);
+   }
 
    // Decided under the lock Complete runs under: either it finished the request,
    // or it never will install it. The request may already be out of the queue and
@@ -159,7 +203,7 @@ void MemoryBridge::SetGameRunning(bool running)
       Queue pending;
       pending.swap(m_queue);
       for (const std::shared_ptr<Request>& request : pending)
-         Answer(*request, { }, 0, false);
+         Answer(*request, { }, { }, 0, false);
       Complete(pending);
    }
    m_answered.notify_all();
@@ -171,7 +215,8 @@ size_t MemoryBridge::QueuedForTest()
    return m_queue.size();
 }
 
-void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning)
+void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning,
+   const WriteFn& write)
 {
    Queue work;
    std::vector<Wire::MemoryRange> ranges;
@@ -182,13 +227,15 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
          return;
       m_gameRunning = gameRunning;
       work.swap(m_queue);
+      for (const std::shared_ptr<Request>& request : work)
+         request->taken = true;
       ranges = m_ranges;
       rangesId = m_subscriptionId;
    }
 
    for (const std::shared_ptr<Request>& request : work)
    {
-      Answer(*request, read, frame, gameRunning);
+      Answer(*request, read, write, frame, gameRunning);
       // Snapshot the set this batch installs, so a Poll right after the
       // Subscribe reply already has it.
       if (request->kind == Request::Kind::Subscribe && request->subscriptionId > rangesId)
@@ -211,8 +258,30 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
    m_answered.notify_all();
 }
 
-void MemoryBridge::Answer(Request& request, const ReadFn& read, uint64_t frame, bool gameRunning)
+void MemoryBridge::Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
+   bool gameRunning)
 {
+   if (request.kind == Request::Kind::Write)
+   {
+      if (!gameRunning)
+      {
+         request.result = Result::NoGame;
+         return;
+      }
+      // Applied before this frame's snapshot is taken, so the next Poll shows the write.
+      const uint32_t applied = write ? write(request.ops) : NO_WRITE_HANDLER;
+      if (applied == NO_WRITE_HANDLER)
+         request.result = Result::Unsupported;
+      else if (applied == 0)
+         request.result = Result::Busy;   // a handler that timed out: transient, not remembered
+      else
+      {
+         request.writeReply = { frame, static_cast<uint16_t>(applied) };
+         request.result = Result::Ok;
+      }
+      return;
+   }
+
    if (request.kind == Request::Kind::Subscribe)
    {
       request.accepted.clear();
@@ -265,6 +334,9 @@ void MemoryBridge::Complete(Queue& requests)
 {
    for (const std::shared_ptr<Request>& request : requests)
    {
+      // Recorded even for a request the worker stopped waiting on: the host still answered.
+      if (request->kind == Request::Kind::Write && request->result == Result::Unsupported)
+         m_writesUnsupported = true;
       if (!request->abandoned && request->kind == Request::Kind::Subscribe
          && request->subscriptionId > m_subscriptionId)
       {

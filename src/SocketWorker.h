@@ -152,6 +152,8 @@ private:
    bool AnswerSubscribe(const Wire::Message& msg);
    bool AnswerPoll(const Wire::Message& msg);
    bool AnswerReadDirect(const Wire::Message& msg);
+   bool AnswerWrite(const Wire::Message& msg);
+   bool AnswerNvRam(const Wire::Message& msg);
    // Sends the error for a bridge result other than Ok.
    bool SendMemoryError(const Wire::Message& msg, MemoryBridge::Result result);
 
@@ -195,6 +197,7 @@ private:
    uint32_t m_seq = 0;
    DeclareSnapshot m_declared;
    bool m_haveDeclared = false;
+   bool m_loggedNvRam = false;           // NvRam is logged once per session
    Clock::time_point m_lastActivity { };
    std::string m_lastOnce;
 };

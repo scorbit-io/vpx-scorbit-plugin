@@ -533,4 +533,84 @@ bool Decode(const std::vector<uint8_t>& payload, ReadDirectReply& out)
    return r.Ok();
 }
 
+
+std::vector<uint8_t> Encode(const WriteRequest& v)
+{
+   if (v.ops.size() > 0xFFFF)
+      return { };
+   Writer w;
+   w.U16(static_cast<uint16_t>(v.ops.size()));
+   for (const WriteOp& op : v.ops)
+   {
+      if (op.bytes.size() > 0xFFFF)
+         return { };
+      w.U32(op.address);
+      w.U16(static_cast<uint16_t>(op.bytes.size()));
+      w.Bytes(op.bytes.data(), op.bytes.size());
+   }
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, WriteRequest& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint16_t count = 0;
+   out.ops.clear();
+   if (!r.U16(count))
+      return false;
+   // Each op is at least 6 bytes, so a count the payload cannot hold is refused before allocating.
+   if (r.Remaining() < static_cast<size_t>(count) * 6)
+      return false;
+   out.ops.reserve(count);
+   for (uint16_t i = 0; i < count; i++)
+   {
+      WriteOp op;
+      uint16_t length = 0;
+      r.U32(op.address);
+      if (!r.U16(length) || length > r.Remaining())
+         return false;
+      r.Bytes(op.bytes, length);
+      out.ops.push_back(std::move(op));
+   }
+   return r.Ok();
+}
+
+std::vector<uint8_t> Encode(const WriteReply& v)
+{
+   Writer w;
+   w.U64(v.frame);
+   w.U16(v.applied);
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, WriteReply& out)
+{
+   Reader r(payload.data(), payload.size());
+   r.U64(out.frame);
+   r.U16(out.applied);
+   return r.Ok();
+}
+
+std::vector<uint8_t> Encode(const NvRamParameters& v)
+{
+   Writer w;
+   w.U32(v.start);
+   w.U32(v.length);
+   w.U32(v.unlockAddress);
+   w.U8(v.unlockValue);
+   w.U8(v.lockValue);
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, NvRamParameters& out)
+{
+   Reader r(payload.data(), payload.size());
+   r.U32(out.start);
+   r.U32(out.length);
+   r.U32(out.unlockAddress);
+   r.U8(out.unlockValue);
+   r.U8(out.lockValue);
+   return r.Ok();
+}
+
 }

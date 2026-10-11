@@ -35,6 +35,11 @@ class MemoryBridge final
 public:
    // Reads main CPU memory; returns the bytes actually read, 0 when unavailable.
    using ReadFn = std::function<uint32_t(uint32_t address, uint8_t* out, uint32_t size)>;
+   // Applies the ops in order as one batch and returns how many were applied: NO_WRITE_HANDLER
+   // when nothing handled the message at all (a libpinmame without pinmame #634), 0 when a
+   // handler applied nothing (its wait timed out, the emulator being paused or stalled).
+   using WriteFn = std::function<uint32_t(const std::vector<Wire::WriteOp>& ops)>;
+   static constexpr uint32_t NO_WRITE_HANDLER = 0xFFFFFFFFu;
 
    enum class Result
    {
@@ -43,6 +48,7 @@ public:
       NoGame,
       OutOfRange,
       TooLarge,
+      Unsupported, // the host has no write handler; remembered until the next Clear
    };
 
    // --- worker thread ---------------------------------------------------------
@@ -60,7 +66,20 @@ public:
    Result ReadDirect(uint32_t address, uint32_t length, Wire::ReadDirectReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
-   // Empties the subscription: a new session and every Declare start from none.
+   // One Write: its ops applied in order in one pass. budgetMs bounds the wait for VPX's
+   // thread to take it, and a write not taken by then answers Busy with nothing applied.
+   // Once taken, the worker waits for the real answer, which the host bounds (pinmame #634
+   // gives up at 250 ms); only a stop ends that wait. A taken write is never answered Busy,
+   // because it may still be applied, and a daemon that retried would apply it twice. A host with no write handler answers Unsupported, and every Write until the
+   // next Clear then answers it at once; a handler that applied nothing answers Busy and is
+   // not remembered, since it is transient. Per session rather than for the plugin's life,
+   // because a table that is stopping also leaves the message unhandled.
+   Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
+      const std::atomic<bool>& running);
+
+   // Starts a session's memory state over: a new session and every Declare start from no
+   // subscription, and forget an Unsupported write (the next table may be able to write).
+   // An empty Subscribe only empties the subscription.
    void Clear();
 
    // --- API thread ------------------------------------------------------------
@@ -70,8 +89,9 @@ public:
    // stopping also answers whatever is still queued.
    void SetGameRunning(bool running);
 
-   // Once per rendered frame.
-   void Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning);
+   // Once per rendered frame. An empty write function answers writes Unsupported.
+   void Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning,
+      const WriteFn& write);
 
    // Tests only: requests waiting for Service.
    size_t QueuedForTest();
@@ -82,27 +102,33 @@ public:
 private:
    struct Request
    {
-      enum class Kind { Subscribe, ReadDirect } kind = Kind::ReadDirect;
+      enum class Kind { Subscribe, ReadDirect, Write } kind = Kind::ReadDirect;
       std::vector<Wire::MemoryRange> ranges;   // Subscribe
       uint32_t address = 0;                    // ReadDirect
       uint32_t length = 0;
       uint64_t subscriptionId = 0;             // Subscribe: the id to install
+      std::vector<Wire::WriteOp> ops;          // Write
 
       // Written by the API thread before done is set.
       std::vector<Wire::MemoryRange> accepted;
       Wire::ReadDirectReply reply;
+      Wire::WriteReply writeReply;
       Result result = Result::Busy;
 
       // Under m_mutex.
       bool done = false;
       bool abandoned = false;   // the worker answered busy; never install it
+      bool taken = false;       // Service swapped it out; a write is then waited on to the end
    };
 
    using Queue = std::deque<std::shared_ptr<Request>>;
 
    Result Submit(const std::shared_ptr<Request>& request, int budgetMs, const std::atomic<bool>& running);
+   // Under m_mutex: empties the subscription and invalidates its snapshot.
+   void ResetSubscription();
    // Reads only; touches no shared state, so it runs without the lock.
-   static void Answer(Request& request, const ReadFn& read, uint64_t frame, bool gameRunning);
+   static void Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
+      bool gameRunning);
    // Under m_mutex.
    void Complete(Queue& requests);
    // Reads only, into m_nextSnapshot; true when every range read in full.
@@ -125,6 +151,7 @@ private:
    Wire::PollReply m_nextSnapshot;   // API thread only; swapped into m_snapshot
 
    std::atomic<bool> m_gameRunning { false };
+   std::atomic<bool> m_writesUnsupported { false };
 };
 
 }
