@@ -40,8 +40,9 @@ public:
    // handler applied nothing (its wait timed out, the emulator being paused or stalled).
    using WriteFn = std::function<uint32_t(const std::vector<Wire::WriteOp>& ops)>;
    static constexpr uint32_t NO_WRITE_HANDLER = 0xFFFFFFFFu;
-   // A Write's whole life, queue wait included, stays under the daemon's 300 ms (design.md).
-   static constexpr int WRITE_TOTAL_MS = 290;
+   // A Write's whole life, queue wait included, under the daemon's 300 ms (design.md), with
+   // 30 ms left for the worker to be scheduled after its wake-up and for the reply to go out.
+   static constexpr int WRITE_TOTAL_MS = 270;
 
    enum class Result
    {

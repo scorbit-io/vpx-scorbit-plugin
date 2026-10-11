@@ -507,7 +507,8 @@ void TestUnsupportedWriteIsRemembered()
 }
 
 // A host slower than anything the daemon still waits for: the worker gives up at
-// WRITE_TOTAL_MS, so its reply lands inside the daemon's 300 ms.
+// WRITE_TOTAL_MS, so its reply lands inside the daemon's 300 ms. The upper bound is that
+// contract, not the cap: the cap leaves 30 ms for scheduling on a loaded machine.
 void TestAWriteIsBoundedByTheTotal()
 {
    MemoryBridge bridge;

@@ -170,7 +170,12 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
             && std::chrono::steady_clock::now() < hardDeadline);
    };
    while (waiting())
-      m_answered.wait_for(lock, std::chrono::milliseconds(5));
+   {
+      // Wake at the limit that applies, not on the next 5 ms tick past it.
+      const auto limit = (request->kind == Request::Kind::Write && request->taken) ? hardDeadline : deadline;
+      const auto tick = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+      m_answered.wait_until(lock, tick < limit ? tick : limit);
+   }
 
    // Decided under the lock Complete runs under: either it finished the request,
    // or it never will install it. The request may already be out of the queue and
