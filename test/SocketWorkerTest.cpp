@@ -588,10 +588,9 @@ bool OpenVector(const char* name, const std::string& hex, Wire::Message& out)
    return ok;
 }
 
-// Hello and the populated Declare are withheld from this public repo: one carries the
-// daemon session token, the other a tablePath naming a home directory and an email
-// address. They live beside the corpus and are loaded only when SCORBIT_WIRE_VECTORS
-// points at that file. Absent, the checks that need them skip.
+// The SB-4600 populated Declare is withheld from this public repo: its tablePath names a
+// home directory and an email address. It lives beside the corpus and is loaded only
+// when SCORBIT_WIRE_VECTORS points at that file. Absent, the checks that need it skip.
 std::string PrivateVector(const char* name)
 {
    const char* path = getenv("SCORBIT_WIRE_VECTORS");
@@ -691,23 +690,37 @@ void TestCapturedWireBytes()
    CHECK_MSG(Wire::Encode(ack) == msg.payload, "HelloAck re encode is byte identical");
    CHECK(ack.protoMajor == Wire::PROTO_MAJOR && ack.protoMinor == Wire::PROTO_MINOR);
 
-   // --- The withheld pair, only when the corpus file is pointed at ------------
-   const std::string helloHex = PrivateVector("HELLO");
-   const std::string declareHex = PrivateVector("DECLARE");
-   if (helloHex.empty() || declareHex.empty())
-   {
-      fprintf(stderr, "skip: Hello and populated Declare need SCORBIT_WIRE_VECTORS "
-                      "(they carry a session token and a personal path, so they are "
-                      "not in this repo)\n");
-      return;
-   }
-
-   CHECK(OpenVector("HELLO", helloHex, msg));
+   CHECK(OpenVector("HELLO", Vectors::HELLO, msg));
+   CHECK(msg.header.type == Wire::TYPE_HELLO && msg.header.seq == 1);
    Wire::Hello hello { };
    CHECK(Wire::Decode(msg.payload, hello));
    CHECK_MSG(Wire::Encode(hello) == msg.payload, "Hello re encode is byte identical");
    CHECK(hello.protoMajor == Wire::PROTO_MAJOR && hello.protoMinor == Wire::PROTO_MINOR);
    CHECK(hello.vpxRevision == "5589");
+   CHECK(hello.token == std::string(64, '0'));
+   CHECK_MSG(hello.capabilities == (Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_MEMORY_READ
+                                    | Wire::CAP_MEMORY_WRITE),
+             "a slice 2 plugin advertises frames, memory read and memory write");
+
+   CHECK(OpenVector("DECLARE_METEOR", Vectors::DECLARE_METEOR, msg));
+   CHECK(msg.header.type == Wire::TYPE_DECLARE);
+   Wire::Declare meteor { };
+   CHECK(Wire::Decode(msg.payload, meteor));
+   CHECK_MSG(Wire::Encode(meteor) == msg.payload, "Meteor Declare re encode is byte identical");
+   CHECK(meteor.romId == "meteor");
+   CHECK_MSG(meteor.tablePath == "Meteor (Stern 1979).vpx", "the table by file name, never a path");
+   CHECK_MSG(meteor.width == 0 && meteor.height == 0 && meteor.shades == 0
+                && meteor.identifyFormat.empty(),
+             "segment displays declare no conforming source");
+
+   // --- The withheld DMD Declare, only when the corpus file is pointed at -----
+   const std::string declareHex = PrivateVector("DECLARE");
+   if (declareHex.empty())
+   {
+      fprintf(stderr, "skip: the populated DMD Declare needs SCORBIT_WIRE_VECTORS "
+                      "(it carries a personal path, so it is not in this repo)\n");
+      return;
+   }
 
    CHECK(OpenVector("DECLARE", declareHex, msg));
    Wire::Declare declare { };

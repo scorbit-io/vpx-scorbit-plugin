@@ -16,12 +16,20 @@
 // beside the seam capture session.1789158304.37066.scap, which replays to scores
 // [168428290, 134078260].
 //
-// THIS REPOSITORY IS PUBLIC, so two vectors from that session are deliberately absent.
-// Hello carries the daemon session token, and the populated Declare carries a tablePath
-// naming a home directory, an email address and an internal shared-drive layout. Both
-// live beside the corpus instead, in wire/private-vectors.hex. Point
-// SCORBIT_WIRE_VECTORS at that file to enable the checks that need them; without it
-// those checks skip and everything here still runs. Never paste either into this repo.
+// HELLO and DECLARE_METEOR come from a later session (SB-5555): Meteor under VPX 5589
+// with memory read and write, daemon scorbitd 0.7.4-10-g5fdeedb, recorded as
+//   shared/vpx-runs/meteor-2026-10-11/wire.bin
+//   md5 87d26aeaf74becb53d6f82c69bbedc89, 301373 records
+// The Hello's token is replaced by a synthetic one; the Declare is untouched and names
+// the table by file name only, as every Declare has since the plugin stopped sending
+// the full path.
+//
+// THIS REPOSITORY IS PUBLIC, so two vectors from the SB-4600 session are deliberately
+// absent: its Hello carries a session token, and its populated Declare a tablePath
+// naming a home directory, an email address and an internal shared-drive layout. They
+// live beside that corpus, in wire/private-vectors.hex. The Declare is still worth
+// running, as the only populated Declare with DMD geometry; point SCORBIT_WIRE_VECTORS
+// at that file to enable it. Never paste either into this repo.
 //
 // Each vector is a complete wire frame: the u32 length prefix, then type, flags and
 // seq, then the payload — the bytes as they crossed, so a vector can be written to a
@@ -36,6 +44,25 @@
 
 namespace Scorbit::Vectors
 {
+
+// Plugin to daemon. The opening Hello, seq 1: protocol 1.0, plugin 0.1.0, VPX 5589 at
+// plugin API commit 0bc9838ed, and capabilities 0x7 — identify frames, memory read and
+// memory write. Info is empty. The token is the one edited field: 64 '0' stand in for
+// the captured value, same length, every other byte as it crossed.
+// 151 bytes on the wire.
+inline const std::string HELLO =
+   "930000000100000001000000010000000500302e312e3004003535383928003062633938333865643566316262616338"
+   "363965666466623665373835623832396135343164336640003030303030303030303030303030303030303030303030"
+   "303030303030303030303030303030303030303030303030303030303030303030303030303030303070a1c4812f3e2f"
+   "1c070000000000";
+
+// Plugin to daemon. A populated Declare for a table with no DMD: rom meteor, the table
+// file name, and zero geometry, shades and format, because segment displays offer no
+// conforming source.
+// 83 bytes on the wire.
+inline const std::string DECLARE_METEOR =
+   "4f000000030000000300000006006d6574656f7217004d6574656f722028537465726e2031393739292e767078130056"
+   "50696e62616c6c585f424746582d353538390400353538390000000000000000000000";
 
 // Daemon to plugin. The accepting response, flags = RESPONSE, seq 1 — which is
 // the seq the worker's first Hello carries, so this replays verbatim.
