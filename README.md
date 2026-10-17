@@ -15,8 +15,9 @@ is production-ready yet.
 ## Requirements
 
 - A Visual Pinball X build at or after the commit pinned in
-  `cmake/vpx_headers.cmake` (currently master of 2026-09-02, rev 5548), with the
-  PinMAME plugin. The plugin API changes layout between builds and has no
+  `cmake/vpx_headers.cmake` (currently master of 2026-10-17, rev 6289), with the
+  PinMAME plugin. Memory writes need a PinMAME carrying `WriteMemory:1`
+  (vpinball/pinmame #634), which rev 6289 does. The plugin API changes layout between builds and has no
   version handshake, so a plugin loaded into an older VPX does not fail
   cleanly: it corrupts memory during table start. Match the pin to the VPX you
   run, and take VPX from the upstream CI artifacts until a release catches up.

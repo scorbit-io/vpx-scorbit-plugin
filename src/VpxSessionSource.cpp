@@ -15,31 +15,9 @@
 #define SCORBIT_VPX_PINNED_REVISION ""
 #endif
 
-namespace
-{
-
-// PinMAME's write message, pinmame #634, mirrored here because the headers pinned for VPX
-// 5589 predate it. Field for field it must match PMPI_WRITE_MEMORY in PinMAMEPlugin.h once
-// that merges. On a libpinmame without it nobody subscribes, so a broadcast leaves `applied`
-// as it was sent, which is how the bridge tells "no handler" from "applied nothing".
-constexpr const char* PMPI_WRITE_MEMORY_NAME = "WriteMemory:1";
-
-struct PinMAMEWriteMemoryOp
-{
-   uint32_t address;
-   uint32_t size;
-   const uint8_t* data;
-};
-
-struct PinMAMEWriteMemoryMsg
-{
-   int version;
-   uint32_t count;
-   const PinMAMEWriteMemoryOp* ops;
-   uint32_t applied;
-};
-
-}
+// PMPI_WRITE_MEMORY is pinmame #634. A libpinmame older than that has no subscriber, so a
+// broadcast leaves `applied` as it was sent, which is how the bridge tells "no handler" from
+// "applied nothing".
 
 namespace Scorbit
 {
@@ -57,7 +35,7 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    , m_gameEndMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_END))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
    , m_readMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_READ_MEMORY))
-   , m_writeMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_WRITE_MEMORY_NAME))
+   , m_writeMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_WRITE_MEMORY))
 {
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_gameEndMsgId, OnGameEnd, this);
