@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "DmdOverlay.h"
+#include "OverlayPlacement.h"
 #include "ScorbitPluginAPI.h"
 
 #include <algorithm>
@@ -231,13 +232,17 @@ bool DmdOverlay::Upload(const uint8_t* payload, size_t size)
       LOGE("overlay: upload rejected, "s + std::to_string(size) + " bytes for " + std::to_string(w) + "x" + std::to_string(h));
       return false;
    }
+   // As the probe firmware does: ignore it and keep the previous overlay. A size that
+   // differs from the display's is not an error; Composite centres it, cropping if larger.
+   if (!Overlay::Accepted(w, h))
+   {
+      LOGW("overlay: upload ignored, "s + std::to_string(w) + "x" + std::to_string(h) + " is outside "
+         + std::to_string(Overlay::MIN_SIDE) + "x" + std::to_string(Overlay::MIN_SIDE) + " to "
+         + std::to_string(Overlay::MAX_WIDTH) + "x" + std::to_string(Overlay::MAX_HEIGHT) + "; previous overlay kept");
+      return false;
+   }
    {
       std::lock_guard lock(m_mutex);
-      if (m_published && (w > m_source.width || h > m_source.height))
-      {
-         LOGE("overlay: upload rejected, "s + std::to_string(w) + "x" + std::to_string(h) + " exceeds the " + std::to_string(m_source.width) + "x" + std::to_string(m_source.height) + " display");
-         return false;
-      }
       m_bitmap.width = w;
       m_bitmap.height = h;
       m_bitmap.pixels.assign(payload + 2, payload + size);
@@ -353,9 +358,9 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
 // display the low four bits are the shade. Luminance is then shade / (shades - 1).
 const void* DmdOverlay::Composite(const DisplayFrame& src)
 {
-   const uint32_t W = m_source.width, H = m_source.height;
-   const uint32_t bw = std::min(m_bitmap.width, W), bh = std::min(m_bitmap.height, H);
-   const uint32_t x0 = (W - bw) / 2, y0 = (H - bh) / 2;
+   const uint32_t W = m_source.width;
+   const Overlay::Placement at = Overlay::Place(W, m_source.height, m_bitmap.width, m_bitmap.height);
+   const uint32_t bw = at.width, bh = at.height, x0 = at.dstX, y0 = at.dstY;
    const bool fourPlanes = m_source.identifyFormat == CTLPI_DISPLAY_ID_FORMAT_BITPLANE4;
    const float maxShade = fourPlanes ? 15.f : 3.f;
 
@@ -372,7 +377,7 @@ const void* DmdOverlay::Composite(const DisplayFrame& src)
       std::memcpy(out.data(), src.frame, out.size() * sizeof(float));
       for (uint32_t y = 0; y < bh; y++)
       {
-         const uint8_t* row = m_bitmap.pixels.data() + static_cast<size_t>(y) * m_bitmap.width;
+         const uint8_t* row = m_bitmap.pixels.data() + static_cast<size_t>(at.srcY + y) * m_bitmap.width + at.srcX;
          float* dst = out.data() + static_cast<size_t>(y0 + y) * W + x0;
          for (uint32_t x = 0; x < bw; x++)
             if (!(row[x] & 0x80))
@@ -386,7 +391,7 @@ const void* DmdOverlay::Composite(const DisplayFrame& src)
    std::memcpy(out.data(), src.frame, out.size());
    for (uint32_t y = 0; y < bh; y++)
    {
-      const uint8_t* row = m_bitmap.pixels.data() + static_cast<size_t>(y) * m_bitmap.width;
+      const uint8_t* row = m_bitmap.pixels.data() + static_cast<size_t>(at.srcY + y) * m_bitmap.width + at.srcX;
       uint8_t* dst = out.data() + (static_cast<size_t>(y0 + y) * W + x0) * 3;
       for (uint32_t x = 0; x < bw; x++)
          if (!(row[x] & 0x80))

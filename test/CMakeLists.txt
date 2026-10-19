@@ -13,6 +13,12 @@ target_compile_options(memory_bridge_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME memory_bridge COMMAND memory_bridge_test)
 set_tests_properties(memory_bridge PROPERTIES TIMEOUT 60)
 
+# Header-only and pure, so it runs everywhere too. Links the transport for its include path.
+add_executable(overlay_placement_test OverlayPlacementTest.cpp Check.h)
+target_link_libraries(overlay_placement_test PRIVATE scorbit-transport)
+target_compile_options(overlay_placement_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME overlay_placement COMMAND overlay_placement_test)
+
 if(NOT WIN32)
    # The peer speaks POSIX sockets directly. The worker's Windows path is
    # written but nothing in CI compiles it yet, so this test does not claim to
