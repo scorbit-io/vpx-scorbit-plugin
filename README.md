@@ -205,6 +205,12 @@ and the brightness bits drive the display's bitplanes directly, so a
 2-bitplane display sums bits 0 to 2 and a 4-bitplane display uses the low
 four bits.
 
+Overlays are normally full frames at the display's own size (128x32, 128x16 or
+192x64), shaped by transparency, which places them at the origin. A mismatched
+size is handled as the firmware does: a smaller bitmap is centred, a larger one
+is centred with its edges cropped, and an upload outside 10x10 to 192x64 is
+ignored, leaving the previous overlay in place (`src/OverlayPlacement.h`).
+
 The overlay is driven by a message on the VPX plugin bus, `Scorbit` /
 `Overlay`, declared in `src/ScorbitPluginAPI.h`. Ops are upload (the raw
 `WriteDmdOverlay` payload: width, height, then one byte per pixel), show with a

@@ -163,6 +163,7 @@ add_library(plugin-scorbit MODULE
    src/DmdTap.cpp
    src/DmdOverlay.h
    src/DmdOverlay.cpp
+   src/OverlayPlacement.h
    src/VpxSessionSource.h
    src/VpxSessionSource.cpp
    src/ScorbitPluginAPI.h
