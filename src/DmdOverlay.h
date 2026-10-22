@@ -60,6 +60,12 @@ private:
    void OnSourcesChanged();
    void Publish();
    void Withdraw();
+   // Source loss: stop forwarding to the controller now, broadcast the withdrawal
+   // on the next main-thread turn. Losing the source happens inside the controller's
+   // own teardown broadcast; a colorizer that restarts its thread on our change
+   // there then deadlocks joining it (SB-5801).
+   void WithdrawDeferred();
+   static void MSGPIAPI OnDeferredWithdraw(void* userData);
    static void OnOverlayMsg(const unsigned int msgId, void* userData, void* msgData);
    static DisplayFrame GetRenderFrame(void* callContext);
    static DisplayFrame GetIdentifyFrame(void* callContext);
@@ -74,6 +80,7 @@ private:
    const unsigned int m_prepareFrameMsgId;
 
    bool m_detached = false;
+   bool m_withdrawPending = false; // API thread only
    std::atomic<uint32_t> m_controllerEndpointId { 0 };
    PinballPlugin::Controller::CtrlItemConsumer<DisplaySrcId> m_sources;
    PinballPlugin::Controller::CtrlItemProvider<DisplaySrcId> m_override;
@@ -101,6 +108,10 @@ private:
    std::vector<uint8_t> m_rgb[2];
    unsigned int m_target = 0;
    unsigned int m_srcFrameId = 0;
+   // Served while withdrawn but still listed: identify frames are never null by contract,
+   // and repeating the last id tells consumers nothing new arrived.
+   std::vector<uint8_t> m_idBlank;
+   unsigned int m_lastIdFrameId = 0;
    unsigned int m_outFrameId = 0;
    bool m_lastComposited = false;
    uint64_t m_compositedFrames = 0;
