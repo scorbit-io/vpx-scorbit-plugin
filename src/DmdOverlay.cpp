@@ -136,6 +136,12 @@ void DmdOverlay::Detach()
    if (m_detached)
       return;
    m_detached = true;
+   {
+      // The override may stay listed (quit path) after the controller's source is gone;
+      // serve our own buffers from here on, never its callbacks.
+      std::lock_guard lock(m_mutex);
+      m_published = false;
+   }
    SetDropDir("");
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_overlayMsgId, OnOverlayMsg, this);
