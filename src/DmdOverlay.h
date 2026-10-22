@@ -91,6 +91,11 @@ private:
    std::mutex m_mutex;
    DisplaySrcId m_source { };
    bool m_published = false;
+   // What the override advertises. m_source is cleared as soon as the controller's display
+   // goes, but the override stays listed until the deferred withdrawal, and consumers keep
+   // reading it in the format it was published with.
+   unsigned int m_pubFrameFormat = 0;
+   bool m_pubIdentify = false;
 
    struct Bitmap
    {

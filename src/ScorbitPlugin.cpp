@@ -555,6 +555,11 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    pinmameEndpointId = 0;
    states = { };
 
+   // Unsubscribing the controllers above can queue a deferred overlay withdrawal after
+   // the first flush. Run it now, while this library is still loaded; it finds the
+   // overlay gone and returns.
+   msgApi->FlushPendingCallbacks(endpointId);
+
    msgApi->ReleaseMsgID(getVpxApiId);
    vpxApi = nullptr;
    msgApi = nullptr;

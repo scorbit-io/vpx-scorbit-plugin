@@ -203,6 +203,8 @@ void DmdOverlay::Publish()
       for (auto& b : m_rgb) { b.assign(n * 3, 0); }
       m_idBlank.assign(n, 0);
       m_lastIdFrameId = 0;
+      m_pubFrameFormat = m_source.frameFormat;
+      m_pubIdentify = m_source.GetIdentifyFrame != nullptr;
       m_target = 0;
       m_srcFrameId = 0;
       m_lastComposited = false;
@@ -359,10 +361,14 @@ DisplayFrame DmdOverlay::GetIdentifyFrame(void* callContext)
 {
    DmdOverlay* me = static_cast<DmdOverlay*>(callContext);
    std::lock_guard lock(me->m_mutex);
-   if (me->m_source.GetIdentifyFrame == nullptr || me->m_idBlank.empty())
-      return { 0, nullptr };
    if (!me->m_published)
+   {
+      if (!me->m_pubIdentify || me->m_idBlank.empty())
+         return { 0, nullptr };
       return { me->m_lastIdFrameId, me->m_idBlank.data() };
+   }
+   if (me->m_source.GetIdentifyFrame == nullptr)
+      return { 0, nullptr };
    const DisplayFrame frame = me->m_source.GetIdentifyFrame(me->m_source.callContext);
    me->m_lastIdFrameId = frame.frameId;
    return frame;
@@ -375,7 +381,7 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
       return { 0, nullptr };
    std::lock_guard lock(me->m_mutex);
    if (!me->m_published)
-      return { me->m_outFrameId, me->m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[0].data()) : me->m_rgb[0].data() };
+      return { me->m_outFrameId, me->m_pubFrameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[0].data()) : me->m_rgb[0].data() };
 
    // The controller's frame. Thread safe by contract, and the only cross-plugin call in here.
    const DisplayFrame src = me->m_source.GetRenderFrame(me->m_source.callContext);
