@@ -15,6 +15,7 @@ namespace Scorbit
 {
 
 static constexpr auto DROP_POLL = std::chrono::milliseconds(100);
+static constexpr double WITHDRAW_DELAY = 0.001; // seconds; any positive delay queues the call
 
 // The plugin's one overlay, so a deferred withdrawal can tell it is still alive. API thread only.
 static DmdOverlay* liveOverlay = nullptr;
@@ -250,7 +251,9 @@ void DmdOverlay::WithdrawDeferred()
    if (was && !m_withdrawPending)
    {
       m_withdrawPending = true;
-      m_msgApi->RunOnMainThread(m_endpointId, 0.0, OnDeferredWithdraw, this);
+      // Not 0: on the API thread a delay <= 0 runs the callback right here (VPX
+      // MsgPluginManager::RunOnMainThread), still inside the teardown broadcast.
+      m_msgApi->RunOnMainThread(m_endpointId, WITHDRAW_DELAY, OnDeferredWithdraw, this);
    }
 }
 
