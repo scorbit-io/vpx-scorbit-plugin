@@ -119,13 +119,21 @@ DmdOverlay::DmdOverlay(const MsgPluginAPI* msgApi, uint32_t endpointId)
 
 DmdOverlay::~DmdOverlay()
 {
+   Detach();
+   Withdraw();
+   m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
+   m_msgApi->ReleaseMsgID(m_overlayMsgId);
+}
+
+void DmdOverlay::Detach()
+{
+   if (m_detached)
+      return;
+   m_detached = true;
    SetDropDir("");
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_overlayMsgId, OnOverlayMsg, this);
    m_sources.Unsubscribe();
-   Withdraw();
-   m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
-   m_msgApi->ReleaseMsgID(m_overlayMsgId);
 }
 
 void DmdOverlay::SetController(uint32_t controllerEndpointId)

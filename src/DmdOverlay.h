@@ -34,6 +34,11 @@ public:
    DmdOverlay(const MsgPluginAPI* msgApi, uint32_t endpointId);
    ~DmdOverlay();
 
+   // API thread only. Stops the drop worker and every subscription but leaves the
+   // override published, broadcasting nothing. Used alone on the quit path, where
+   // the object is then left to the OS (SB-5801); the destructor calls it too.
+   void Detach();
+
    // API thread only. 0 withdraws the override.
    void SetController(uint32_t controllerEndpointId);
 
@@ -68,6 +73,7 @@ private:
    const unsigned int m_overlayMsgId;
    const unsigned int m_prepareFrameMsgId;
 
+   bool m_detached = false;
    std::atomic<uint32_t> m_controllerEndpointId { 0 };
    PinballPlugin::Controller::CtrlItemConsumer<DisplaySrcId> m_sources;
    PinballPlugin::Controller::CtrlItemProvider<DisplaySrcId> m_override;
