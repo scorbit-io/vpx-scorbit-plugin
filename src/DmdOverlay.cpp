@@ -15,6 +15,10 @@ namespace Scorbit
 {
 
 static constexpr auto DROP_POLL = std::chrono::milliseconds(100);
+static constexpr double WITHDRAW_DELAY = 0.001; // seconds; any positive delay queues the call
+
+// The plugin's one overlay, so a deferred withdrawal can tell it is still alive. API thread only.
+static DmdOverlay* liveOverlay = nullptr;
 
 // Minimal SHA-256 so the plugin can log the same digest the daemon prints for a payload.
 namespace
@@ -112,6 +116,7 @@ DmdOverlay::DmdOverlay(const MsgPluginAPI* msgApi, uint32_t endpointId)
         [this](std::vector<DisplaySrcId>& items) { FilterSources(items); }, nullptr, [this]() { OnSourcesChanged(); })
    , m_override(msgApi, endpointId, CTLPI_DISPLAY_GET_SRC_MSG, CTLPI_DISPLAY_ON_SRC_CHG_MSG)
 {
+   liveOverlay = this;
    m_msgApi->SubscribeMsg(m_endpointId, m_overlayMsgId, OnOverlayMsg, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_prepareFrameMsgId, OnPrepareFrame, this);
    m_sources.Subscribe();
@@ -119,13 +124,28 @@ DmdOverlay::DmdOverlay(const MsgPluginAPI* msgApi, uint32_t endpointId)
 
 DmdOverlay::~DmdOverlay()
 {
+   liveOverlay = nullptr;
+   Detach();
+   Withdraw();
+   m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
+   m_msgApi->ReleaseMsgID(m_overlayMsgId);
+}
+
+void DmdOverlay::Detach()
+{
+   if (m_detached)
+      return;
+   m_detached = true;
+   {
+      // The override may stay listed (quit path) after the controller's source is gone;
+      // serve our own buffers from here on, never its callbacks.
+      std::lock_guard lock(m_mutex);
+      m_published = false;
+   }
    SetDropDir("");
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_overlayMsgId, OnOverlayMsg, this);
    m_sources.Unsubscribe();
-   Withdraw();
-   m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
-   m_msgApi->ReleaseMsgID(m_overlayMsgId);
 }
 
 void DmdOverlay::SetController(uint32_t controllerEndpointId)
@@ -168,11 +188,15 @@ void DmdOverlay::OnSourcesChanged()
    if (!changed)
       return;
 
+   if (src.id.id == 0)
+   {
+      WithdrawDeferred();
+      if (m_controllerEndpointId != 0)
+         LOGI("overlay: controller publishes no display we can composite on, overlay disabled"s);
+      return;
+   }
    Withdraw();
-   if (src.id.id != 0)
-      Publish();
-   else if (m_controllerEndpointId != 0)
-      LOGI("overlay: controller publishes no display we can composite on, overlay disabled"s);
+   Publish();
 }
 
 void DmdOverlay::Publish()
@@ -183,10 +207,15 @@ void DmdOverlay::Publish()
       const size_t n = static_cast<size_t>(m_source.width) * m_source.height;
       for (auto& b : m_lum) { b.assign(n, 0.f); }
       for (auto& b : m_rgb) { b.assign(n * 3, 0); }
+      m_idBlank.assign(n, 0);
+      m_lastIdFrameId = 0;
+      m_pubFrameFormat = m_source.frameFormat;
+      m_pubIdentify = m_source.GetIdentifyFrame != nullptr;
       m_target = 0;
       m_srcFrameId = 0;
       m_lastComposited = false;
       m_published = true;
+      m_withdrawPending = false;
 
       id.id = { { m_endpointId, 0 } };
       id.overrideId = m_source.id;
@@ -206,15 +235,51 @@ void DmdOverlay::Publish()
 
 void DmdOverlay::Withdraw()
 {
+   {
+      std::lock_guard lock(m_mutex);
+      m_published = false;
+   }
+   m_withdrawPending = false;
+   if (!m_override.GetItems().empty())
+   {
+      m_override.ClearItems();
+      LOGI("overlay: override withdrawn"s);
+   }
+}
+
+void DmdOverlay::WithdrawDeferred()
+{
    bool was;
    {
+      // GetRenderFrame serves our own buffer from here on and never calls the controller.
       std::lock_guard lock(m_mutex);
       was = m_published;
       m_published = false;
    }
-   if (was)
+   if (was && !m_withdrawPending)
    {
-      m_override.ClearItems();
+      m_withdrawPending = true;
+      // Not 0: on the API thread a delay <= 0 runs the callback right here (VPX
+      // MsgPluginManager::RunOnMainThread), still inside the teardown broadcast.
+      m_msgApi->RunOnMainThread(m_endpointId, WITHDRAW_DELAY, OnDeferredWithdraw, this);
+   }
+}
+
+void MSGPIAPI DmdOverlay::OnDeferredWithdraw(void* userData)
+{
+   // The plugin's single instance; a callback that outlives it finds it gone.
+   DmdOverlay* me = static_cast<DmdOverlay*>(userData);
+   if (me != liveOverlay || !me->m_withdrawPending || me->m_detached)
+      return;
+   me->m_withdrawPending = false;
+   bool published;
+   {
+      std::lock_guard lock(me->m_mutex);
+      published = me->m_published;
+   }
+   if (!published && !me->m_override.GetItems().empty())
+   {
+      me->m_override.ClearItems();
       LOGI("overlay: override withdrawn"s);
    }
 }
@@ -302,9 +367,17 @@ DisplayFrame DmdOverlay::GetIdentifyFrame(void* callContext)
 {
    DmdOverlay* me = static_cast<DmdOverlay*>(callContext);
    std::lock_guard lock(me->m_mutex);
-   if (!me->m_published || me->m_source.GetIdentifyFrame == nullptr)
+   if (!me->m_published)
+   {
+      if (!me->m_pubIdentify || me->m_idBlank.empty())
+         return { 0, nullptr };
+      return { me->m_lastIdFrameId, me->m_idBlank.data() };
+   }
+   if (me->m_source.GetIdentifyFrame == nullptr)
       return { 0, nullptr };
-   return me->m_source.GetIdentifyFrame(me->m_source.callContext);
+   const DisplayFrame frame = me->m_source.GetIdentifyFrame(me->m_source.callContext);
+   me->m_lastIdFrameId = frame.frameId;
+   return frame;
 }
 
 DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
@@ -314,7 +387,7 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
       return { 0, nullptr };
    std::lock_guard lock(me->m_mutex);
    if (!me->m_published)
-      return { me->m_outFrameId, me->m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[0].data()) : me->m_rgb[0].data() };
+      return { me->m_outFrameId, me->m_pubFrameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[0].data()) : me->m_rgb[0].data() };
 
    // The controller's frame. Thread safe by contract, and the only cross-plugin call in here.
    const DisplayFrame src = me->m_source.GetRenderFrame(me->m_source.callContext);

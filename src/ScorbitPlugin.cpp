@@ -424,6 +424,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload();
 // VPX's application quit exits without unloading plugins. Static teardown then runs
 // libpinmame's exit-time controller broadcast into ~Scorbit after the SDK's statics
 // are gone (SB-5039). Unload while the process is still whole.
+static bool unloadingAtQuit = false;
+
 static void UnloadOnQuit()
 {
    if (msgApi == nullptr)
@@ -431,6 +433,7 @@ static void UnloadOnQuit()
    LOGI("Scorbit plugin unloading at quit: VPX did not unload it"s);
    if (scorbit)
       scorbit->PrepareForQuit();
+   unloadingAtQuit = true;
    ScorbitPluginUnload();
 }
 
@@ -438,6 +441,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 {
    msgApi = api;
    endpointId = sessionId;
+   unloadingAtQuit = false;
    LPISetup(endpointId, msgApi);
    LOGI("Scorbit plugin loading"s);
    InstallQuitHook(UnloadOnQuit);
@@ -517,6 +521,13 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
       return;
    LOGI("Scorbit plugin unloading"s);
    RemoveQuitHook();
+   // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
+   // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
+   // Detach first: unsubscribing the controllers below would otherwise withdraw it
+   // through OnControllersChanged. The process is ending, so the override stays
+   // published and the object is left to the OS.
+   if (unloadingAtQuit)
+      dmdOverlay->Detach();
 
    StopPoll();
    logDrainActive = false;
@@ -532,7 +543,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    stateSources = nullptr;
    delete vpxSession;
    vpxSession = nullptr;
-   delete dmdOverlay;
+   if (!unloadingAtQuit)
+      delete dmdOverlay;
    dmdOverlay = nullptr;
    delete dmdTap;
    dmdTap = nullptr;
@@ -542,6 +554,11 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    currentRomId.clear();
    pinmameEndpointId = 0;
    states = { };
+
+   // Unsubscribing the controllers above can queue a deferred overlay withdrawal after
+   // the first flush. Run it now, while this library is still loaded; it finds the
+   // overlay gone and returns.
+   msgApi->FlushPendingCallbacks(endpointId);
 
    msgApi->ReleaseMsgID(getVpxApiId);
    vpxApi = nullptr;
