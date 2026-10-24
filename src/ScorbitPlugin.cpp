@@ -99,6 +99,8 @@ MSGPI_STRING_VAL_SETTING(setOverlayDrop, "overlayDropDir", "Overlay drop directo
    "Demo: watch this directory for overlay.bin / overlay-ctl.bin (raw probe payloads) and display them, empty to disable", false, "", 1024);
 MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
    "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
+MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
+   "Show Scorbit status notifications, in a session or out of one", true, true);
 
 ScorbitConfig GetPluginConfig()
 {
@@ -456,6 +458,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setDmdDump);
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);
    msgApi->RegisterSetting(endpointId, &setSocketPath);
+   msgApi->RegisterSetting(endpointId, &setShowStatus);
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
@@ -486,7 +489,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
    // The daemon listens and the plugin connects, so this starts whether or not
    // a daemon is running and retries once a second until one is.
-   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap);
+   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get);
    {
       SocketWorkerConfig cfg;
       cfg.socketPath = setSocketPath_Get();
@@ -494,7 +497,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
       cfg.pluginApiCommit = SCORBIT_VPX_PLUGIN_API_COMMIT;
       socketWorker = new SocketWorker(*vpxSession, cfg,
          [](int level, const std::string& message) { vpxSession->PushLog(level, message); },
-         &vpxSession->Memory());
+         &vpxSession->Memory(), vpxSession, &vpxSession->Status());
       socketWorker->Start();
    }
    logDrainActive = true;

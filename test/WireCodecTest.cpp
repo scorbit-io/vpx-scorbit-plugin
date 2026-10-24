@@ -530,6 +530,107 @@ void TestWriteRoundTripsAndTruncation()
    CHECK(!Wire::Decode(ScorbitTest::Unhex("00180000" "00080000" "fd3f0000" "b4"), shortNvram));
 }
 
+std::string Repeat(const char* hexByte, size_t count)
+{
+   std::string out;
+   for (size_t i = 0; i < count; i++)
+      out += hexByte;
+   return out;
+}
+
+// Whole wire frames from scorbitd design.md, "Message layouts (protocol 1.0, slice 4)",
+// golden vectors, verbatim. Requests are what the daemon sends and this side decodes;
+// acknowledgements and the refusal are what this side encodes.
+void TestSliceFourGoldenVectors()
+{
+   const std::string upload = "6f000000" "2000" "0000" "07000000" "01" "0a" "0a" + Repeat("80", 10) + Repeat("0f", 90);
+   const std::string showFor = "0c000000" "2000" "0000" "08000000" "02" "01" "05dc";
+   const std::string showUntilHidden = "0c000000" "2000" "0000" "09000000" "02" "01" "0000";
+   const std::string hide = "0c000000" "2000" "0000" "0a000000" "02" "00" "0000";
+   const std::string status = "13000000" "2100" "0000" "0b000000" "02" "00" "0700" "6e6f2064617461";
+
+   // Each request is exactly what this side would frame, and decodes to what it says.
+   std::vector<uint8_t> pixels(10, 0x80);
+   pixels.resize(100, 0x0f);
+   std::vector<uint8_t> uploadPayload { 0x0a, 0x0a };
+   uploadPayload.insert(uploadPayload.end(), pixels.begin(), pixels.end());
+   const Wire::OverlayRequest uploadReq { Wire::OVERLAY_OP_UPLOAD, uploadPayload };
+   CHECK_MSG(ScorbitTest::Hex(Wire::EncodeMessage(Wire::TYPE_OVERLAY, 0, 7, Wire::Encode(uploadReq))) == upload, "upload");
+
+   const struct
+   {
+      const std::string* frame;
+      uint32_t seq;
+      Wire::OverlayControl control;
+   } controls[] = {
+      { &showFor, 8, { Wire::OVERLAY_CONTROL_ENABLE, 1500 } },
+      { &showUntilHidden, 9, { Wire::OVERLAY_CONTROL_ENABLE, 0 } },
+      { &hide, 10, { 0, 0 } },
+   };
+   for (const auto& c : controls)
+   {
+      const std::vector<uint8_t> bytes = ScorbitTest::Unhex(*c.frame);
+      Wire::Message msg;
+      CHECK(Wire::DecodeBody(bytes.data() + Wire::LENGTH_BYTES, bytes.size() - Wire::LENGTH_BYTES, msg));
+      CHECK(msg.header.type == Wire::TYPE_OVERLAY && msg.header.seq == c.seq && !msg.header.IsResponse());
+      Wire::OverlayRequest req;
+      CHECK(Wire::Decode(msg.payload, req));
+      CHECK(req.op == Wire::OVERLAY_OP_CONTROL);
+      Wire::OverlayControl control;
+      CHECK(Wire::Decode(req.payload, control));
+      CHECK_MSG(control == c.control, "seq " + std::to_string(c.seq) + ": duration " + std::to_string(control.durationMs));
+      const Wire::OverlayRequest back { Wire::OVERLAY_OP_CONTROL, Wire::Encode(c.control) };
+      CHECK_MSG(ScorbitTest::Hex(Wire::EncodeMessage(Wire::TYPE_OVERLAY, 0, c.seq, Wire::Encode(back))) == *c.frame,
+         "seq " + std::to_string(c.seq));
+   }
+
+   const std::vector<uint8_t> ack = Wire::EncodeMessage(Wire::TYPE_OVERLAY, Wire::FLAG_RESPONSE, 8, { });
+   CHECK_MSG(ScorbitTest::Hex(ack) == "08000000" "2000" "0100" "08000000", ScorbitTest::Hex(ack));
+
+   const std::vector<uint8_t> refused = Wire::EncodeMessage(Wire::TYPE_OVERLAY, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, 7,
+      Wire::Encode(Wire::ErrorPayload { Wire::ERR_UNSUPPORTED_OPERATION, "no DMD source" }));
+   CHECK_MSG(ScorbitTest::Hex(refused) == "19000000" "2000" "0300" "07000000" "0600" "0d00" "6e6f20444d4420736f75726365",
+      ScorbitTest::Hex(refused));
+
+   {
+      const std::vector<uint8_t> bytes = ScorbitTest::Unhex(status);
+      Wire::Message msg;
+      CHECK(Wire::DecodeBody(bytes.data() + Wire::LENGTH_BYTES, bytes.size() - Wire::LENGTH_BYTES, msg));
+      CHECK(msg.header.type == Wire::TYPE_STATUS && msg.header.seq == 11);
+      Wire::Status decoded;
+      CHECK(Wire::Decode(msg.payload, decoded));
+      CHECK(decoded == (Wire::Status { Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "no data" }));
+      CHECK(ScorbitTest::Hex(Wire::EncodeMessage(Wire::TYPE_STATUS, 0, 11, Wire::Encode(decoded))) == status);
+   }
+   const std::vector<uint8_t> statusAck = Wire::EncodeMessage(Wire::TYPE_STATUS, Wire::FLAG_RESPONSE, 11, { });
+   CHECK_MSG(ScorbitTest::Hex(statusAck) == "08000000" "2100" "0100" "0b000000", ScorbitTest::Hex(statusAck));
+}
+
+void TestSliceFourTruncation()
+{
+   Wire::OverlayRequest req;
+   CHECK_MSG(!Wire::Decode({ }, req), "an Overlay with no op");
+   CHECK(Wire::Decode(ScorbitTest::Unhex("01"), req) && req.op == 1 && req.payload.empty());
+
+   Wire::OverlayControl control;
+   CHECK_MSG(!Wire::Decode(ScorbitTest::Unhex("0105"), control), "control short of its duration's low byte");
+   // Trailing bytes past the control's fields are ignored.
+   CHECK(Wire::Decode(ScorbitTest::Unhex("030100ff"), control));
+   CHECK(control.control == 3 && control.durationMs == 0x0100);
+
+   Wire::Status status;
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0200"), status));
+   CHECK(!Wire::Decode(ScorbitTest::Unhex("0200" "0500" "6e6f"), status));
+   CHECK(Wire::Decode(ScorbitTest::Unhex("0103" "0000" "ff"), status));
+   CHECK(status == (Wire::Status { Wire::SESSION_TRACKING, Wire::SYSTEM_DEGRADED, "" }));
+
+   // support_text is bounded at 256 bytes: 256 decodes, 257 does not.
+   const Wire::Status atLimit { 0, 0, std::string(Wire::MAX_SUPPORT_TEXT_BYTES, 'x') };
+   CHECK(Wire::Decode(Wire::Encode(atLimit), status) && status == atLimit);
+   const Wire::Status over { 0, 0, std::string(Wire::MAX_SUPPORT_TEXT_BYTES + 1, 'x') };
+   CHECK_MSG(!Wire::Decode(Wire::Encode(over), status), "support_text over 256 bytes is malformed");
+}
+
 int main()
 {
    TestFraming();
@@ -546,5 +647,7 @@ int main()
    TestSliceTwoRoundTripsAndTruncation();
    TestWriteGoldenVectors();
    TestWriteRoundTripsAndTruncation();
+   TestSliceFourGoldenVectors();
+   TestSliceFourTruncation();
    return ScorbitTest::Summary("wire_codec_test");
 }

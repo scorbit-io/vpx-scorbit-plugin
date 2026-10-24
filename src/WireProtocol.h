@@ -402,6 +402,60 @@ struct NvRamParameters
    bool operator==(const NvRamParameters&) const = default;
 };
 
+// --- Slice 4 overlay and status (scorbitd design.md "Message layouts, slice 4") ---
+
+inline constexpr uint8_t OVERLAY_OP_UPLOAD = 1;   // payload is the probe's 0x23 WriteDmdOverlay
+inline constexpr uint8_t OVERLAY_OP_CONTROL = 2;  // payload is the probe's 0x27 control register
+inline constexpr uint8_t OVERLAY_CONTROL_ENABLE = 1u << 0; // the other control bits are reserved
+
+// The probe payload for the op is carried byte for byte: everything after op. The
+// reply is empty.
+struct OverlayRequest
+{
+   uint8_t op = 0;
+   std::vector<uint8_t> payload;
+
+   bool operator==(const OverlayRequest&) const = default;
+};
+
+// The 0x27 payload. duration_ms is the protocol's one big-endian field: the probe's
+// byte order, kept because the payload is carried verbatim. 0 shows until hidden.
+struct OverlayControl
+{
+   uint8_t control = 0;
+   uint16_t durationMs = 0;
+
+   bool operator==(const OverlayControl&) const = default;
+};
+
+inline constexpr size_t MAX_SUPPORT_TEXT_BYTES = 256;
+
+enum SessionState : uint8_t
+{
+   SESSION_NONE = 0,       // no game in progress
+   SESSION_TRACKING = 1,
+   SESSION_NO_DATA = 2,    // a game should be scored and is not
+   SESSION_HIDDEN = 4,     // the daemon's indicator preference is off; system_state is ignored
+};
+
+enum SystemState : uint8_t
+{
+   SYSTEM_OK = 0,
+   SYSTEM_UNPAIRED = 1,
+   SYSTEM_OFFLINE = 2,
+   SYSTEM_DEGRADED = 3,
+};
+
+// Status request. The reply is empty.
+struct Status
+{
+   uint8_t sessionState = SESSION_NONE;
+   uint8_t systemState = SYSTEM_OK;
+   std::string supportText;    // UTF-8, at most MAX_SUPPORT_TEXT_BYTES, may be empty
+
+   bool operator==(const Status&) const = default;
+};
+
 std::vector<uint8_t> Encode(const Hello& v);
 std::vector<uint8_t> Encode(const HelloAck& v);
 std::vector<uint8_t> Encode(const Declare& v);
@@ -417,6 +471,9 @@ std::vector<uint8_t> Encode(const ReadDirectReply& v);
 std::vector<uint8_t> Encode(const WriteRequest& v);
 std::vector<uint8_t> Encode(const WriteReply& v);
 std::vector<uint8_t> Encode(const NvRamParameters& v);
+std::vector<uint8_t> Encode(const OverlayRequest& v);
+std::vector<uint8_t> Encode(const OverlayControl& v);
+std::vector<uint8_t> Encode(const Status& v);
 
 // Every Decode requires each field it declares to be present and ignores any
 // bytes trailing them. That is the compatibility rule: appending a field is a
@@ -436,5 +493,9 @@ bool Decode(const std::vector<uint8_t>& payload, ReadDirectReply& out);
 bool Decode(const std::vector<uint8_t>& payload, WriteRequest& out);
 bool Decode(const std::vector<uint8_t>& payload, WriteReply& out);
 bool Decode(const std::vector<uint8_t>& payload, NvRamParameters& out);
+bool Decode(const std::vector<uint8_t>& payload, OverlayRequest& out);
+bool Decode(const std::vector<uint8_t>& payload, OverlayControl& out);
+// Also false when support_text is over MAX_SUPPORT_TEXT_BYTES.
+bool Decode(const std::vector<uint8_t>& payload, Status& out);
 
 }

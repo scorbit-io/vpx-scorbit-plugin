@@ -19,6 +19,17 @@ target_link_libraries(overlay_placement_test PRIVATE scorbit-transport)
 target_compile_options(overlay_placement_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME overlay_placement COMMAND overlay_placement_test)
 
+# Pure as well: the overlay's firmware rules and shade table, and the status notifier.
+add_executable(overlay_state_test OverlayStateTest.cpp Check.h)
+target_link_libraries(overlay_state_test PRIVATE scorbit-transport)
+target_compile_options(overlay_state_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME overlay_state COMMAND overlay_state_test)
+
+add_executable(status_notice_test StatusNoticeTest.cpp Check.h)
+target_link_libraries(status_notice_test PRIVATE scorbit-transport)
+target_compile_options(status_notice_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME status_notice COMMAND status_notice_test)
+
 if(NOT WIN32)
    # The peer speaks POSIX sockets directly. The worker's Windows path is
    # written but nothing in CI compiles it yet, so this test does not claim to

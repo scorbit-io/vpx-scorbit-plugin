@@ -139,6 +139,7 @@ dmdDumpFile =
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
 | `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
+| `ShowStatus` | Show Scorbit status notifications during play, default on. Off posts none, with or without a daemon. |
 
 The plugin identifies the running machine by the ROM id PinMAME reports and
 looks it up in `assets/scorbit_machines.json`, which maps ROM ids to Scorbit
@@ -180,10 +181,10 @@ rotates its token is picked up without restarting VPX.
 
 `src/WireProtocol.*` is the whole wire format: little-endian, a `u32` length
 followed by `u16` type, `u16` flags and a `u32` sequence number, then the
-payload. This build speaks protocol 1.0 and serves Hello, Declare, Frame, Ping
-and Bye. Requests for the types reserved for memory access, overlay and status
-are answered with `unsupported_type` rather than ignored. Frames cross as one
-shade index per pixel, row major, exactly as the tap captured them.
+payload. This build speaks protocol 1.0 and serves Hello, Declare, Frame, Ping,
+Bye, the memory messages, Overlay and Status. A type it does not serve is
+answered with `unsupported_type` rather than ignored. Frames cross as one shade
+index per pixel, row major, exactly as the tap captured them.
 
 `test/` holds a scripted daemon-side peer and two test binaries; `ctest` in the
 build directory runs both. They need neither Visual Pinball nor a daemon.
@@ -200,10 +201,18 @@ display, and nothing in the render path waits on anything but a short local
 lock.
 
 Placement and shading mirror the probe firmware: the bitmap is centred on the
-display, pixels outside it or flagged transparent (`0x80`) show the live frame,
-and the brightness bits drive the display's bitplanes directly, so a
-2-bitplane display sums bits 0 to 2 and a 4-bitplane display uses the low
-four bits.
+display, and pixels outside it or flagged transparent (`0x80`) show the live
+frame. The low seven bits of a pixel are the platform's bitplane bits, not a
+brightness, so each value is drawn at the shade the probe shows it at on that
+platform, taken from PinMAME's `hardwareGen` (`src/OverlayState.h`):
+
+| Platform | Shade of value *v* |
+|---|---|
+| WPC | popcount(*v* & 7) / 3 |
+| Data East, Whitestar, Sega 192x64 | (*v* & 3) / 3 |
+| Gottlieb System 3 | popcount(*v* & 0x3F) / 6 |
+| Capcom, Alvin G | popcount(*v* & 0xF) / 4 |
+| SAM | PinMAME's own luminance for framebuffer value *v* & 0xF |
 
 Overlays are normally full frames at the display's own size (128x32, 128x16 or
 192x64), shaped by transparency, which places them at the origin. A mismatched
@@ -211,16 +220,25 @@ size is handled as the firmware does: a smaller bitmap is centred, a larger one
 is centred with its edges cropped, and an upload outside 10x10 to 192x64 is
 ignored, leaving the previous overlay in place (`src/OverlayPlacement.h`).
 
-The overlay is driven by a message on the VPX plugin bus, `Scorbit` /
-`Overlay`, declared in `src/ScorbitPluginAPI.h`. Ops are upload (the raw
-`WriteDmdOverlay` payload: width, height, then one byte per pixel), show with a
-duration in milliseconds (0 for until hidden) and hide. Send it on the API
-thread.
+The daemon drives the overlay over the socket with the probe's own two payloads,
+and a session ending hides it and drops the bitmap. In process it is driven by
+a message on the VPX plugin bus, `Scorbit` / `Overlay`, declared in
+`src/ScorbitPluginAPI.h`. Ops are upload (the raw `WriteDmdOverlay` payload:
+width, height, then one byte per pixel), show with a duration in milliseconds
+(0 for until hidden) and hide. Show arms the overlay even before an upload, as
+the probe does. Send it on the API thread.
 
 For testing without a daemon connection, `overlayDropDir` names a directory the
 plugin watches. Writing `overlay.bin` (the upload payload) uploads; writing
-`overlay-ctl.bin` (three bytes: on/off, duration high, duration low) shows or
-hides. Both go through the same message.
+`overlay-ctl.bin` (three bytes: control, duration high, duration low) shows or
+hides by bit 0 of the control byte. Both go through the same message.
+
+## Status
+
+The daemon sends its session and system state, and the plugin logs every one
+and shows a VPX notification when it changes. Without a daemon session for 5
+seconds, the plugin says so itself, with the daemon's reason when it refused the
+connection. `ShowStatus = 0` turns all of it off.
 
 ## Layout
 
