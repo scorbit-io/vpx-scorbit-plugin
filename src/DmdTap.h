@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "SeqLock.h"
+
 #include "plugins/ControllerPlugin.h"
 
 #include <atomic>
@@ -25,8 +27,8 @@ namespace Scorbit
 // Frames come from GetIdentifyFrame, which yields one byte per pixel holding
 // the discrete shade index (0-3 for BITPLANE2, 0-15 for BITPLANE4) rather
 // than rendered luminance. A worker polls frameId and publishes each new frame
-// through a double buffer, so a reader never observes a frame torn across the
-// poll.
+// through a seqlock, so a reader never observes a frame torn across the poll and
+// never waits on the worker.
 class DmdTap final
 {
 public:
@@ -51,8 +53,12 @@ public:
    // frame. Truncates on open.
    void SetDumpFile(const std::string& path);
 
-   // Any thread. Copies the latest complete frame; false if none captured yet.
-   bool GetLatest(Frame& out) const;
+   // Any thread. Copies the latest complete frame through the caller's scratch buffer,
+   // which it keeps between calls; false if none was captured yet, or the copy tore.
+   bool GetLatest(Frame& out, std::vector<uint8_t>& scratch) const;
+
+   // Any thread. A frame has been captured, so a false GetLatest means a torn copy.
+   bool HasFrame() const { return m_published.Sequence() != 0; }
 
    // Any thread. False means no conforming display source is selected, in which
    // case no frame will ever be produced and the caller must fail closed.
@@ -60,7 +66,8 @@ public:
 
    // Any thread. Bumped on every source change, including a replacement whose
    // geometry is identical.
-   uint64_t SourceGeneration() const { std::lock_guard lock(m_sourceMutex); return m_sourceGeneration; }
+   // Never waits: the worker holds m_sourceMutex across a frame read and copy.
+   uint64_t SourceGeneration() const { return m_sourceGeneration; }
 
    // Any thread. Frames the source produced that the tap did not capture,
    // counted from gaps in frameId. A poll can miss a frame when the host
@@ -81,15 +88,25 @@ private:
    mutable std::mutex m_sourceMutex;
    DisplaySrcId m_source { };
    std::atomic<bool> m_hasSource { false };
-   uint64_t m_sourceGeneration = 0; // under m_sourceMutex; bumped on every source change
+   // Bumped under m_sourceMutex on every source change, and read without it.
+   std::atomic<uint64_t> m_sourceGeneration { 0 };
    std::atomic<uint64_t> m_skipped { 0 };
 
-   // Double buffer. m_back is written by the worker only; m_front is swapped
-   // in under m_frameMutex and read under it by GetLatest.
-   mutable std::mutex m_frameMutex;
-   Frame m_front;
-   Frame m_back;
-   bool m_hasFrame = false;
+   // The largest display any PinMAME driver publishes is 192x64; this leaves room.
+   static constexpr size_t MAX_PIXELS = 256 * 128;
+   struct Header
+   {
+      uint32_t frameId;
+      uint32_t width;
+      uint32_t height;
+      uint32_t shades;
+      uint64_t generation;
+   };
+   void Publish(const Frame& frame);
+
+   Frame m_back;                    // worker only
+   std::vector<uint8_t> m_record;   // worker only: header then pixels, as published
+   SeqLock<sizeof(Header) + MAX_PIXELS> m_published;
 
    std::mutex m_dumpMutex;
    FILE* m_dump = nullptr;

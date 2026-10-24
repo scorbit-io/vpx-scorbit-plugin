@@ -7,9 +7,9 @@
 // a notification on transitions only. The plugin's own indicator surface is still open;
 // until it exists, the notification is the only thing the user sees.
 
+#include "Latch.h"
 #include "WireProtocol.h"
 
-#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -27,24 +27,9 @@ struct StatusRecord
    std::chrono::steady_clock::time_point since { }; // when there stopped being a session
 };
 
-// Single slot, worker to API thread. The worker exchanges in a new record and deletes the
-// one it displaced; the API thread exchanges in null and owns what it took, so neither side
-// ever reads a record the other can still reach. An overwritten record lasted under a frame,
-// which is shorter than anyone could read it.
-class StatusLatch final
-{
-public:
-   StatusLatch() = default;
-   ~StatusLatch() { delete m_slot.exchange(nullptr); }
-   StatusLatch(const StatusLatch&) = delete;
-   StatusLatch& operator=(const StatusLatch&) = delete;
-
-   void Post(const StatusRecord& record) { delete m_slot.exchange(new StatusRecord(record), std::memory_order_acq_rel); }
-   std::unique_ptr<StatusRecord> Take() { return std::unique_ptr<StatusRecord>(m_slot.exchange(nullptr, std::memory_order_acq_rel)); }
-
-private:
-   std::atomic<StatusRecord*> m_slot { nullptr };
-};
+// Worker to API thread. An overwritten record lasted under a frame, which is shorter than
+// anyone could read it.
+using StatusLatch = Latch<StatusRecord>;
 
 // API thread. Decides, once per rendered frame, whether a notification is due.
 class StatusNotifier final

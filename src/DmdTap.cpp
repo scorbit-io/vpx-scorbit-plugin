@@ -183,21 +183,32 @@ void DmdTap::Worker()
       }
 
       Dump(m_back);
-
-      {
-         std::lock_guard lock(m_frameMutex);
-         std::swap(m_front, m_back);
-         m_hasFrame = true;
-      }
+      Publish(m_back);
    }
 }
 
-bool DmdTap::GetLatest(Frame& out) const
+void DmdTap::Publish(const Frame& frame)
 {
-   std::lock_guard lock(m_frameMutex);
-   if (!m_hasFrame)
+   const Header header { frame.frameId, frame.width, frame.height, frame.shades, frame.generation };
+   m_record.resize(sizeof(header) + frame.pixels.size());
+   std::memcpy(m_record.data(), &header, sizeof(header));
+   std::memcpy(m_record.data() + sizeof(header), frame.pixels.data(), frame.pixels.size());
+   m_published.Write(m_record.data(), m_record.size()); // a display past MAX_PIXELS publishes nothing
+}
+
+bool DmdTap::GetLatest(Frame& out, std::vector<uint8_t>& scratch) const
+{
+   size_t size = 0;
+   if (!m_published.Read(scratch, size) || size < sizeof(Header))
       return false;
-   out = m_front;
+   Header header;
+   std::memcpy(&header, scratch.data(), sizeof(header));
+   out.frameId = header.frameId;
+   out.width = header.width;
+   out.height = header.height;
+   out.shades = header.shades;
+   out.generation = header.generation;
+   out.pixels.assign(scratch.begin() + sizeof(Header), scratch.begin() + static_cast<std::ptrdiff_t>(size));
    return true;
 }
 

@@ -848,9 +848,8 @@ bool SocketWorker::Handshake()
    // Hello's vpx_revision is the build the plugin API headers were pinned to.
    // The plugin API exposes no runtime version, so this is what the plugin
    // knows rather than what is actually running; the daemon logs it as such.
-   DeclareSnapshot declared;
-   m_source.GetDeclare(declared);
-   hello.vpxRevision = declared.declare.vpxRevision;
+   TakeDeclare();
+   hello.vpxRevision = m_current.declare.vpxRevision;
 
    Wire::Message reply;
    if (!Exchange(Wire::TYPE_HELLO, Wire::Encode(hello), HELLO_TIMEOUT_MS, reply))
@@ -910,12 +909,18 @@ bool SocketWorker::Handshake()
    return true;
 }
 
+void SocketWorker::TakeDeclare()
+{
+   if (std::unique_ptr<DeclareSnapshot> posted = m_source.TakeDeclare())
+      m_current = std::move(*posted);
+}
+
 bool SocketWorker::MaybeDeclare()
 {
-   DeclareSnapshot now;
-   m_source.GetDeclare(now);
-   if (m_haveDeclared && now == m_declared)
+   TakeDeclare();
+   if (m_haveDeclared && m_current == m_declared)
       return true;
+   const DeclareSnapshot now = m_current;
 
    // A Declare clears the subscription on both sides; cleared before it goes out,
    // so a Poll crossing it never serves the previous ROM's addresses.

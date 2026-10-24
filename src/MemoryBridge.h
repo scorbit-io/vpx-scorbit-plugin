@@ -12,10 +12,12 @@
 //
 // Service takes the queue with a try_lock, so a contended frame is skipped and
 // picked up on the next one, and reads with the lock released, so a worker at its
-// deadline never waits behind a read. Requests are shared, so one the worker
+// deadline never waits behind a read. The snapshot is published through a seqlock,
+// so a Poll never waits on the API thread's copy, nor it on the Poll. Requests are shared, so one the worker
 // gave up on (timeout, unload) is still safe for the API thread to complete; it
 // is only never installed.
 
+#include "SeqLock.h"
 #include "WireProtocol.h"
 
 #include <atomic>
@@ -134,21 +136,34 @@ private:
    // Reads only, into m_nextSnapshot; true when every range read in full.
    bool TakeSnapshot(const ReadFn& read, const std::vector<Wire::MemoryRange>& ranges, uint64_t frame,
       bool playerRunning, bool gameRunning);
+   // API thread. Publishes m_nextSnapshot, valid for the subscription rangesId when complete.
+   void PublishSnapshot(uint64_t rangesId, bool complete);
 
    std::mutex m_mutex;
    std::condition_variable m_answered;
    Queue m_queue;
 
-   // The subscription and the snapshot of it, under m_mutex. An id ties a
-   // snapshot to the subscription it was taken for, so a Poll never answers with
-   // bytes of a set that has since been replaced.
+   // The subscription, under m_mutex. Its id ties a snapshot to the subscription it
+   // was taken for, so a Poll never answers with bytes of a set since replaced.
    std::vector<Wire::MemoryRange> m_ranges;
    uint64_t m_subscriptionId = 0;
    uint64_t m_nextSubscriptionId = 1;
-   bool m_haveSnapshot = false;
-   uint64_t m_snapshotId = 0;
-   Wire::PollReply m_snapshot;
-   Wire::PollReply m_nextSnapshot;   // API thread only; swapped into m_snapshot
+
+   // The snapshot: a header, every range's address and length, then their bytes.
+   struct SnapshotHeader
+   {
+      uint64_t frame;
+      uint64_t rangesId;
+      uint32_t blocks;
+      uint8_t playerRunning;
+      uint8_t complete;   // every range read in full, for rangesId
+   };
+   static constexpr size_t SNAPSHOT_BYTES = sizeof(SnapshotHeader) + Wire::MAX_SUBSCRIBE_RANGES * 8 + Wire::MAX_SUBSCRIBE_BYTES;
+   Wire::PollReply m_nextSnapshot;    // API thread only
+   std::mutex m_publishMutex;         // writers only, should a second thread ever publish
+   std::vector<uint8_t> m_publishBuf; // under m_publishMutex
+   SeqLock<SNAPSHOT_BYTES> m_snapshot;
+   std::vector<uint8_t> m_pollBuf;    // worker only
 
    std::atomic<bool> m_gameRunning { false };
    std::atomic<bool> m_writesUnsupported { false };
