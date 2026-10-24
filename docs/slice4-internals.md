@@ -112,10 +112,13 @@ None of these makes the API or render thread wait on the socket worker (REQ-8.3)
     - **While the queue is non-empty, every new op is appended to it** rather than trying the
       lock. Ops therefore apply in arrival order, which upload-then-show depends on.
     - The API thread drains the queue in order, again with `try_lock`, at its next
-      `OnPrepareFrame`. A drain that cannot take the lock leaves the queue for the next frame.
+      `OnPrepareFrame` and from the plugin's quarter-second timer. A drain that cannot take the
+      lock leaves the queue for the next one.
     - A queued show's timer counts from its arrival, not from the drain.
-    - Draining only per frame is deliberate. While no frame renders (paused, unfocused, no
-      table), nothing is drawn either, so no timer is needed.
+    - The timer drain matters while no frame renders: VPX's own DMD is not drawn while paused,
+      but DMDUtil keeps reading the override on its own thread and drives the real display.
+    - An upload is queued with its pixels only, after checking for room, so a trailer the
+      payload carries costs the API thread nothing.
     - The bus reply's `applied` means *accepted*, not *shown*. It is decided from the payload
       alone (size bounds, and whether a surface exists) and does not wait for the write. A queued
       op answers `applied = 1`; only an invalid payload or a full queue answers 0.
