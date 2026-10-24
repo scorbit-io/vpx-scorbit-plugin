@@ -272,6 +272,8 @@ static void DrainSocketLog(void*)
       // Display changes while no frame renders (table chooser, a paused game) still re-declare.
       vpxSession->UpdateDeclare();
    }
+   if (dmdOverlay != nullptr)
+      dmdOverlay->DrainPending();
    msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
 }
 

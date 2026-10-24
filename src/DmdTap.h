@@ -66,7 +66,8 @@ public:
 
    // Any thread. Bumped on every source change, including a replacement whose
    // geometry is identical.
-   uint64_t SourceGeneration() const { std::lock_guard lock(m_sourceMutex); return m_sourceGeneration; }
+   // Never waits: the worker holds m_sourceMutex across a frame read and copy.
+   uint64_t SourceGeneration() const { return m_sourceGeneration; }
 
    // Any thread. Frames the source produced that the tap did not capture,
    // counted from gaps in frameId. A poll can miss a frame when the host
@@ -87,7 +88,8 @@ private:
    mutable std::mutex m_sourceMutex;
    DisplaySrcId m_source { };
    std::atomic<bool> m_hasSource { false };
-   uint64_t m_sourceGeneration = 0; // under m_sourceMutex; bumped on every source change
+   // Bumped under m_sourceMutex on every source change, and read without it.
+   std::atomic<uint64_t> m_sourceGeneration { 0 };
    std::atomic<uint64_t> m_skipped { 0 };
 
    // The largest display any PinMAME driver publishes is 192x64; this leaves room.

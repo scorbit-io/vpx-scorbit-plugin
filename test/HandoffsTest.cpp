@@ -267,6 +267,24 @@ void TestCacheRefusesWhenFullOrInvalid()
    CHECK_MSG(!cache.PostUpload(p.data(), p.size() - 1), "a short upload is refused");
 }
 
+// A queued upload keeps only its pixels: trailing bytes are ignored, so they are not copied.
+void TestCacheQueuesAnUploadWithoutItsTrailer()
+{
+   Overlay::Cache cache;
+   std::vector<uint8_t> p = Upload(10, 10, 0x05);
+   p.resize(p.size() + 1024 * 1024, 0xEE);
+   {
+      WorkerHolds held(cache);
+      CHECK(cache.PostUpload(p.data(), p.size()));
+      CHECK(cache.PendingForTest() == 1);
+   }
+   cache.DrainPending();
+   Overlay::Record record;
+   uint64_t seq = 0;
+   CHECK(cache.ReadIfChanged(seq, record, g_scratch));
+   CHECK_MSG(record.width == 10 && record.height == 10 && record.pixels[99] == 0x05, "the bitmap, without its trailer");
+}
+
 // The worker writes through the cache while a reader copies; every copy is a whole record.
 void TestCacheReaderNeverSeesAMixedRecord()
 {
@@ -313,6 +331,7 @@ int main()
    TestCacheTimerCountsFromArrival();
    TestCacheKeepsArrivalOrder();
    TestCacheRefusesWhenFullOrInvalid();
+   TestCacheQueuesAnUploadWithoutItsTrailer();
    TestCacheReaderNeverSeesAMixedRecord();
    return ScorbitTest::Summary("handoffs_test");
 }

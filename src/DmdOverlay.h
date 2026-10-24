@@ -68,6 +68,11 @@ public:
    // Session end: hidden, with no bitmap and no timer.
    void Clear() { m_cache.Clear(); }
 
+   // API thread only. Applies in-process ops that had to wait for the other writer. Called each
+   // rendered frame and from the plugin's timer, since consumers such as DMDUtil keep reading
+   // while VPX is paused.
+   void DrainPending() { if (!m_detached) m_cache.DrainPending(); }
+
    // API thread only. Demo mode: poll <dir>/overlay.bin and <dir>/overlay-ctl.bin
    // (the raw 0x23 and 0x27 payloads) and feed them through the Overlay message.
    // Empty disables.
@@ -101,6 +106,7 @@ private:
 
       std::mutex mutex;
       bool live = true;           // false once the target may be gone: our own buffers only
+      bool servedDark = false;    // the dark buffer has gone out under its own frame id
       std::vector<uint8_t> out[2];
       std::vector<uint8_t> dark;  // served once not live
       unsigned int next = 0;      // the buffer the next composite writes

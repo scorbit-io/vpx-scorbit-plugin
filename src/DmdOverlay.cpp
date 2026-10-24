@@ -531,7 +531,16 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
       return { 0, nullptr };
    std::lock_guard lock(e->mutex);
    if (!e->live)
+   {
+      // A new id once, so a consumer that skips repeated ids drops the lit frame; at quit no
+      // withdrawal follows to make it look again.
+      if (!e->servedDark)
+      {
+         e->servedDark = true;
+         e->outFrameId++;
+      }
       return { e->outFrameId, e->dark.data() };
+   }
 
    // The target's frame. Thread safe by contract, and the only cross-plugin call in here.
    const DisplayFrame src = e->target.source.GetRenderFrame(e->target.source.callContext);

@@ -86,11 +86,13 @@ public:
    // True when accepted: decided from the payload alone, not from whether it applied yet.
    bool PostUpload(const uint8_t* payload, size_t size)
    {
-      if (State::Check(payload, size) != State::Upload::Stored)
+      if (State::Check(payload, size) != State::Upload::Stored || Full())
          return false;
       Op op;
       op.upload = true;
-      op.bytes.assign(payload, payload + size);
+      // Trailing bytes are ignored, so they are not copied: a small bitmap with a large
+      // trailer must not cost the API thread an allocation of the trailer's size.
+      op.bytes.assign(payload, payload + 2 + static_cast<size_t>(payload[0]) * payload[1]);
       return Post(std::move(op));
    }
 
@@ -149,6 +151,9 @@ private:
       uint32_t durationMs = 0;
       Clock::time_point at { };  // the timer counts from arrival, not from the drain
    };
+
+   // The op would have to queue, and there is no room.
+   bool Full() const { return m_pending.size() >= PENDING_LIMIT; }
 
    bool Post(Op&& op)
    {
