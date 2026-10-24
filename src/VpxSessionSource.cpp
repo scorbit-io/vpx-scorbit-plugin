@@ -48,6 +48,8 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_gameEndMsgId, OnGameEnd, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_prepareFrameMsgId, OnPrepareFrame, this);
+   // So the worker's first Hello and Declare have something to send.
+   UpdateDeclare();
 }
 
 VpxSessionSource::~VpxSessionSource()
@@ -75,24 +77,20 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
          tablePath = Wire::TableFileName(info.path);
    }
 
-   {
-      std::lock_guard lock(self->m_mutex);
-      self->m_tablePath = std::move(tablePath);
-      // A table restart with the same ROM and the same display changes nothing
-      // on the wire, so the epoch is what makes Declare go out again anyway.
-      self->m_epoch++;
-      // Restored from the ROM: a restart with the same ROM sends no SetRomId to
-      // undo the OnGameEnd that cleared it.
-      self->m_gameRunning = !self->m_romId.empty();
-   }
+   self->m_tablePath = std::move(tablePath);
+   // A table restart with the same ROM and the same display changes nothing
+   // on the wire, so the epoch is what makes Declare go out again anyway.
+   self->m_epoch++;
+   // Restored from the ROM: a restart with the same ROM sends no SetRomId to
+   // undo the OnGameEnd that cleared it.
+   self->m_gameRunning = !self->m_romId.empty();
    self->m_memory.SetGameRunning(self->m_gameRunning);
    // Each player has its own notifications, numbered from 1, so the last table's handle
    // could name someone else's here; and this table has not seen the state yet.
    self->m_noticeHandle = 0;
    self->m_noticeUntil = { };
    self->m_notifier.NewTable();
-   // Published last, so the worker never sees a running player with no table
-   // path: it reads the flag and the path in two separate steps.
+   self->UpdateDeclare();
    self->m_playerRunning = true;
 }
 
@@ -104,9 +102,9 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    // The per-frame Service stops with the player, so say so here.
    self->m_gameRunning = false;
    self->m_memory.SetGameRunning(false);
-   std::lock_guard lock(self->m_mutex);
    self->m_tablePath.clear();
    self->m_epoch++;
+   self->UpdateDeclare();
 }
 
 void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
@@ -141,6 +139,7 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
          self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_writeMemoryMsgId, &msg);
          return msg.applied;
       });
+   self->UpdateDeclare();
    self->PostStatusNotice();
 }
 
@@ -161,10 +160,10 @@ void VpxSessionSource::PostStatusNotice()
 
 void VpxSessionSource::SetRomId(const std::string& romId)
 {
-   std::lock_guard lock(m_mutex);
    m_romId = romId;
    m_gameRunning = !romId.empty();
    m_memory.SetGameRunning(!romId.empty());
+   UpdateDeclare();
 }
 
 void VpxSessionSource::PushLog(int level, const std::string& message)
@@ -206,7 +205,7 @@ void VpxSessionSource::DrainLog()
    }
 }
 
-void VpxSessionSource::Refresh()
+void VpxSessionSource::Refresh(const DmdTap& tap, TapView& view)
 {
    // The frame carries the generation of the source that produced it, so
    // "selected, but nothing captured from this source yet" is read off the
@@ -220,43 +219,52 @@ void VpxSessionSource::Refresh()
    // stamps a frame under the same lock that bumps the counter, so a frame's
    // generation can never be ahead of the counter, only behind it. Equal means
    // the frame came from the source that is selected now.
-   const bool tapHasSource = m_tap.HasSource();
-   const bool haveFrame = m_tap.GetLatest(m_latest);
-   const uint64_t tapGeneration = m_tap.SourceGeneration();
-   m_hasSource = tapHasSource && haveFrame && m_latest.generation == tapGeneration;
+   const bool tapHasSource = tap.HasSource();
+   // A torn copy keeps the frame this view already held: it is the source that changed,
+   // not the display, and treating a tear as "no display" would re-declare a 0x0 one.
+   const bool haveFrame = tap.GetLatest(view.latest, view.scratch) || (tap.HasFrame() && view.latest.width != 0);
+   const uint64_t tapGeneration = tap.SourceGeneration();
+   view.hasSource = tapHasSource && haveFrame && view.latest.generation == tapGeneration;
 
    // During that gap the daemon still sees the generation move, so it discards
    // its cache and stops treating the frame id it last saw as current.
-   m_generation = m_hasSource ? m_latest.generation : tapGeneration;
+   view.generation = view.hasSource ? view.latest.generation : tapGeneration;
 }
 
-void VpxSessionSource::GetDeclare(DeclareSnapshot& out)
+void VpxSessionSource::UpdateDeclare()
 {
-   std::lock_guard lock(m_mutex);
-   Refresh();
+   Refresh(m_tap, m_apiTap);
+   const DmdTap::Frame& f = m_apiTap.latest;
+   const bool has = m_apiTap.hasSource;
 
-   Wire::Declare& d = out.declare;
+   DeclareSnapshot now;
+   Wire::Declare& d = now.declare;
    d.romId = m_romId;
    d.tablePath = m_tablePath;
    d.vpxVersion = SCORBIT_VPX_PINNED_VERSION;
    d.vpxRevision = SCORBIT_VPX_PINNED_REVISION;
-   d.width = static_cast<uint16_t>(m_hasSource ? m_latest.width : 0);
-   d.height = static_cast<uint16_t>(m_hasSource ? m_latest.height : 0);
-   d.shades = static_cast<uint8_t>(m_hasSource ? m_latest.shades : 0);
-   d.sourceGeneration = static_cast<uint32_t>(m_generation);
-   d.identifyFormat = !m_hasSource ? "" : (m_latest.shades == 16 ? "BITPLANE4" : "BITPLANE2");
-   out.epoch = m_epoch;
-   out.overlaySurface = m_overlay.HasSurface();
+   d.width = static_cast<uint16_t>(has ? f.width : 0);
+   d.height = static_cast<uint16_t>(has ? f.height : 0);
+   d.shades = static_cast<uint8_t>(has ? f.shades : 0);
+   d.sourceGeneration = static_cast<uint32_t>(m_apiTap.generation);
+   d.identifyFormat = !has ? "" : (f.shades == 16 ? "BITPLANE4" : "BITPLANE2");
+   now.epoch = m_epoch;
+   now.surfaceGeneration = m_overlay.SurfaceGeneration();
+   if (m_havePosted && now == m_posted)
+      return;
+   m_posted = now;
+   m_havePosted = true;
+   m_declares.Post(now);
 }
 
 void VpxSessionSource::GetFrame(FrameSnapshot& out)
 {
-   std::lock_guard lock(m_mutex);
-   Refresh();
+   Refresh(m_tap, m_workerTap);
+   const DmdTap::Frame& latest = m_workerTap.latest;
 
-   out.hasSource = m_hasSource;
-   out.generation = static_cast<uint32_t>(m_generation);
-   if (!m_hasSource)
+   out.hasSource = m_workerTap.hasSource;
+   out.generation = static_cast<uint32_t>(m_workerTap.generation);
+   if (!m_workerTap.hasSource)
    {
       out.frameId = 0;
       out.width = 0;
@@ -265,13 +273,13 @@ void VpxSessionSource::GetFrame(FrameSnapshot& out)
       out.pixels.clear();
       return;
    }
-   out.frameId = m_latest.frameId;
-   out.width = static_cast<uint16_t>(m_latest.width);
-   out.height = static_cast<uint16_t>(m_latest.height);
-   out.shades = static_cast<uint8_t>(m_latest.shades);
+   out.frameId = latest.frameId;
+   out.width = static_cast<uint16_t>(latest.width);
+   out.height = static_cast<uint16_t>(latest.height);
+   out.shades = static_cast<uint8_t>(latest.shades);
    // Handed over exactly as the tap captured it: one shade index per pixel,
    // row major. Nothing repacks it on the way to the daemon.
-   out.pixels = m_latest.pixels;
+   out.pixels = latest.pixels;
 }
 
 void VpxSessionSource::GetSession(SessionSnapshot& out)

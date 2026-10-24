@@ -62,17 +62,50 @@ MemoryBridge::Result MemoryBridge::Poll(Wire::PollReply& out)
 {
    if (!m_gameRunning)
       return Result::NoGame;
-   std::lock_guard lock(m_mutex);
-   if (m_ranges.empty())
+   uint64_t subscriptionId;
+   bool unsubscribed;
+   {
+      std::lock_guard lock(m_mutex);
+      subscriptionId = m_subscriptionId;
+      unsubscribed = m_ranges.empty();
+   }
+
+   // Torn more than the seqlock's retries allow is "not available for this poll".
+   SnapshotHeader header { };
+   size_t got = 0;
+   const bool read = m_snapshot.Read(m_pollBuf, got) && got >= sizeof(header);
+   if (read)
+      std::memcpy(&header, m_pollBuf.data(), sizeof(header));
+   if (unsubscribed)
    {
       out = { };
-      out.frame = m_snapshot.frame;
-      out.playerRunning = m_snapshot.playerRunning;
+      out.frame = read ? header.frame : 0;
+      out.playerRunning = read ? header.playerRunning : 0;
       return Result::Ok;
    }
-   if (!m_haveSnapshot || m_snapshotId != m_subscriptionId)
+   if (!read || !header.complete || header.rangesId != subscriptionId)
       return Result::Busy;
-   out = m_snapshot;
+
+   out = { };
+   out.frame = header.frame;
+   out.playerRunning = header.playerRunning;
+   out.blocks.resize(header.blocks);
+   size_t at = sizeof(header);
+   for (Wire::MemoryBlock& block : out.blocks)
+   {
+      uint32_t length;
+      std::memcpy(&block.address, m_pollBuf.data() + at, 4);
+      std::memcpy(&length, m_pollBuf.data() + at + 4, 4);
+      block.bytes.resize(length);
+      at += 8;
+   }
+   for (Wire::MemoryBlock& block : out.blocks)
+   {
+      if (at + block.bytes.size() > got)
+         return Result::Busy;
+      std::memcpy(block.bytes.data(), m_pollBuf.data() + at, block.bytes.size());
+      at += block.bytes.size();
+   }
    return Result::Ok;
 }
 
@@ -136,7 +169,6 @@ void MemoryBridge::ResetSubscription()
    // A fresh id, so a Subscribe already queued from before this point cannot
    // install its set once the API thread gets to it.
    m_subscriptionId = m_nextSubscriptionId++;
-   m_haveSnapshot = false;
 }
 
 MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& request, int budgetMs,
@@ -196,8 +228,6 @@ void MemoryBridge::SetGameRunning(bool running)
       m_gameRunning = running;
       if (running)
          return;
-      m_haveSnapshot = false;
-      m_snapshot.playerRunning = 0;
       // No Service is coming to answer these, so answer them now: without a game
       // nothing is read, and each gets its no-game answer.
       Queue pending;
@@ -206,6 +236,10 @@ void MemoryBridge::SetGameRunning(bool running)
          Answer(*request, { }, { }, 0, false);
       Complete(pending);
    }
+   // No snapshot outlives the game, so a restart cannot serve the last one's bytes.
+   m_nextSnapshot.playerRunning = 0;
+   m_nextSnapshot.blocks.clear();
+   PublishSnapshot(0, false);
    m_answered.notify_all();
 }
 
@@ -245,17 +279,37 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
       }
    }
    const bool haveSnapshot = TakeSnapshot(read, ranges, frame, playerRunning, gameRunning);
+   // Before the requests complete, so a Poll right after a Subscribe reply has its set.
+   // Tagged with the set it was read for: a Poll matches it against the installed one, so
+   // one replaced by Clear meanwhile, or an abandoned Subscribe's, is never served.
+   PublishSnapshot(rangesId, haveSnapshot);
 
    {
       // Blocking, but the worker only ever holds this for bookkeeping, never a read.
       std::lock_guard lock(m_mutex);
       Complete(work);
-      std::swap(m_snapshot, m_nextSnapshot);
-      // Not the installed set if Clear replaced it meanwhile, or its Subscribe was abandoned.
-      m_haveSnapshot = haveSnapshot && rangesId == m_subscriptionId;
-      m_snapshotId = rangesId;
    }
    m_answered.notify_all();
+}
+
+void MemoryBridge::PublishSnapshot(uint64_t rangesId, bool complete)
+{
+   std::lock_guard lock(m_publishMutex);
+   const SnapshotHeader header { m_nextSnapshot.frame, rangesId, static_cast<uint32_t>(m_nextSnapshot.blocks.size()),
+      m_nextSnapshot.playerRunning, static_cast<uint8_t>(complete ? 1 : 0) };
+   m_publishBuf.resize(sizeof(header));
+   std::memcpy(m_publishBuf.data(), &header, sizeof(header));
+   for (const Wire::MemoryBlock& block : m_nextSnapshot.blocks)
+   {
+      const uint32_t length = static_cast<uint32_t>(block.bytes.size());
+      const uint8_t* a = reinterpret_cast<const uint8_t*>(&block.address);
+      const uint8_t* l = reinterpret_cast<const uint8_t*>(&length);
+      m_publishBuf.insert(m_publishBuf.end(), a, a + 4);
+      m_publishBuf.insert(m_publishBuf.end(), l, l + 4);
+   }
+   for (const Wire::MemoryBlock& block : m_nextSnapshot.blocks)
+      m_publishBuf.insert(m_publishBuf.end(), block.bytes.begin(), block.bytes.end());
+   m_snapshot.Write(m_publishBuf.data(), m_publishBuf.size());
 }
 
 void MemoryBridge::Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
@@ -342,7 +396,6 @@ void MemoryBridge::Complete(Queue& requests)
       {
          m_ranges = request->accepted;
          m_subscriptionId = request->subscriptionId;
-         m_haveSnapshot = false;
       }
       request->done = true;
    }

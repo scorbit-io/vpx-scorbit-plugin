@@ -31,11 +31,7 @@ constexpr int WAIT_MS = 5000;
 class FakeSource final : public ISessionSource
 {
 public:
-   void GetDeclare(DeclareSnapshot& out) override
-   {
-      std::lock_guard lock(m_mutex);
-      out = m_declare;
-   }
+   std::unique_ptr<DeclareSnapshot> TakeDeclare() override { return m_declares.Take(); }
 
    void GetFrame(FrameSnapshot& out) override
    {
@@ -49,11 +45,14 @@ public:
       out = m_session;
    }
 
+   // Posts the declaration as the API thread would, and publishes the frame.
    void Set(const DeclareSnapshot& declare, const FrameSnapshot& frame)
    {
-      std::lock_guard lock(m_mutex);
-      m_declare = declare;
-      m_frame = frame;
+      {
+         std::lock_guard lock(m_mutex);
+         m_frame = frame;
+      }
+      m_declares.Post(declare);
    }
 
    void SetSession(const SessionSnapshot& session)
@@ -64,7 +63,7 @@ public:
 
 private:
    std::mutex m_mutex;
-   DeclareSnapshot m_declare;
+   Latch<DeclareSnapshot> m_declares;
    FrameSnapshot m_frame;
    SessionSnapshot m_session;
 };
@@ -1427,7 +1426,7 @@ void TestOverlayAndStatusOverTheSocket()
       source.Set(d, frame);
       CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
       CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
-      d.overlaySurface = true;
+      d.surfaceGeneration = 1;
       source.Set(d, frame);
       CHECK_MSG(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS), "a surface change re-declares");
       Wire::Declare again;

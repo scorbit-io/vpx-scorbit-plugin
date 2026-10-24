@@ -30,6 +30,18 @@ target_link_libraries(status_notice_test PRIVATE scorbit-transport)
 target_compile_options(status_notice_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME status_notice COMMAND status_notice_test)
 
+add_executable(override_chain_test OverrideChainTest.cpp Check.h)
+target_link_libraries(override_chain_test PRIVATE scorbit-transport)
+target_compile_options(override_chain_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME override_chain COMMAND override_chain_test)
+
+# Threads but no sockets: the seqlock, the latch and the overlay cache.
+add_executable(handoffs_test HandoffsTest.cpp Check.h)
+target_link_libraries(handoffs_test PRIVATE scorbit-transport)
+target_compile_options(handoffs_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME handoffs COMMAND handoffs_test)
+set_tests_properties(handoffs PROPERTIES TIMEOUT 60)
+
 if(NOT WIN32)
    # The peer speaks POSIX sockets directly. The worker's Windows path is
    # written but nothing in CI compiles it yet, so this test does not claim to

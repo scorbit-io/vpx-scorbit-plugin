@@ -267,7 +267,11 @@ static void DrainSocketLog(void*)
    if (!logDrainActive)
       return;
    if (vpxSession != nullptr)
+   {
       vpxSession->DrainLog();
+      // Display changes while no frame renders (table chooser, a paused game) still re-declare.
+      vpxSession->UpdateDeclare();
+   }
    msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
 }
 

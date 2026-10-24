@@ -193,12 +193,15 @@ build directory runs both. They need neither Visual Pinball nor a daemon.
 
 `src/DmdOverlay.*` draws bitmaps over the live DMD the way a Scorbitron does:
 upload a bitmap, show it for a duration or until hidden, hide it. VPX has no
-draw callback for this, so the overlay is a render-frame provider: the plugin
-publishes its own display source overriding the controller's, and serves the
-controller's frame with the cached bitmap composited over it. Identify frames
-pass through untouched, so colorizers and the frame tap still see the real
-display, and nothing in the render path waits on anything but a short local
-lock.
+draw callback for this, so the overlay is delivered as display-source
+overrides, which every consumer of the DMD picks up as original data: VPX's own
+DMD, the PUP and B2S DMD overlays, ScoreView, and real DMDs through DMDUtil.
+The plugin lists its overrides ahead of every other source, overrides the
+controller's display on an uncoloured table and every colouriser output (Serum,
+VNI) on a coloured one, and serves each with the cached bitmap composited over
+it. The frame tap keeps reading the controller's own frames, and the render path
+never waits on whoever writes the overlay. `docs/slice4-internals.md` has the
+rules and the thread handoffs.
 
 Placement and shading mirror the probe firmware: the bitmap is centred on the
 display, and pixels outside it or flagged transparent (`0x80`) show the live

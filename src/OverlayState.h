@@ -162,6 +162,9 @@ public:
 
    bool Visible(Clock::time_point now) const { return m_enabled && !m_pixels.empty() && (m_untilHidden || now < m_hideAt); }
 
+   bool Enabled() const { return m_enabled; }
+   bool UntilHidden() const { return m_untilHidden; }
+   Clock::time_point HideAt() const { return m_hideAt; }
    uint32_t Width() const { return m_width; }
    uint32_t Height() const { return m_height; }
    const std::vector<uint8_t>& Pixels() const { return m_pixels; }

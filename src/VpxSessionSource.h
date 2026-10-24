@@ -9,7 +9,8 @@
 // before erasing it, so a nested pump can run a callback twice. So the API
 // thread pushes here (romId when the emulating controller changes, table path
 // and player state on game start and end, one tick per rendered frame) and the
-// worker only reads, under this object's own lock or through an atomic.
+// worker only reads: the declaration through the Declare latch, frames through
+// the tap's seqlock, the rest through atomics. Neither thread waits on the other.
 //
 // The same rule is why log lines from the worker are queued rather than
 // written: LoggingPlugin makes no thread safety promise, so the queue is
@@ -50,6 +51,11 @@ public:
    // API thread only. Empty means no game.
    void SetRomId(const std::string& romId);
 
+   // API thread only. Builds the declaration and posts it to the worker when it
+   // changed. Called per rendered frame and from the plugin's timer, so it stays
+   // current while no frame renders.
+   void UpdateDeclare();
+
    // API thread only. Writes out everything the worker logged since the last
    // call. Cheap when the queue is empty, which is almost always.
    void DrainLog();
@@ -65,7 +71,7 @@ public:
    StatusLatch& Status() { return m_statusLatch; }
 
    // ISessionSource, worker thread.
-   void GetDeclare(DeclareSnapshot& out) override;
+   std::unique_ptr<DeclareSnapshot> TakeDeclare() override { return m_declares.Take(); }
    void GetFrame(FrameSnapshot& out) override;
    void GetSession(SessionSnapshot& out) override;
 
@@ -80,8 +86,20 @@ private:
    static void OnGameEnd(const unsigned int msgId, void* userData, void* msgData);
    static void OnPrepareFrame(const unsigned int msgId, void* userData, void* msgData);
 
-   // Pulls the tap and maintains the derived source generation. Call under m_mutex.
-   void Refresh();
+   // What one thread knows of the tap. Each thread keeps its own.
+   struct TapView
+   {
+      DmdTap::Frame latest;
+      std::vector<uint8_t> scratch;
+      bool hasSource = false;
+      // DmdTap's own counter, which bumps on every source change including a
+      // replacement whose geometry is identical. The wire carries its low 32 bits:
+      // it counts source changes within one plugin load, so it would have to wrap
+      // a u64 before that could hide one.
+      uint64_t generation = 0;
+   };
+   // Pulls the tap and derives the source generation.
+   static void Refresh(const DmdTap& tap, TapView& view);
    // API thread, once per rendered frame: notifications are drawn inside rendered
    // frames and timed from their push, so one pushed while none render expires unseen.
    void PostStatusNotice();
@@ -104,18 +122,16 @@ private:
    std::atomic<bool> m_gameRunning { false };
    MemoryBridge m_memory;
 
-   std::mutex m_mutex;
+   // API thread only.
    std::string m_romId;
    std::string m_tablePath;
    uint64_t m_epoch = 0;
+   TapView m_apiTap;
+   DeclareSnapshot m_posted;
+   bool m_havePosted = false;
 
-   DmdTap::Frame m_latest;
-   bool m_hasSource = false;
-   // DmdTap's own counter, which bumps on every source change including a
-   // replacement whose geometry is identical. The wire carries its low 32 bits:
-   // it counts source changes within one plugin load, so it would have to wrap
-   // a u64 before that could hide one.
-   uint64_t m_generation = 0;
+   Latch<DeclareSnapshot> m_declares;
+   TapView m_workerTap; // worker only
 
    StatusLatch m_statusLatch;
    StatusNotifier m_notifier; // API thread only, as are the two below

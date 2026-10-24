@@ -10,12 +10,13 @@
 // Visual Pinball plugin bus: posting to the bus from a worker is unsafe
 // because ProcessAsyncCallbacks fires a timer before erasing it, so a nested
 // pump can run a callback twice. Everything the worker needs about the session
-// is published into an ISessionSource by the API thread and read back under
-// that implementation's own lock.
+// is published into an ISessionSource by the API thread and read back without
+// ever making the API thread wait.
 //
 // The dependency on Visual Pinball is therefore in VpxSessionSource, not here,
 // which is what lets the worker run against a scripted peer in the tests.
 
+#include "Latch.h"
 #include "MemoryBridge.h"
 #include "OverlayState.h"
 #include "StatusNotice.h"
@@ -55,9 +56,10 @@ struct DeclareSnapshot
 {
    Wire::Declare declare;
    uint64_t epoch = 0;
-   // Not on the wire either: the overlay surface appearing or going must re-Declare
-   // (design.md, slice 4) even when nothing declared changes.
-   bool overlaySurface = false;
+   // Not on the wire either: bumped whenever the overlay surface appears, goes or
+   // moves to another source, which must re-Declare (design.md, slice 4) even when
+   // nothing declared changes.
+   uint64_t surfaceGeneration = 0;
 
    bool operator==(const DeclareSnapshot&) const = default;
 };
@@ -76,7 +78,8 @@ class ISessionSource
 public:
    virtual ~ISessionSource() = default;
 
-   virtual void GetDeclare(DeclareSnapshot& out) = 0;
+   // The latest declaration the API thread posted, once; null when nothing new arrived.
+   virtual std::unique_ptr<DeclareSnapshot> TakeDeclare() = 0;
    virtual void GetFrame(FrameSnapshot& out) = 0;
    virtual void GetSession(SessionSnapshot& out) = 0;
 };
@@ -170,6 +173,8 @@ private:
    bool Handshake();
    void Serve();
    bool MaybeDeclare();
+   // Takes a newly posted declaration into m_current, if there is one.
+   void TakeDeclare();
    bool Dispatch(const Wire::Message& msg);
    bool AnswerFrame(const Wire::Message& msg);
    bool AnswerPing(const Wire::Message& msg);
@@ -226,6 +231,9 @@ private:
    int m_socket = -1;
 #endif
    uint32_t m_seq = 0;
+   // The latest declaration taken from the latch, kept across connections so a new
+   // one re-declares it after HelloAck, and the one this connection last sent.
+   DeclareSnapshot m_current;
    DeclareSnapshot m_declared;
    bool m_haveDeclared = false;
    bool m_loggedNvRam = false;           // NvRam is logged once per session

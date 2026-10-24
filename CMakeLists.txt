@@ -134,6 +134,10 @@ add_library(scorbit-transport STATIC
    src/MemoryBridge.cpp
    src/OverlayPlacement.h
    src/OverlayState.h
+   src/OverlayCache.h
+   src/OverrideChain.h
+   src/SeqLock.h
+   src/Latch.h
    src/StatusNotice.h
    src/StatusNotice.cpp
    src/SocketWorker.h
