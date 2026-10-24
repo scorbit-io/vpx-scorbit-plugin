@@ -613,4 +613,59 @@ bool Decode(const std::vector<uint8_t>& payload, NvRamParameters& out)
    return r.Ok();
 }
 
+std::vector<uint8_t> Encode(const OverlayRequest& v)
+{
+   Writer w;
+   w.U8(v.op);
+   w.Bytes(v.payload.data(), v.payload.size());
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, OverlayRequest& out)
+{
+   Reader r(payload.data(), payload.size());
+   if (!r.U8(out.op))
+      return false;
+   out.payload.assign(payload.begin() + 1, payload.end());
+   return true;
+}
+
+std::vector<uint8_t> Encode(const OverlayControl& v)
+{
+   Writer w;
+   w.U8(v.control);
+   w.U8(static_cast<uint8_t>(v.durationMs >> 8));
+   w.U8(static_cast<uint8_t>(v.durationMs & 0xFF));
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, OverlayControl& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint8_t hi = 0, lo = 0;
+   r.U8(out.control);
+   r.U8(hi);
+   r.U8(lo);
+   out.durationMs = static_cast<uint16_t>((hi << 8) | lo);
+   return r.Ok();
+}
+
+std::vector<uint8_t> Encode(const Status& v)
+{
+   Writer w;
+   w.U8(v.sessionState);
+   w.U8(v.systemState);
+   w.Str(v.supportText);
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, Status& out)
+{
+   Reader r(payload.data(), payload.size());
+   r.U8(out.sessionState);
+   r.U8(out.systemState);
+   r.Str(out.supportText);
+   return r.Ok() && out.supportText.size() <= MAX_SUPPORT_TEXT_BYTES;
+}
+
 }

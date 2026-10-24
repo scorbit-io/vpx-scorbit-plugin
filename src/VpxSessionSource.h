@@ -13,16 +13,20 @@
 //
 // The same rule is why log lines from the worker are queued rather than
 // written: LoggingPlugin makes no thread safety promise, so the queue is
-// drained back on the API thread.
+// drained back on the API thread. Status comes back the same way, through a
+// latch the API thread drains once per rendered frame into a notification.
 
+#include "DmdOverlay.h"
 #include "DmdTap.h"
 #include "MemoryBridge.h"
 #include "SocketWorker.h"
+#include "StatusNotice.h"
 
 #include "plugins/ControllerPlugin.h"
 #include "plugins/VPXPlugin.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -32,10 +36,12 @@
 namespace Scorbit
 {
 
-class VpxSessionSource final : public ISessionSource
+class VpxSessionSource final : public ISessionSource, public IOverlayTarget
 {
 public:
-   VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap);
+   // showStatus reads [Plugin.Scorbit] ShowStatus; it is read every frame, so a change applies at once.
+   VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
+      int (*showStatus)());
    ~VpxSessionSource() override;
 
    VpxSessionSource(const VpxSessionSource&) = delete;
@@ -55,10 +61,19 @@ public:
    // so it outlives the socket worker, which is deleted first at unload.
    MemoryBridge& Memory() { return m_memory; }
 
+   // The socket worker's half of the Status latch. Owned here for the same reason.
+   StatusLatch& Status() { return m_statusLatch; }
+
    // ISessionSource, worker thread.
    void GetDeclare(DeclareSnapshot& out) override;
    void GetFrame(FrameSnapshot& out) override;
    void GetSession(SessionSnapshot& out) override;
+
+   // IOverlayTarget, worker thread.
+   bool OverlaySurface() override { return m_overlay.HasSurface(); }
+   Overlay::State::Upload OverlayUpload(const uint8_t* payload, size_t size) override { return m_overlay.Store(payload, size); }
+   void OverlayControl(bool enable, uint32_t durationMs) override { m_overlay.Control(enable, durationMs); }
+   void OverlayClear() override { m_overlay.Clear(); }
 
 private:
    static void OnGameStart(const unsigned int msgId, void* userData, void* msgData);
@@ -67,11 +82,16 @@ private:
 
    // Pulls the tap and maintains the derived source generation. Call under m_mutex.
    void Refresh();
+   // API thread, once per rendered frame: notifications are drawn inside rendered
+   // frames and timed from their push, so one pushed while none render expires unseen.
+   void PostStatusNotice();
 
    const MsgPluginAPI* const m_msgApi;
    const uint32_t m_endpointId;
    VPXPluginAPI* const m_vpxApi;
    DmdTap& m_tap;
+   DmdOverlay& m_overlay;
+   int (*const m_showStatus)();
    const unsigned int m_gameStartMsgId;
    const unsigned int m_gameEndMsgId;
    const unsigned int m_prepareFrameMsgId;
@@ -96,6 +116,11 @@ private:
    // it counts source changes within one plugin load, so it would have to wrap
    // a u64 before that could hide one.
    uint64_t m_generation = 0;
+
+   StatusLatch m_statusLatch;
+   StatusNotifier m_notifier; // API thread only, as are the two below
+   unsigned int m_noticeHandle = 0;
+   std::chrono::steady_clock::time_point m_noticeUntil { };
 
    std::mutex m_logMutex;
    std::deque<std::pair<int, std::string>> m_logQueue;

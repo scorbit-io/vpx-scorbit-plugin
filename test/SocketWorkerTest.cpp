@@ -9,12 +9,15 @@
 #include "TestPeer.h"
 #include "WireVectors.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <unistd.h>
 
@@ -1219,6 +1222,258 @@ void TestConnectToListenerThatNeverAccepts()
    rmdir(dir.c_str());
 }
 
+// Records what the worker hands over, with DmdOverlay's upload rules.
+class FakeOverlay final : public IOverlayTarget
+{
+public:
+   bool OverlaySurface() override { return m_surface; }
+
+   Overlay::State::Upload OverlayUpload(const uint8_t* payload, size_t size) override
+   {
+      std::lock_guard lock(m_mutex);
+      const Overlay::State::Upload result = Overlay::State::Check(payload, size);
+      if (result == Overlay::State::Upload::Stored)
+         m_uploads.emplace_back(payload, payload + size);
+      return result;
+   }
+
+   void OverlayControl(bool enable, uint32_t durationMs) override
+   {
+      std::lock_guard lock(m_mutex);
+      m_controls.emplace_back(enable, durationMs);
+   }
+
+   void OverlayClear() override { m_clears++; }
+
+   std::atomic<bool> m_surface { true };
+   std::atomic<int> m_clears { 0 };
+   std::mutex m_mutex;
+   std::vector<std::vector<uint8_t>> m_uploads;
+   std::vector<std::pair<bool, uint32_t>> m_controls;
+};
+
+// The latch's latest record, waiting for one that passes the test.
+template <typename Pred>
+bool AwaitStatus(StatusLatch& latch, Pred pred, StatusRecord& out)
+{
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+   while (std::chrono::steady_clock::now() < deadline)
+   {
+      if (std::unique_ptr<StatusRecord> r = latch.Take())
+      {
+         out = *r;
+         if (pred(out))
+            return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+   }
+   return false;
+}
+
+uint16_t ErrorCode(const Wire::Message& msg)
+{
+   Wire::ErrorPayload err;
+   return msg.header.IsError() && Wire::Decode(msg.payload, err) ? err.code : 0;
+}
+
+// Slice 4 end to end: Overlay and Status before and after the Declare, the golden
+// requests, the three error codes, and what session end leaves behind.
+void TestOverlayAndStatusOverTheSocket()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   {
+      FrameSnapshot frame;
+      Fill(frame, 1, 1, 128, 32, 4);
+      source.Set(MakeDeclare("tom_13", 128, 32, 4, 1), frame);
+   }
+   FakeOverlay overlay;
+   StatusLatch latch;
+   SocketWorker worker(source, MakeConfig(peer), Quiet(), nullptr, &overlay, &latch);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   // --- Hello advertises overlay; nothing is served before the Declare ---
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_HELLO, msg, WAIT_MS));
+   Wire::Hello hello;
+   CHECK(Wire::Decode(msg.payload, hello));
+   CHECK_MSG(hello.capabilities == (Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_OVERLAY), "caps " + std::to_string(hello.capabilities));
+   Wire::HelloAck ack;
+   ack.protoMajor = Wire::PROTO_MAJOR;
+   CHECK(peer.Send(Wire::TYPE_HELLO_ACK, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(ack)));
+
+   StatusRecord record;
+   CHECK_MSG(AwaitStatus(latch, [](const StatusRecord& r) { return r.inSession; }, record), "HelloAck starts a session");
+   CHECK(!record.haveStatus);
+
+   // The worker is waiting on its Declare's answer; requests that overtake it are served.
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   const uint32_t declareSeq = msg.header.seq;
+   CHECK(peer.SendRaw(ScorbitTest::Unhex("0c000000" "2000" "0000" "08000000" "02" "01" "05dc")));
+   CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+   CHECK_MSG(ErrorCode(msg) == Wire::ERR_NOT_DECLARED, "Overlay before the Declare");
+   CHECK(peer.Send(Wire::TYPE_STATUS, 0, 9, Wire::Encode(Wire::Status { })));
+   CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS));
+   CHECK_MSG(ErrorCode(msg) == Wire::ERR_NOT_DECLARED, "Status before the Declare");
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, declareSeq, { }));
+
+   // --- The golden requests, verbatim ------------------------------------
+   std::string upload = "6f000000" "2000" "0000" "07000000" "01" "0a" "0a";
+   for (int i = 0; i < 10; i++)
+      upload += "80";
+   for (int i = 0; i < 90; i++)
+      upload += "0f";
+   CHECK(peer.SendRaw(ScorbitTest::Unhex(upload)));
+   CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+   CHECK_MSG(ScorbitTest::Hex(Wire::EncodeMessage(msg.header.type, msg.header.flags, msg.header.seq, msg.payload))
+      == "08000000" "2000" "0100" "07000000", "upload acknowledgement");
+
+   const char* controls[] = {
+      "0c000000" "2000" "0000" "08000000" "02" "01" "05dc",
+      "0c000000" "2000" "0000" "09000000" "02" "01" "0000",
+      "0c000000" "2000" "0000" "0a000000" "02" "00" "0000",
+      // Reserved control bits are ignored: bit 0 clear is a hide whatever else is set.
+      "0c000000" "2000" "0000" "0b000000" "02" "fe" "0100",
+   };
+   for (const char* frame : controls)
+   {
+      CHECK(peer.SendRaw(ScorbitTest::Unhex(frame)));
+      CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+      CHECK(msg.header.IsResponse() && !msg.header.IsError() && msg.payload.empty());
+   }
+   {
+      std::lock_guard lock(overlay.m_mutex);
+      CHECK(overlay.m_uploads.size() == 1 && overlay.m_uploads[0].size() == 102);
+      CHECK(overlay.m_uploads.size() == 1 && overlay.m_uploads[0][2] == 0x80 && overlay.m_uploads[0][101] == 0x0f);
+      CHECK(overlay.m_controls.size() == 4);
+      CHECK(overlay.m_controls.size() == 4 && overlay.m_controls[0] == std::make_pair(true, 1500u));
+      CHECK(overlay.m_controls.size() == 4 && overlay.m_controls[1] == std::make_pair(true, 0u));
+      CHECK(overlay.m_controls.size() == 4 && !overlay.m_controls[2].first && !overlay.m_controls[3].first);
+   }
+
+   // --- Out of bounds is acknowledged and ignored ------------------------
+   {
+      std::vector<uint8_t> small { Wire::OVERLAY_OP_UPLOAD, 9, 9 };
+      small.resize(3 + 81, 0x01);
+      CHECK(peer.Send(Wire::TYPE_OVERLAY, 0, 30, small));
+      CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+      CHECK_MSG(msg.header.IsResponse() && !msg.header.IsError(), "an out of range upload is still acknowledged");
+      std::lock_guard lock(overlay.m_mutex);
+      CHECK(overlay.m_uploads.size() == 1);
+   }
+
+   // --- Malformed is answered, and the session survives -----------------
+   const std::vector<std::vector<uint8_t>> malformed = {
+      { },                                          // no op
+      { 3, 1, 0, 0 },                               // unknown op
+      { Wire::OVERLAY_OP_CONTROL, 1, 0x05 },         // control short of its duration
+      { Wire::OVERLAY_OP_UPLOAD, 10, 10, 0, 0, 0 },  // fewer pixels than 10x10
+   };
+   uint32_t seq = 40;
+   for (const std::vector<uint8_t>& payload : malformed)
+   {
+      CHECK(peer.Send(Wire::TYPE_OVERLAY, 0, seq, payload));
+      CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+      CHECK_MSG(ErrorCode(msg) == Wire::ERR_MALFORMED && msg.header.seq == seq, "payload of " + std::to_string(payload.size()));
+      seq++;
+   }
+   {
+      const Wire::Status tooLong { 0, 0, std::string(Wire::MAX_SUPPORT_TEXT_BYTES + 1, 'x') };
+      CHECK(peer.Send(Wire::TYPE_STATUS, 0, seq, Wire::Encode(tooLong)));
+      CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS));
+      CHECK_MSG(ErrorCode(msg) == Wire::ERR_MALFORMED, "support_text over 256 bytes");
+   }
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 60, { }));
+   CHECK_MSG(peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS), "the session survives a malformed Overlay or Status");
+
+   // --- Status, the golden request ---------------------------------------
+   CHECK(peer.SendRaw(ScorbitTest::Unhex("13000000" "2100" "0000" "0b000000" "02" "00" "0700" "6e6f2064617461")));
+   CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS));
+   CHECK_MSG(ScorbitTest::Hex(Wire::EncodeMessage(msg.header.type, msg.header.flags, msg.header.seq, msg.payload))
+      == "08000000" "2100" "0100" "0b000000", "status acknowledgement");
+   CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return r.haveStatus; }, record));
+   CHECK(record.inSession && record.status == (Wire::Status { Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "no data" }));
+
+   // --- No surface: refused with code 6 ----------------------------------
+   overlay.m_surface = false;
+   CHECK(peer.SendRaw(ScorbitTest::Unhex(upload)));
+   CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+   CHECK_MSG(ScorbitTest::Hex(Wire::EncodeMessage(msg.header.type, msg.header.flags, msg.header.seq, msg.payload))
+      == "19000000" "2000" "0300" "07000000" "0600" "0d00" "6e6f20444d4420736f75726365", "the golden refusal");
+   overlay.m_surface = true;
+
+   // A table with no DMD declares shades 0, and is refused the same way.
+   source.Set(MakeDeclare("meteor", 0, 0, 0, 2), FrameSnapshot { false, 0, 2, 0, 0, 0, { } });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_OVERLAY, 0, 70, { Wire::OVERLAY_OP_CONTROL, 1, 0, 0 }));
+   CHECK(peer.ReadOfType(Wire::TYPE_OVERLAY, msg, WAIT_MS));
+   CHECK_MSG(ErrorCode(msg) == Wire::ERR_UNSUPPORTED_OPERATION, "no DMD declared");
+
+   // --- The surface appearing re-declares with nothing else changed ------
+   {
+      FrameSnapshot frame;
+      Fill(frame, 1, 3, 128, 32, 4);
+      DeclareSnapshot d = MakeDeclare("tom_13", 128, 32, 4, 3);
+      source.Set(d, frame);
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      d.overlaySurface = true;
+      source.Set(d, frame);
+      CHECK_MSG(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS), "a surface change re-declares");
+      Wire::Declare again;
+      CHECK(Wire::Decode(msg.payload, again) && again.sourceGeneration == 3 && again.width == 128);
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   }
+
+   // --- Session end clears the overlay and says there is no session ------
+   CHECK(overlay.m_clears == 0);
+   peer.CloseClient();
+   CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return !r.inSession; }, record));
+   CHECK_MSG(overlay.m_clears == 1, "clears " + std::to_string(overlay.m_clears.load()));
+   CHECK(!record.haveStatus && record.reason.empty());
+   worker.Stop();
+}
+
+// A refused Hello's reason becomes the no-session support text.
+void TestRefusedHelloReason()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   StatusLatch latch;
+   SocketWorker worker(source, MakeConfig(peer), Quiet(), nullptr, nullptr, &latch);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_HELLO, msg, WAIT_MS));
+   Wire::Hello hello;
+   CHECK(Wire::Decode(msg.payload, hello));
+   CHECK_MSG((hello.capabilities & Wire::CAP_OVERLAY) == 0, "no overlay target, no overlay capability");
+   CHECK(peer.Send(Wire::TYPE_HELLO, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, msg.header.seq,
+      Wire::Encode(Wire::ErrorPayload { Wire::ERR_BUSY, "another VPX is connected" })));
+   StatusRecord record;
+   CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return !r.reason.empty(); }, record));
+   CHECK_MSG(!record.inSession && record.reason == "busy: another VPX is connected", record.reason);
+   worker.Stop();
+}
+
 int main()
 {
    TestSession();
@@ -1234,5 +1489,7 @@ int main()
    TestMemoryReadsOverTheSocket();
    TestWriteOnAHostWithoutWriteSupport();
    TestMemoryReadWithoutAnApiThread();
+   TestOverlayAndStatusOverTheSocket();
+   TestRefusedHelloReason();
    return ScorbitTest::Summary("socket_worker_test");
 }

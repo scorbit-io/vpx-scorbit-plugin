@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "OverlayState.h"
+
 #include "plugins/ControllerPlugin.h"
 #include "plugins/VPXPlugin.h"
 
@@ -20,7 +22,8 @@ namespace Scorbit
 {
 
 // DMD overlay, drawn the way the hardware probe draws it: a bitmap the daemon
-// uploads is composited over the live display for a duration, or until hidden.
+// uploads is composited over the live display for a duration, or until hidden, each
+// value shaded as the probe on that platform shows it (OverlayState.h).
 //
 // The plugin API has no draw callback, so the overlay is a render-frame
 // provider: this publishes its own display source that overrides the emulating
@@ -42,13 +45,18 @@ public:
    // API thread only. 0 withdraws the override.
    void SetController(uint32_t controllerEndpointId);
 
-   // API thread only. Payload is the WriteDmdOverlay (0x23) bytes: width,
-   // height, then width*height pixels (brightness 0-15, 0x80 = transparent).
-   // False if the payload is malformed or larger than the display.
-   bool Upload(const uint8_t* payload, size_t size);
-   // API thread only. 0 shows until Hide().
-   void Show(uint32_t durationMs);
-   void Hide();
+   // Any thread. The controller publishes a display this overrides, so there is
+   // something to composite on.
+   bool HasSurface() const { return m_surface; }
+
+   // Any thread, and silent: the socket worker calls these, and nothing may log off
+   // the API thread. The payload is the WriteDmdOverlay (0x23) bytes: width, height,
+   // then width*height pixels, bit 7 transparent, the low bits platform bitplane bits.
+   Overlay::State::Upload Store(const uint8_t* payload, size_t size);
+   // The 0x27 control. Enabling restarts the timer, 0 meaning until hidden.
+   void Control(bool enable, uint32_t durationMs);
+   // Session end: hidden, with no bitmap and no timer.
+   void Clear();
 
    // API thread only. Demo mode: poll <dir>/overlay.bin and <dir>/overlay-ctl.bin
    // (the raw 0x23 and 0x27 payloads) and feed them through the Overlay message.
@@ -73,14 +81,19 @@ private:
    void DropWorker();
    static void OnPrepareFrame(const unsigned int msgId, void* userData, void* msgData);
    void DrainDrops();
+   // PinMAME answers GetMachineState only once emulation runs, so this asks every frame until it does.
+   void QueryPlatform();
 
    const MsgPluginAPI* const m_msgApi;
    const uint32_t m_endpointId;
    const unsigned int m_overlayMsgId;
    const unsigned int m_prepareFrameMsgId;
+   const unsigned int m_machineStateMsgId;
 
    bool m_detached = false;
    bool m_withdrawPending = false; // API thread only
+   bool m_platformKnown = false;   // API thread only
+   std::atomic<bool> m_surface { false };
    std::atomic<uint32_t> m_controllerEndpointId { 0 };
    PinballPlugin::Controller::CtrlItemConsumer<DisplaySrcId> m_sources;
    PinballPlugin::Controller::CtrlItemProvider<DisplaySrcId> m_override;
@@ -97,16 +110,8 @@ private:
    unsigned int m_pubFrameFormat = 0;
    bool m_pubIdentify = false;
 
-   struct Bitmap
-   {
-      uint32_t width = 0;
-      uint32_t height = 0;
-      std::vector<uint8_t> pixels; // as uploaded: brightness | 0x80 transparent
-   };
-   Bitmap m_bitmap;
-   bool m_visible = false;
-   std::chrono::steady_clock::time_point m_visibleUntil { };
-   bool m_untilHidden = false;
+   Overlay::State m_state;
+   Overlay::Platform m_platform = Overlay::Platform::Unknown;
 
    // Composited output, double-buffered so a swap never tears a frame VPX is reading.
    std::vector<float> m_lum[2];

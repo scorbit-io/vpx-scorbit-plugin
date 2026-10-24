@@ -132,6 +132,10 @@ add_library(scorbit-transport STATIC
    src/WireProtocol.cpp
    src/MemoryBridge.h
    src/MemoryBridge.cpp
+   src/OverlayPlacement.h
+   src/OverlayState.h
+   src/StatusNotice.h
+   src/StatusNotice.cpp
    src/SocketWorker.h
    src/SocketWorker.cpp
    src/WireDump.h

@@ -25,17 +25,25 @@ namespace Scorbit
 // Beyond this the worker is producing log lines faster than the API thread
 // drains them, which only happens if VPX has stopped ticking; keep the newest.
 static constexpr size_t LOG_QUEUE_LIMIT = 256;
+static constexpr int NOTICE_MS = 5000;
+// An update this close to expiry may land after VPX erased the notification, which then
+// comes back under a new handle the API never returns (vpinball #4228); push instead.
+static constexpr auto NOTICE_MARGIN = std::chrono::milliseconds(250);
 
-VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap)
+VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
+   int (*showStatus)())
    : m_msgApi(msgApi)
    , m_endpointId(endpointId)
    , m_vpxApi(vpxApi)
    , m_tap(tap)
+   , m_overlay(overlay)
+   , m_showStatus(showStatus)
    , m_gameStartMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_START))
    , m_gameEndMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_END))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
    , m_readMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_READ_MEMORY))
    , m_writeMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_WRITE_MEMORY))
+   , m_notifier(std::chrono::steady_clock::now())
 {
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_gameEndMsgId, OnGameEnd, this);
@@ -78,6 +86,11 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
       self->m_gameRunning = !self->m_romId.empty();
    }
    self->m_memory.SetGameRunning(self->m_gameRunning);
+   // Each player has its own notifications, numbered from 1, so the last table's handle
+   // could name someone else's here; and this table has not seen the state yet.
+   self->m_noticeHandle = 0;
+   self->m_noticeUntil = { };
+   self->m_notifier.NewTable();
    // Published last, so the worker never sees a running player with no table
    // path: it reads the flag and the path in two separate steps.
    self->m_playerRunning = true;
@@ -128,6 +141,22 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
          self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_writeMemoryMsgId, &msg);
          return msg.applied;
       });
+   self->PostStatusNotice();
+}
+
+void VpxSessionSource::PostStatusNotice()
+{
+   const auto now = std::chrono::steady_clock::now();
+   const bool show = m_showStatus == nullptr || m_showStatus() != 0;
+   const std::string text = m_notifier.Frame(m_statusLatch.Take(), show, now);
+   if (text.empty() || m_vpxApi == nullptr)
+      return;
+   LOGI("Status notice: "s + text);
+   if (m_noticeHandle != 0 && now + NOTICE_MARGIN < m_noticeUntil)
+      m_vpxApi->UpdateNotification(m_noticeHandle, text.c_str(), NOTICE_MS);
+   else
+      m_noticeHandle = m_vpxApi->PushNotification(text.c_str(), NOTICE_MS);
+   m_noticeUntil = now + std::chrono::milliseconds(NOTICE_MS);
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)
@@ -217,6 +246,7 @@ void VpxSessionSource::GetDeclare(DeclareSnapshot& out)
    d.sourceGeneration = static_cast<uint32_t>(m_generation);
    d.identifyFormat = !m_hasSource ? "" : (m_latest.shades == 16 ? "BITPLANE4" : "BITPLANE2");
    out.epoch = m_epoch;
+   out.overlaySurface = m_overlay.HasSurface();
 }
 
 void VpxSessionSource::GetFrame(FrameSnapshot& out)

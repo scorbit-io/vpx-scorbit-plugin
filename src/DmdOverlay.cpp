@@ -5,7 +5,10 @@
 #include "OverlayPlacement.h"
 #include "ScorbitPluginAPI.h"
 
+#include "pinmame/PinMAMEPlugin.h"
+
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 
@@ -112,6 +115,7 @@ DmdOverlay::DmdOverlay(const MsgPluginAPI* msgApi, uint32_t endpointId)
    , m_endpointId(endpointId)
    , m_overlayMsgId(msgApi->GetMsgID(SCORBIT_NAMESPACE, SCORBIT_MSG_OVERLAY))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
+   , m_machineStateMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_GET_MACHINE_STATE))
    , m_sources(msgApi, endpointId, CTLPI_DISPLAY_GET_SRC_MSG, CTLPI_DISPLAY_ON_SRC_CHG_MSG,
         [this](std::vector<DisplaySrcId>& items) { FilterSources(items); }, nullptr, [this]() { OnSourcesChanged(); })
    , m_override(msgApi, endpointId, CTLPI_DISPLAY_GET_SRC_MSG, CTLPI_DISPLAY_ON_SRC_CHG_MSG)
@@ -127,6 +131,7 @@ DmdOverlay::~DmdOverlay()
    liveOverlay = nullptr;
    Detach();
    Withdraw();
+   m_msgApi->ReleaseMsgID(m_machineStateMsgId);
    m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
    m_msgApi->ReleaseMsgID(m_overlayMsgId);
 }
@@ -142,6 +147,7 @@ void DmdOverlay::Detach()
       std::lock_guard lock(m_mutex);
       m_published = false;
    }
+   m_surface = false;
    SetDropDir("");
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_overlayMsgId, OnOverlayMsg, this);
@@ -151,6 +157,11 @@ void DmdOverlay::Detach()
 void DmdOverlay::SetController(uint32_t controllerEndpointId)
 {
    m_controllerEndpointId = controllerEndpointId;
+   m_platformKnown = false;
+   {
+      std::lock_guard lock(m_mutex);
+      m_platform = Overlay::Platform::Unknown;
+   }
    m_sources.Refresh();
 }
 
@@ -229,6 +240,7 @@ void DmdOverlay::Publish()
       id.GetIdentifyFrame = m_source.GetIdentifyFrame ? &DmdOverlay::GetIdentifyFrame : nullptr; // pass through: identification is not ours to alter
    }
    m_override.SetItem(id);
+   m_surface = true;
    LOGI("overlay: overriding display [endpointId="s + std::to_string(m_source.id.endpointId) + "." + std::to_string(m_source.id.resId) + ", " + std::to_string(m_source.width) + "x"
       + std::to_string(m_source.height) + (m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? ", lum32f]" : ", srgb888]"));
 }
@@ -239,6 +251,8 @@ void DmdOverlay::Withdraw()
       std::lock_guard lock(m_mutex);
       m_published = false;
    }
+   // m_surface is left alone: a swap publishes again at once, and the worker must not
+   // see the gap. Every path that ends with no override clears it itself.
    m_withdrawPending = false;
    if (!m_override.GetItems().empty())
    {
@@ -256,6 +270,7 @@ void DmdOverlay::WithdrawDeferred()
       was = m_published;
       m_published = false;
    }
+   m_surface = false;
    if (was && !m_withdrawPending)
    {
       m_withdrawPending = true;
@@ -284,80 +299,86 @@ void MSGPIAPI DmdOverlay::OnDeferredWithdraw(void* userData)
    }
 }
 
-bool DmdOverlay::Upload(const uint8_t* payload, size_t size)
+Overlay::State::Upload DmdOverlay::Store(const uint8_t* payload, size_t size)
 {
-   if (payload == nullptr || size < 2)
-   {
-      LOGE("overlay: upload rejected, payload too short"s);
-      return false;
-   }
-   const uint32_t w = payload[0], h = payload[1];
-   if (size != 2 + static_cast<size_t>(w) * h)
-   {
-      LOGE("overlay: upload rejected, "s + std::to_string(size) + " bytes for " + std::to_string(w) + "x" + std::to_string(h));
-      return false;
-   }
-   // As the probe firmware does: ignore it and keep the previous overlay. A size that
-   // differs from the display's is not an error; Composite centres it, cropping if larger.
-   if (!Overlay::Accepted(w, h))
-   {
-      LOGW("overlay: upload ignored, "s + std::to_string(w) + "x" + std::to_string(h) + " is outside "
-         + std::to_string(Overlay::MIN_SIDE) + "x" + std::to_string(Overlay::MIN_SIDE) + " to "
-         + std::to_string(Overlay::MAX_WIDTH) + "x" + std::to_string(Overlay::MAX_HEIGHT) + "; previous overlay kept");
-      return false;
-   }
-   {
-      std::lock_guard lock(m_mutex);
-      m_bitmap.width = w;
-      m_bitmap.height = h;
-      m_bitmap.pixels.assign(payload + 2, payload + size);
-      m_lastComposited = false; // force a recomposite if currently visible
-   }
-   LOGI("overlay: uploaded "s + std::to_string(w) + "x" + std::to_string(h) + " sha256=" + Sha256Hex(payload, size));
-   return true;
+   std::lock_guard lock(m_mutex);
+   const Overlay::State::Upload result = m_state.Store(payload, size);
+   if (result == Overlay::State::Upload::Stored)
+      m_lastComposited = false; // replaces a visible bitmap from the next frame
+   return result;
 }
 
-void DmdOverlay::Show(uint32_t durationMs)
+void DmdOverlay::Control(bool enable, uint32_t durationMs)
 {
-   {
-      std::lock_guard lock(m_mutex);
-      if (m_bitmap.pixels.empty())
-      {
-         LOGW("overlay: show with no bitmap uploaded"s);
-         return;
-      }
-      m_visible = true;
-      m_untilHidden = durationMs == 0;
-      m_visibleUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(durationMs);
-      m_lastComposited = false;
+   std::lock_guard lock(m_mutex);
+   m_state.Control(enable, durationMs, std::chrono::steady_clock::now());
+   m_lastComposited = false;
+   if (enable)
       m_compositedFrames = 0;
-   }
-   LOGI(durationMs == 0 ? "overlay: shown until hidden"s : "overlay: shown for "s + std::to_string(durationMs) + " ms");
 }
 
-void DmdOverlay::Hide()
+void DmdOverlay::Clear()
 {
-   uint64_t frames;
-   {
-      std::lock_guard lock(m_mutex);
-      m_visible = false;
-      frames = m_compositedFrames;
-   }
-   LOGI("overlay: hidden after compositing "s + std::to_string(frames) + " frames");
+   std::lock_guard lock(m_mutex);
+   m_state.Clear();
+   m_lastComposited = false;
 }
 
+// API thread. applied means accepted, decided from the payload and the surface alone.
 void DmdOverlay::OnOverlayMsg(const unsigned int msgId, void* userData, void* msgData)
 {
    DmdOverlay* me = static_cast<DmdOverlay*>(userData);
    ScorbitOverlayMsg* msg = static_cast<ScorbitOverlayMsg*>(msgData);
    if (msg == nullptr || msg->version != 1)
       return;
+   msg->applied = 0;
+   if (!me->HasSurface())
+   {
+      LOGW("overlay: refused, the controller publishes no display to composite on"s);
+      return;
+   }
    switch (msg->op)
    {
-   case SCORBIT_OVERLAY_OP_UPLOAD: msg->applied = me->Upload(msg->payload, msg->payloadSize) ? 1 : 0; break;
-   case SCORBIT_OVERLAY_OP_SHOW: me->Show(msg->durationMs); msg->applied = 1; break;
-   case SCORBIT_OVERLAY_OP_HIDE: me->Hide(); msg->applied = 1; break;
-   default: msg->applied = 0; break;
+   case SCORBIT_OVERLAY_OP_UPLOAD:
+      switch (me->Store(msg->payload, msg->payloadSize))
+      {
+      case Overlay::State::Upload::Malformed:
+         LOGE("overlay: upload rejected, "s + std::to_string(msg->payloadSize) + " bytes is shorter than its width and height say");
+         break;
+      case Overlay::State::Upload::Ignored:
+         // As the probe firmware does: ignored, and the previous overlay kept.
+         LOGW("overlay: upload ignored, "s + std::to_string(msg->payload[0]) + "x" + std::to_string(msg->payload[1]) + " is outside "
+            + std::to_string(Overlay::MIN_SIDE) + "x" + std::to_string(Overlay::MIN_SIDE) + " to "
+            + std::to_string(Overlay::MAX_WIDTH) + "x" + std::to_string(Overlay::MAX_HEIGHT) + "; previous overlay kept");
+         break;
+      case Overlay::State::Upload::Stored:
+      {
+         const size_t used = 2 + static_cast<size_t>(msg->payload[0]) * msg->payload[1];
+         LOGI("overlay: uploaded "s + std::to_string(msg->payload[0]) + "x" + std::to_string(msg->payload[1]) + " sha256=" + Sha256Hex(msg->payload, used));
+         msg->applied = 1;
+         break;
+      }
+      }
+      break;
+   case SCORBIT_OVERLAY_OP_SHOW:
+      // Arms even before any upload, as the probe does: an upload inside the window shows at once.
+      me->Control(true, msg->durationMs);
+      LOGI(msg->durationMs == 0 ? "overlay: shown until hidden"s : "overlay: shown for "s + std::to_string(msg->durationMs) + " ms");
+      msg->applied = 1;
+      break;
+   case SCORBIT_OVERLAY_OP_HIDE:
+   {
+      uint64_t frames;
+      {
+         std::lock_guard lock(me->m_mutex);
+         frames = me->m_compositedFrames;
+      }
+      me->Control(false, 0);
+      LOGI("overlay: hidden after compositing "s + std::to_string(frames) + " frames");
+      msg->applied = 1;
+      break;
+   }
+   default: break;
    }
 }
 
@@ -394,14 +415,8 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
    if (src.frame == nullptr)
       return { me->m_outFrameId, me->m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F ? static_cast<const void*>(me->m_lum[me->m_target ^ 1].data()) : me->m_rgb[me->m_target ^ 1].data() };
 
-   bool visible = me->m_visible && !me->m_bitmap.pixels.empty();
-   if (visible && !me->m_untilHidden && std::chrono::steady_clock::now() >= me->m_visibleUntil)
-   {
-      me->m_visible = false; // timed out; the API thread is not involved, so no log here
-      visible = false;
-   }
-
-   if (!visible)
+   // Judged on every call: the timer expires here, with no writer involved.
+   if (!me->m_state.Visible(std::chrono::steady_clock::now()))
    {
       // Pass the controller's frame through untouched.
       if (me->m_lastComposited || src.frameId != me->m_srcFrameId)
@@ -425,24 +440,17 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
 
 // Composite the bitmap over the controller's frame into the spare buffer, mirroring
 // what the probe firmware does (spb-firmwares/RP2040/dmd.cpp, Dmd::FrameToSamples):
-// the bitmap is centred on the display, pixels outside it and pixels with 0x80 set
-// are transparent, and the brightness bits drive the display's bitplanes directly.
-// On a 2-bitplane display the probe sums bits 0..2 (COLOR_IS_A_SUM), on a 4-bitplane
-// display the low four bits are the shade. Luminance is then shade / (shades - 1).
+// the bitmap is centred on the display, pixels outside it and pixels with bit 7 set
+// are transparent, and an opaque pixel replaces the dot at the luminance the probe on
+// this platform shows its value at.
 const void* DmdOverlay::Composite(const DisplayFrame& src)
 {
    const uint32_t W = m_source.width;
-   const Overlay::Placement at = Overlay::Place(W, m_source.height, m_bitmap.width, m_bitmap.height);
+   const Overlay::Placement at = Overlay::Place(W, m_source.height, m_state.Width(), m_state.Height());
    const uint32_t bw = at.width, bh = at.height, x0 = at.dstX, y0 = at.dstY;
-   const bool fourPlanes = m_source.identifyFormat == CTLPI_DISPLAY_ID_FORMAT_BITPLANE4;
-   const float maxShade = fourPlanes ? 15.f : 3.f;
-
-   auto shadeOf = [&](uint8_t px) -> float
-   {
-      if (fourPlanes)
-         return static_cast<float>(px & 0x0F);
-      return static_cast<float>((px & 1) + ((px >> 1) & 1) + ((px >> 2) & 1));
-   };
+   const bool sixteenShades = m_source.identifyFormat == CTLPI_DISPLAY_ID_FORMAT_BITPLANE4;
+   const std::vector<uint8_t>& pixels = m_state.Pixels();
+   const Overlay::Platform platform = m_platform;
 
    if (m_source.frameFormat == CTLPI_DISPLAY_FORMAT_LUM32F)
    {
@@ -450,11 +458,11 @@ const void* DmdOverlay::Composite(const DisplayFrame& src)
       std::memcpy(out.data(), src.frame, out.size() * sizeof(float));
       for (uint32_t y = 0; y < bh; y++)
       {
-         const uint8_t* row = m_bitmap.pixels.data() + static_cast<size_t>(at.srcY + y) * m_bitmap.width + at.srcX;
+         const uint8_t* row = pixels.data() + static_cast<size_t>(at.srcY + y) * m_state.Width() + at.srcX;
          float* dst = out.data() + static_cast<size_t>(y0 + y) * W + x0;
          for (uint32_t x = 0; x < bw; x++)
-            if (!(row[x] & 0x80))
-               dst[x] = shadeOf(row[x]) / maxShade;
+            if (!(row[x] & Overlay::TRANSPARENT_BIT))
+               dst[x] = Overlay::Luminance(platform, row[x], sixteenShades);
       }
       m_target ^= 1;
       return out.data();
@@ -464,12 +472,12 @@ const void* DmdOverlay::Composite(const DisplayFrame& src)
    std::memcpy(out.data(), src.frame, out.size());
    for (uint32_t y = 0; y < bh; y++)
    {
-      const uint8_t* row = m_bitmap.pixels.data() + static_cast<size_t>(at.srcY + y) * m_bitmap.width + at.srcX;
+      const uint8_t* row = pixels.data() + static_cast<size_t>(at.srcY + y) * m_state.Width() + at.srcX;
       uint8_t* dst = out.data() + (static_cast<size_t>(y0 + y) * W + x0) * 3;
       for (uint32_t x = 0; x < bw; x++)
-         if (!(row[x] & 0x80))
+         if (!(row[x] & Overlay::TRANSPARENT_BIT))
          {
-            const uint8_t g = static_cast<uint8_t>(shadeOf(row[x]) / maxShade * 255.f + 0.5f);
+            const uint8_t g = static_cast<uint8_t>(Overlay::Luminance(platform, row[x], sixteenShades) * 255.f + 0.5f);
             dst[x * 3] = g; dst[x * 3 + 1] = g; dst[x * 3 + 2] = g;
          }
    }
@@ -523,8 +531,8 @@ void DmdOverlay::DropWorker()
          if (bytes.empty())
             continue;
          DropEvent ev { ops[i], std::move(bytes) };
-         if (i == 1)
-            ev.op = ev.bytes[0] ? SCORBIT_OVERLAY_OP_SHOW : SCORBIT_OVERLAY_OP_HIDE;
+         if (i == 1) // control bit 0 only; the others are reserved
+            ev.op = (ev.bytes[0] & 1) ? SCORBIT_OVERLAY_OP_SHOW : SCORBIT_OVERLAY_OP_HIDE;
          std::lock_guard lock(m_dropMutex);
          m_dropQueue.push_back(std::move(ev));
       }
@@ -533,7 +541,30 @@ void DmdOverlay::DropWorker()
 
 void DmdOverlay::OnPrepareFrame(const unsigned int msgId, void* userData, void* msgData)
 {
-   static_cast<DmdOverlay*>(userData)->DrainDrops();
+   DmdOverlay* me = static_cast<DmdOverlay*>(userData);
+   me->QueryPlatform();
+   me->DrainDrops();
+}
+
+void DmdOverlay::QueryPlatform()
+{
+   if (m_platformKnown || m_controllerEndpointId == 0)
+      return;
+   PinMAMEMachineStateMsg state { };
+   state.version = 1;
+   m_msgApi->BroadcastMsg(m_endpointId, m_machineStateMsgId, &state);
+   if (state.hardwareGen == 0)
+      return;
+   m_platformKnown = true;
+   const Overlay::Platform platform = Overlay::PlatformOf(state.hardwareGen);
+   {
+      std::lock_guard lock(m_mutex);
+      m_platform = platform;
+      m_lastComposited = false;
+   }
+   char gen[32];
+   std::snprintf(gen, sizeof(gen), "0x%llx", static_cast<unsigned long long>(state.hardwareGen));
+   LOGI("overlay: shading as "s + Overlay::PlatformName(platform) + " (hardwareGen " + gen + ")");
 }
 
 // API thread, once per frame. Each queued payload goes through the same Overlay

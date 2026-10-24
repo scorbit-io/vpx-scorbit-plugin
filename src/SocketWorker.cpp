@@ -145,9 +145,12 @@ int MillisUntil(std::chrono::steady_clock::time_point deadline)
 
 }
 
-SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory)
+SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory,
+   IOverlayTarget* overlay, StatusLatch* status)
    : m_source(source)
    , m_memory(memory)
+   , m_overlay(overlay)
+   , m_status(status)
    , m_config(std::move(config))
    , m_log(std::move(log))
    , m_instanceId([]
@@ -159,6 +162,7 @@ SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, Lo
 {
    m_socketPath = m_config.socketPath.empty() ? DefaultSocketPath() : m_config.socketPath;
    m_tokenPath = m_config.tokenPath.empty() ? DefaultTokenPath(m_socketPath) : m_config.tokenPath;
+   m_statusRecord.since = Clock::now();
 }
 
 SocketWorker::~SocketWorker()
@@ -280,6 +284,8 @@ void SocketWorker::Worker()
    {
       if (!Connect())
       {
+         // No daemon to blame any more, so a refusal reason no longer applies.
+         NoSession(std::string());
          Backoff();
          continue;
       }
@@ -574,7 +580,33 @@ void SocketWorker::Disconnect()
    }
 #endif
    if (m_connected.exchange(false))
+   {
       Log(LOG_LEVEL_INFO, "Socket: session ended");
+      // A shown-until-hidden overlay must not outlive the daemon that drew it.
+      if (m_overlay != nullptr)
+         m_overlay->OverlayClear();
+      NoSession(std::string());
+   }
+}
+
+void SocketWorker::PostStatus()
+{
+   if (m_status != nullptr)
+      m_status->Post(m_statusRecord);
+}
+
+void SocketWorker::NoSession(const std::string& reason)
+{
+   if (!m_statusRecord.inSession && m_statusRecord.reason == reason)
+      return;
+   // Counted from the loss, so a refusal while already out of session keeps the clock.
+   if (m_statusRecord.inSession)
+      m_statusRecord.since = Clock::now();
+   m_statusRecord.inSession = false;
+   m_statusRecord.haveStatus = false;
+   m_statusRecord.status = { };
+   m_statusRecord.reason = reason;
+   PostStatus();
 }
 
 int SocketWorker::WaitReadable(int timeoutMs)
@@ -795,7 +827,10 @@ bool SocketWorker::Handshake()
 {
    std::string token;
    if (!ReadToken(token))
+   {
+      NoSession(std::string());
       return false;
+   }
 
    Wire::Hello hello;
    hello.protoMajor = Wire::PROTO_MAJOR;
@@ -807,7 +842,8 @@ bool SocketWorker::Handshake()
    // memory_write is advertised whenever reads are: whether the host can write is only known
    // from the first Write, which answers unsupported_operation on a libpinmame without #634.
    hello.capabilities = Wire::CAP_IDENTIFY_FRAMES
-      | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u);
+      | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u)
+      | (m_overlay != nullptr ? Wire::CAP_OVERLAY : 0u);
 
    // Hello's vpx_revision is the build the plugin API headers were pinned to.
    // The plugin API exposes no runtime version, so this is what the plugin
@@ -829,10 +865,10 @@ bool SocketWorker::Handshake()
          return false;
       }
       // version_mismatch, bad_token and busy are all states an operator has to
-      // fix, so they are reported once at error level and the session stops.
-      // There is no plugin side amber state to raise yet; when the Status path
-      // lands in slice 4 this is where it is set.
+      // fix, so they are reported once at error level and the session stops. The
+      // reason is the no-session notice's support text (REQ-6.11).
       LogOnce(LOG_LEVEL_ERROR, "Socket: daemon refused Hello: "s + Wire::ErrorName(e.code) + " - " + e.reason);
+      NoSession(Wire::ErrorName(e.code) + (e.reason.empty() ? std::string() : ": " + e.reason));
       return false;
    }
 
@@ -861,6 +897,10 @@ bool SocketWorker::Handshake()
    m_connected = true;
    m_lastOnce.clear();
    m_loggedNvRam = false;
+   // The daemon sends Status after the first Declare, on every connection.
+   m_statusRecord = { };
+   m_statusRecord.inSession = true;
+   PostStatus();
    // Every session starts with no subscription (design.md, subscription lifetime).
    if (m_memory != nullptr)
       m_memory->Clear();
@@ -1049,6 +1089,14 @@ bool SocketWorker::Dispatch(const Wire::Message& msg)
       if (m_memory != nullptr)
          return AnswerNvRam(msg);
       break;
+   case Wire::TYPE_OVERLAY:
+      if (m_overlay != nullptr)
+         return AnswerOverlay(msg);
+      break;
+   case Wire::TYPE_STATUS:
+      if (m_status != nullptr)
+         return AnswerStatus(msg);
+      break;
    case Wire::TYPE_BYE:
    {
       Wire::Bye bye;
@@ -1059,12 +1107,80 @@ bool SocketWorker::Dispatch(const Wire::Message& msg)
    default:
       break;
    }
-   // Everything else, including Write, NvRam, overlay, status and the memory reads
-   // when there is no bridge, is refused explicitly so the daemon learns at once
+   // Everything else, including the memory reads, overlay and status when this
+   // worker was given nothing to serve them with, is refused explicitly so the daemon learns at once
    // what this build serves instead of waiting out a timeout.
    Log(LOG_LEVEL_DEBUG, "Socket: refusing "s + Wire::TypeName(msg.header.type) + " request");
    return SendError(msg.header.type, msg.header.seq, Wire::ERR_UNSUPPORTED_TYPE,
       std::string(Wire::TypeName(msg.header.type)) + " is not served by this plugin");
+}
+
+// Served here, never through the API thread, so never busy. A malformed request is answered
+// and the session kept: its framing is intact, and an animation then loses one frame, not
+// the session.
+bool SocketWorker::AnswerOverlay(const Wire::Message& msg)
+{
+   if (!m_haveDeclared)
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_NOT_DECLARED, "Overlay before the first Declare");
+   if (m_declared.declare.shades == 0 || !m_overlay->OverlaySurface())
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_UNSUPPORTED_OPERATION, "no DMD source");
+
+   Wire::OverlayRequest req;
+   Wire::OverlayControl control;
+   const bool decoded = Wire::Decode(msg.payload, req)
+      && (req.op == Wire::OVERLAY_OP_UPLOAD || (req.op == Wire::OVERLAY_OP_CONTROL && Wire::Decode(req.payload, control)));
+   if (!decoded)
+   {
+      Log(LOG_LEVEL_WARN, "Socket: malformed Overlay request (op " + std::to_string(req.op) + ", "
+         + std::to_string(msg.payload.size()) + " bytes)");
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "unknown op, or a payload shorter than its fields");
+   }
+
+   if (req.op == Wire::OVERLAY_OP_UPLOAD)
+   {
+      switch (m_overlay->OverlayUpload(req.payload.data(), req.payload.size()))
+      {
+      case Overlay::State::Upload::Malformed:
+         Log(LOG_LEVEL_WARN, "Socket: malformed Overlay upload, " + std::to_string(req.payload.size()) + " bytes");
+         return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "upload shorter than its width and height");
+      case Overlay::State::Upload::Ignored:
+         // Acknowledged, as the probe acknowledges it; the previous bitmap stays.
+         LogOnce(LOG_LEVEL_WARN, "Socket: ignored an Overlay upload of " + std::to_string(req.payload[0]) + 'x'
+            + std::to_string(req.payload[1]) + ", outside 10x10 to 192x64; the previous overlay stays");
+         break;
+      case Overlay::State::Upload::Stored: // not logged: an animation uploads every frame
+         break;
+      }
+   }
+   else
+   {
+      const bool enable = (control.control & Wire::OVERLAY_CONTROL_ENABLE) != 0;
+      m_overlay->OverlayControl(enable, control.durationMs);
+      Log(LOG_LEVEL_DEBUG, !enable ? "Socket: overlay hidden"s
+         : control.durationMs == 0 ? "Socket: overlay shown until hidden"s
+         : "Socket: overlay shown for " + std::to_string(control.durationMs) + " ms");
+   }
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, { });
+}
+
+// Answered at once. The notification is the API thread's to post, so the record goes
+// through the latch; this side only logs it.
+bool SocketWorker::AnswerStatus(const Wire::Message& msg)
+{
+   if (!m_haveDeclared)
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_NOT_DECLARED, "Status before the first Declare");
+   Wire::Status status;
+   if (!Wire::Decode(msg.payload, status))
+   {
+      Log(LOG_LEVEL_WARN, "Socket: malformed Status request, " + std::to_string(msg.payload.size()) + " bytes");
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED,
+         "a short payload, or support_text over 256 bytes");
+   }
+   Log(LOG_LEVEL_INFO, "Socket: daemon status " + StatusNotifier::Describe(status));
+   m_statusRecord.haveStatus = true;
+   m_statusRecord.status = std::move(status);
+   PostStatus();
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, { });
 }
 
 bool SocketWorker::SendMemoryError(const Wire::Message& msg, MemoryBridge::Result result)

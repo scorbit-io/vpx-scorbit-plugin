@@ -17,6 +17,8 @@
 // which is what lets the worker run against a scripted peer in the tests.
 
 #include "MemoryBridge.h"
+#include "OverlayState.h"
+#include "StatusNotice.h"
 #include "WireProtocol.h"
 #include "WireDump.h"
 
@@ -53,6 +55,9 @@ struct DeclareSnapshot
 {
    Wire::Declare declare;
    uint64_t epoch = 0;
+   // Not on the wire either: the overlay surface appearing or going must re-Declare
+   // (design.md, slice 4) even when nothing declared changes.
+   bool overlaySurface = false;
 
    bool operator==(const DeclareSnapshot&) const = default;
 };
@@ -74,6 +79,22 @@ public:
    virtual void GetDeclare(DeclareSnapshot& out) = 0;
    virtual void GetFrame(FrameSnapshot& out) = 0;
    virtual void GetSession(SessionSnapshot& out) = 0;
+};
+
+// Where Overlay requests go (slice 4). Every method is called on the worker thread and
+// must never wait on the API thread.
+class IOverlayTarget
+{
+public:
+   virtual ~IOverlayTarget() = default;
+
+   // The controller publishes a display the plugin can composite on.
+   virtual bool OverlaySurface() = 0;
+   // The 0x23 payload, verbatim.
+   virtual Overlay::State::Upload OverlayUpload(const uint8_t* payload, size_t size) = 0;
+   virtual void OverlayControl(bool enable, uint32_t durationMs) = 0;
+   // Session end: hidden, with no bitmap and no timer.
+   virtual void OverlayClear() = 0;
 };
 
 enum LogLevel
@@ -100,8 +121,11 @@ public:
    using LogFn = std::function<void(int level, const std::string& message)>;
 
    // memory, when given, serves the slice 2 reads and makes Hello advertise
-   // memory_read; it must outlive the worker.
-   SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory = nullptr);
+   // memory_read. overlay, when given, serves Overlay and advertises overlay; status,
+   // when given, serves Status and carries the session state to the API thread. Each
+   // must outlive the worker.
+   SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory = nullptr,
+      IOverlayTarget* overlay = nullptr, StatusLatch* status = nullptr);
    ~SocketWorker();
 
    SocketWorker(const SocketWorker&) = delete;
@@ -154,6 +178,11 @@ private:
    bool AnswerReadDirect(const Wire::Message& msg);
    bool AnswerWrite(const Wire::Message& msg);
    bool AnswerNvRam(const Wire::Message& msg);
+   bool AnswerOverlay(const Wire::Message& msg);
+   bool AnswerStatus(const Wire::Message& msg);
+   // Hands the session state to the API thread, if anyone is listening.
+   void PostStatus();
+   void NoSession(const std::string& reason);
    // Sends the error for a bridge result other than Ok.
    bool SendMemoryError(const Wire::Message& msg, MemoryBridge::Result result);
 
@@ -176,6 +205,8 @@ private:
 
    ISessionSource& m_source;
    MemoryBridge* const m_memory;
+   IOverlayTarget* const m_overlay;
+   StatusLatch* const m_status;
    const SocketWorkerConfig m_config;
    const LogFn m_log;
    const uint64_t m_instanceId;
@@ -200,6 +231,7 @@ private:
    bool m_loggedNvRam = false;           // NvRam is logged once per session
    Clock::time_point m_lastActivity { };
    std::string m_lastOnce;
+   StatusRecord m_statusRecord;          // what was last posted to m_status
 };
 
 }
