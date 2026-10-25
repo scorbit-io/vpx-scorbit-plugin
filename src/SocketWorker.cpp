@@ -1306,7 +1306,8 @@ bool SocketWorker::AnswerPing(const Wire::Message& msg)
    Wire::Pong pong;
    pong.renderedFrame = session.renderedFrame;
    pong.playerRunning = session.playerRunning ? 1 : 0;
-   pong.writesSupported = 0; // memory writes arrive in slice 2
+   // What this side knows, as for a Write: served, unless the host has shown it applies none.
+   pong.writesSupported = m_memory != nullptr && !m_memory->WritesUnsupported() ? 1 : 0;
    return SendWireMessage(Wire::TYPE_PONG, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(pong));
 }
 
