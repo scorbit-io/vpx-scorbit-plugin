@@ -95,6 +95,9 @@ public:
    void Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning,
       const WriteFn& write);
 
+   // Any thread. This session learned that the host applies no writes (no pinmame #634).
+   bool WritesUnsupported() const { return m_writesUnsupported; }
+
    // Tests only: requests waiting for Service.
    size_t QueuedForTest();
 

@@ -226,7 +226,7 @@ void TestSession()
    CHECK(Wire::Decode(msg.payload, pong));
    CHECK(pong.renderedFrame == 12345);
    CHECK(pong.playerRunning == 1);
-   CHECK_MSG(pong.writesSupported == 0, "slice 1 serves no writes");
+   CHECK_MSG(pong.writesSupported == 0, "a worker with no memory bridge serves no writes");
 
    // --- Reserved and unknown types are refused, not ignored --------------
    const uint16_t refused[] = { Wire::TYPE_SUBSCRIBE, Wire::TYPE_POLL, Wire::TYPE_READ_DIRECT,
@@ -981,6 +981,14 @@ void TestWriteOnAHostWithoutWriteSupport()
    Wire::Message msg;
    uint16_t code = 0;
    const std::vector<uint8_t> write = ScorbitTest::Unhex("0100" "931c0000" "0100" "08");
+   auto pongWrites = [&](uint32_t seq) -> int
+   {
+      if (!peer.Send(Wire::TYPE_PING, 0, seq, { }) || !peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS))
+         return -1;
+      Wire::Pong pong;
+      return Wire::Decode(msg.payload, pong) ? pong.writesSupported : -1;
+   };
+   CHECK_MSG(pongWrites(68) == 1, "Pong says writes are served until the host shows otherwise");
    CHECK(peer.Send(Wire::TYPE_WRITE, 0, 70, write));
    CHECK(Reply(peer, Wire::TYPE_WRITE, 70, msg, code) && code == Wire::ERR_UNSUPPORTED_OPERATION);
 
@@ -989,6 +997,7 @@ void TestWriteOnAHostWithoutWriteSupport()
    CHECK(Reply(peer, Wire::TYPE_WRITE, 71, msg, code) && code == Wire::ERR_UNSUPPORTED_OPERATION);
    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
    CHECK_MSG(ms < 50, "a remembered unsupported write took " + std::to_string(ms) + " ms");
+   CHECK_MSG(pongWrites(69) == 0, "after the host applied no write, Pong says so");
 
    CHECK(peer.Send(Wire::TYPE_READ_DIRECT, 0, 72, Wire::Encode(Wire::ReadDirectRequest { 0x1c93, 1 })));
    CHECK(Reply(peer, Wire::TYPE_READ_DIRECT, 72, msg, code) && code == 0);
