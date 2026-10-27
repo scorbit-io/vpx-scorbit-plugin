@@ -37,6 +37,27 @@ std::string SystemName(uint8_t value)
    }
 }
 
+bool KnownSession(uint8_t value)
+{
+   return value == Wire::SESSION_NONE || value == Wire::SESSION_TRACKING || value == Wire::SESSION_NO_DATA
+      || value == Wire::SESSION_HIDDEN;
+}
+
+bool KnownSystem(uint8_t value)
+{
+   return value <= Wire::SYSTEM_DEGRADED;
+}
+
+}
+
+// ASCII, because the notification font has no symbol glyphs we can rely on (SB-6003).
+std::string StatusNotifier::Marker(const Wire::Status& status)
+{
+   if (!KnownSession(status.sessionState) || !KnownSystem(status.systemState))
+      return "[?]";
+   if (status.sessionState == Wire::SESSION_NO_DATA || status.systemState != Wire::SYSTEM_OK)
+      return "[!]";
+   return "[OK]";
 }
 
 StatusNotifier::StatusNotifier(Clock::time_point start)
@@ -46,9 +67,11 @@ StatusNotifier::StatusNotifier(Clock::time_point start)
 
 std::string StatusNotifier::Describe(const Wire::Status& status)
 {
-   std::string text = "Scorbit: " + SessionName(status.sessionState);
-   if (status.sessionState != Wire::SESSION_HIDDEN)
-      text += ", " + SystemName(status.systemState);
+   // Hidden is never posted, so it carries no marker.
+   if (status.sessionState == Wire::SESSION_HIDDEN)
+      return "Scorbit: hidden" + (status.supportText.empty() ? std::string() : " - " + status.supportText);
+   std::string text = Marker(status) + " Scorbit: " + SessionName(status.sessionState) + ", "
+      + SystemName(status.systemState);
    if (!status.supportText.empty())
       text += " - " + status.supportText;
    return text;
@@ -56,7 +79,7 @@ std::string StatusNotifier::Describe(const Wire::Status& status)
 
 std::string StatusNotifier::DescribeNoSession(const std::string& reason)
 {
-   return "Scorbit: no data, no connection to the Scorbit daemon" + (reason.empty() ? std::string() : " - " + reason);
+   return "[!] Scorbit: no data, no connection to the Scorbit daemon" + (reason.empty() ? std::string() : " - " + reason);
 }
 
 std::string StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool showStatus, Clock::time_point now)

@@ -4,8 +4,8 @@
 
 // Status indication (scorbitd SPEC-0002 REQ-6.7, 6.11): what the socket worker knows of
 // the daemon's Status and of the session, handed to the API thread, and turned there into
-// a notification on transitions only. The plugin's own indicator surface is still open;
-// until it exists, the notification is the only thing the user sees.
+// a notification on transitions only. No plugin-API surface can carry REQ-6.6's indicator
+// yet (SB-5996), so the notification is the interim primary surface.
 
 #include "Latch.h"
 #include "WireProtocol.h"
@@ -49,8 +49,11 @@ public:
    // A new table starts: it shows the current state once, even if unchanged.
    void NewTable() { m_posted.clear(); }
 
-   // "Scorbit: tracking, ok", plus " - <support text>" when there is one.
+   // "[OK] Scorbit: tracking, ok", plus " - <support text>" when there is one. The leading
+   // marker is the shape distinction REQ-6.5 asks for, so no state is told by colour alone.
    static std::string Describe(const Wire::Status& status);
+   // [OK] working, [!] expected to work and not (REQ-6.4), [?] a value this build does not know.
+   static std::string Marker(const Wire::Status& status);
    static std::string DescribeNoSession(const std::string& reason);
 
 private:

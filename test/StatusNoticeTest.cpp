@@ -19,7 +19,7 @@ using std::chrono::seconds;
 namespace
 {
 
-const std::string NO_SESSION = "Scorbit: no data, no connection to the Scorbit daemon";
+const std::string NO_SESSION = "[!] Scorbit: no data, no connection to the Scorbit daemon";
 
 std::unique_ptr<StatusRecord> InSession(uint8_t session, uint8_t system, const std::string& text = "")
 {
@@ -77,12 +77,12 @@ void TestTransitionsOnly()
    auto up = std::make_unique<StatusRecord>();
    up->inSession = true;
    CHECK_MSG(n.Frame(std::move(up), true, t0 + seconds(10)).empty(), "nothing until the daemon's first Status");
-   CHECK(n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0 + seconds(10)) == "Scorbit: tracking, ok");
+   CHECK(n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0 + seconds(10)) == "[OK] Scorbit: tracking, ok");
    CHECK(n.Frame(nullptr, true, t0 + seconds(11)).empty());
    CHECK_MSG(n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0 + seconds(12)).empty(),
       "the same state again is not a transition");
    CHECK(n.Frame(InSession(Wire::SESSION_NO_DATA, Wire::SYSTEM_DEGRADED, "no map for this ROM"), true, t0 + seconds(13))
-      == "Scorbit: no data, degraded - no map for this ROM");
+      == "[!] Scorbit: no data, degraded - no map for this ROM");
 }
 
 void TestQuickReconnectIsNotATransition()
@@ -114,7 +114,7 @@ void TestHiddenPostsNothingAndRepostsAfter()
    StatusNotifier n(t0);
    CHECK(!n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0).empty());
    CHECK(n.Frame(InSession(Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE), true, t0).empty());
-   CHECK_MSG(n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0) == "Scorbit: tracking, ok",
+   CHECK_MSG(n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0) == "[OK] Scorbit: tracking, ok",
       "the state after hidden posts, even though it matches the one before");
 }
 
@@ -124,7 +124,7 @@ void TestShowStatusOffPostsNothing()
    StatusNotifier n(t0);
    CHECK(n.Frame(nullptr, false, t0 + seconds(5)).empty());
    CHECK(n.Frame(InSession(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK), false, t0 + seconds(6)).empty());
-   CHECK_MSG(n.Frame(nullptr, true, t0 + seconds(7)) == "Scorbit: no data, ok", "turned on, the current state posts");
+   CHECK_MSG(n.Frame(nullptr, true, t0 + seconds(7)) == "[!] Scorbit: no data, ok", "turned on, the current state posts");
 }
 
 void TestNewTableShowsTheCurrentStateOnce()
@@ -133,15 +133,28 @@ void TestNewTableShowsTheCurrentStateOnce()
    StatusNotifier n(t0);
    CHECK(!n.Frame(InSession(Wire::SESSION_NONE, Wire::SYSTEM_OK), true, t0).empty());
    n.NewTable();
-   CHECK(n.Frame(nullptr, true, t0 + seconds(1)) == "Scorbit: no game, ok");
+   CHECK(n.Frame(nullptr, true, t0 + seconds(1)) == "[OK] Scorbit: no game, ok");
    CHECK(n.Frame(nullptr, true, t0 + seconds(2)).empty());
 }
 
 void TestDescribe()
 {
-   CHECK(StatusNotifier::Describe({ Wire::SESSION_NONE, Wire::SYSTEM_UNPAIRED, "" }) == "Scorbit: no game, not paired");
-   CHECK(StatusNotifier::Describe({ 9, 7, "" }) == "Scorbit: unknown (9), unknown (7)");
+   CHECK(StatusNotifier::Describe({ Wire::SESSION_NONE, Wire::SYSTEM_UNPAIRED, "" }) == "[!] Scorbit: no game, not paired");
+   CHECK(StatusNotifier::Describe({ 9, 7, "" }) == "[?] Scorbit: unknown (9), unknown (7)");
    CHECK(StatusNotifier::Describe({ Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE, "" }) == "Scorbit: hidden");
+}
+
+// REQ-6.5: working and not working differ in shape, not only in words.
+void TestMarker()
+{
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_NONE, Wire::SYSTEM_OK, "" }) == "[OK]");
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "" }) == "[OK]");
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "" }) == "[!]");
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_TRACKING, Wire::SYSTEM_UNPAIRED, "" }) == "[!]");
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_TRACKING, Wire::SYSTEM_OFFLINE, "" }) == "[!]");
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_NONE, Wire::SYSTEM_DEGRADED, "" }) == "[!]");
+   CHECK(StatusNotifier::Marker({ 3, Wire::SYSTEM_OK, "" }) == "[?]");
+   CHECK(StatusNotifier::Marker({ Wire::SESSION_TRACKING, 4, "" }) == "[?]");
 }
 
 }
@@ -158,5 +171,6 @@ int main()
    TestShowStatusOffPostsNothing();
    TestNewTableShowsTheCurrentStateOnce();
    TestDescribe();
+   TestMarker();
    return ScorbitTest::Summary("status_notice_test");
 }
