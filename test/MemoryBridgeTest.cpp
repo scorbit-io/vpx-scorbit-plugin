@@ -114,6 +114,16 @@ bool WaitQueued(MemoryBridge& bridge, size_t n)
    return true;
 }
 
+// Services until the request answers, as frames would. One call is not enough: Service only
+// try-locks, and skips the frame if the waiting Subscribe holds the lock (SB-5995).
+template <typename T>
+void ServiceUntilAnswered(MemoryBridge& bridge, const MemoryBridge::ReadFn& read, std::future<T>& pending)
+{
+   uint64_t frame = 2;
+   while (pending.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
+      bridge.Service(read, frame++, true, true, { });
+}
+
 void TestSubscribeKeepsReadableRangesInOrder()
 {
    MemoryBridge bridge;
@@ -185,7 +195,7 @@ void TestClearWinsOverAQueuedSubscribe()
       { return bridge.Subscribe({ { 0x0100, 8 } }, accepted, 2000, g_running); });
    CHECK(WaitQueued(bridge, 1));
    bridge.Clear();
-   bridge.Service(read, 2, true, true, { });
+   ServiceUntilAnswered(bridge, read, pending);
 
    CHECK(pending.get() == Result::Ok);
    Wire::PollReply poll;
@@ -262,7 +272,7 @@ void TestNoGameWhileNothingRenders()
    auto pending = std::async(std::launch::async, [&]
       { return bridge.Subscribe({ { 0x0100, 8 } }, accepted, 2000, running); });
    CHECK(WaitQueued(bridge, 1));
-   bridge.Service(read, 2, true, true, { });
+   ServiceUntilAnswered(bridge, read, pending);
    CHECK(pending.get() == Result::Ok);
    Wire::PollReply poll;
    CHECK(bridge.Poll(poll) == Result::Ok && poll.blocks.size() == 1);
