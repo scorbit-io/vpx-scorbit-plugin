@@ -75,6 +75,11 @@ jobs:
         if: matrix.test
         run: ctest --test-dir build --build-config Release --no-tests=error --output-on-failure
 
+      # TEMPORARY, SB-5995 evidence: dropped before merge.
+      - name: Stress memory_bridge
+        if: matrix.test
+        run: ctest --test-dir build --build-config Release -R memory_bridge --repeat until-fail:50 --output-on-failure
+
   # The full plugin on MSVC. The recipe is scorbit_sdk's windows.yml, which is green:
   # the plugin's only Windows dependencies are the SDK's, and the SDK already builds
   # there. Kept apart from the transport gate, whose speed is the point of it.
