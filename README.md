@@ -1,16 +1,18 @@
 # Scorbit plugin for Visual Pinball X
 
 A [Visual Pinball X](https://github.com/vpinball/vpinball) plugin that connects
-an emulated pinball machine to [Scorbit](https://scorbit.io): score tracking,
-session upload and player pairing, driven by the game states and DMD frames
-that VPX's PinMAME plugin publishes.
+an emulated pinball machine to [Scorbit](https://scorbit.io). It is the
+open-source half of the integration: it serves the Scorbit daemon, running on
+the same computer, the machine's memory and DMD frames over a local socket, and
+shows the daemon's overlays and status inside VPX. The daemon is the Scorbit
+device: it identifies the game, extracts scores and talks to Scorbit. The plugin
+holds no Scorbit account, key or credential, and makes no network connection.
 
 The plugin is a standalone project. Build it, copy the resulting folder into
 your VPX plugins directory, enable it in `VPinballX.ini`, and play.
 
-**Status: prototype.** Score tracking works for machines listed in
-`assets/scorbit_machines.json`. Pairing is by QR code in the log. Nothing here
-is production-ready yet.
+**Status: pre-release.** The plugin and its protocol are complete for emulated
+(ROM) tables. Without a Scorbit daemon running, it waits and says so.
 
 ## Requirements
 
@@ -21,27 +23,9 @@ is production-ready yet.
   version handshake, so a plugin loaded into an older VPX does not fail
   cleanly: it corrupts memory during table start. Match the pin to the VPX you
   run, and take VPX from the upstream CI artifacts until a release catches up.
-- CMake 3.28 or newer and a C++20 compiler.
-- To build the Scorbit SDK from source (the default): OpenSSL and libarchive
-  development packages on the host. Everything else is fetched by CPM. The SDK
-  commit is pinned by `SCORBIT_SDK_GIT_TAG` in `CMakeLists.txt`.
-
-## Secrets
-
-Two values are needed for a build that can talk to Scorbit, and neither is in
-the repository. Put them in an untracked `.env` at the repository root (copy
-`.env.example`) or export them in the environment; the environment wins.
-
-| Variable | Purpose |
-|---|---|
-| `SCORBIT_PROVIDER_KEY` | Encrypted provider key, compiled in as the default `providerKey` setting |
-| `SCORBIT_SDK_ENCRYPT_SECRET` | Lets the SDK decrypt provider keys at runtime; only needed when building the SDK from source |
-
-Without `SCORBIT_PROVIDER_KEY` the plugin builds but stays disabled until the
-user sets `providerKey` in `VPinballX.ini`. Without `SCORBIT_SDK_ENCRYPT_SECRET`
-an SDK built from source cannot authenticate; point the build at a prebuilt SDK
-instead. Both are read at configure time, so re-run `cmake -B build` after
-changing them.
+- CMake 3.28 or newer and a C++20 compiler. There are no other dependencies:
+  the VPX and PinMAME plugin headers are fetched at configure time, pinned by
+  commit and sha256.
 
 ## Build
 
@@ -50,60 +34,28 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-macOS with Homebrew needs the dependency roots spelled out:
-
-```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
-  -DLibArchive_ROOT=$(brew --prefix libarchive)
-```
-
-Windows builds the SDK's dependencies through vcpkg, using `vcpkg.json` at the
-repository root (nothing reads it on other platforms). From PowerShell, check
-vcpkg out at that file's `builtin-baseline` and bootstrap it, since a fresh
-checkout has no `vcpkg.exe` for the toolchain to run:
+On Windows, the Visual Studio generator finds MSVC itself, so no developer
+shell is needed:
 
 ```powershell
-$baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
-git clone https://github.com/microsoft/vcpkg.git ../vcpkg
-git -C ../vcpkg checkout $baseline
-../vcpkg/bootstrap-vcpkg.bat -disableMetrics
-```
-
-Then configure and build. The Visual Studio generator finds MSVC itself, so no
-developer shell is needed:
-
-```powershell
-cmake -S . -B build -A x64 `
-  "-DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake" `
-  -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-The triplet must be `x64-windows-static-md`, not `x64-windows-static`: the
-plugin and the SDK link the dynamic CRT. The first build compiles Boost, curl,
-OpenSSL and libarchive and takes a while; CI caches them. CI also uploads the
-staged Windows plugin as a workflow artifact.
-
-To use a prebuilt or installed SDK instead of building it:
-
-```sh
-cmake -B build -DSCORBIT_SDK_ROOT=/path/to/scorbit_sdk
-```
+CI uploads the staged Windows plugin as a workflow artifact.
 
 To build and test only the transport — the wire protocol, socket worker and wire
-dump — with no SDK, no VPX headers and no network fetch:
+dump — with no VPX headers and no network fetch:
 
 ```sh
 cmake -B build -DSCORBIT_TRANSPORT_ONLY=ON
 cmake --build build -j && (cd build && ctest --output-on-failure)
 ```
 
-That is what CI builds on every platform in `plugin.cfg`. It needs neither
-OpenSSL nor libarchive, because it never reaches the SDK.
+That is what CI builds on every platform in `plugin.cfg`.
 
 The build stages a complete plugin folder at `build/stage/scorbit/`: the
-plugin library, `plugin.cfg`, the SDK library and `assets/`.
+plugin library and `plugin.cfg`.
 
 ## Install
 
@@ -115,35 +67,24 @@ Copy `build/stage/scorbit/` into the VPX plugins directory:
 | Linux | `<vpx install>/plugins/` |
 | Windows | `<vpx install>\plugins\` |
 
-Then enable and configure it in `VPinballX.ini`. VPX creates the section on
-first launch; the keys are:
+Then enable it in `VPinballX.ini`. VPX creates the section on first launch.
+Nothing else is required; the other keys are optional:
 
 ```ini
 [Plugin.Scorbit]
 Enable = 1
-provider = vpxplugin
-environment = staging
-providerKey = <encrypted provider key>
-deviceKeyFile = scorbit_device.key
-logLevel = 1
-dmdDumpFile =
 ```
 
 | Key | Meaning |
 |---|---|
-| `provider` | Scorbit provider id |
-| `environment` | `staging` or `production` |
-| `providerKey` | Encrypted provider key issued by Scorbit; defaults to the one compiled in, if any |
-| `deviceKeyFile` | Per-machine device key, relative to the VPX pref directory |
-| `logLevel` | 0 quiet, 1 info, 2 debug |
+| `ShowStatus` | Show Scorbit status notifications during play, default on. Off posts none, with or without a daemon. |
+| `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
-| `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
-| `ShowStatus` | Show Scorbit status notifications during play, default on. Off posts none, with or without a daemon. |
 
-The plugin identifies the running machine by the ROM id PinMAME reports and
-looks it up in `assets/scorbit_machines.json`, which maps ROM ids to Scorbit
-machine ids. A ROM with no entry leaves the plugin idle.
+The plugin tells the daemon which ROM PinMAME is running; the daemon identifies
+the machine from it and from the ROM itself, and decides which Scorbit machine
+the session belongs to.
 
 ## DMD frame tap
 
@@ -186,8 +127,8 @@ Bye, the memory messages, Overlay and Status. A type it does not serve is
 answered with `unsupported_type` rather than ignored. Frames cross as one shade
 index per pixel, row major, exactly as the tap captured them.
 
-`test/` holds a scripted daemon-side peer and two test binaries; `ctest` in the
-build directory runs both. They need neither Visual Pinball nor a daemon.
+`test/` holds a scripted daemon-side peer and the test binaries; `ctest` in the
+build directory runs them all. They need neither Visual Pinball nor a daemon.
 
 ## DMD overlay
 
@@ -248,9 +189,8 @@ connection. `ShowStatus = 0` turns all of it off.
 ```
 src/            plugin sources (ScorbitPluginAPI.h is the message contract)
 test/           transport tests and the scripted daemon-side peer
-assets/         ROM id to Scorbit machine id mapping
 plugin.cfg      VPX plugin manifest (ids and library names per platform)
-cmake/          CPM bootstrap and the pinned VPX/PinMAME header fetch
+cmake/          the pinned VPX/PinMAME header fetch
 ```
 
 Run the tests with:
@@ -262,10 +202,7 @@ cmake --build build -j && (cd build && ctest --output-on-failure)
 ## Credits
 
 The original prototype was written by [jsm174](https://github.com/jsm174)
-as a branch of Visual Pinball X. The game states the plugin consumes are
-published by VPX's PinMAME plugin from Tom Collins'
-[pinball memory maps](https://github.com/tomlogic/pinmame-nvram-maps).
-QR encoding is [Nayuki's qrcodegen](https://www.nayuki.io/page/qr-code-generator-library).
+as a branch of Visual Pinball X.
 
 ## AI assistance
 
