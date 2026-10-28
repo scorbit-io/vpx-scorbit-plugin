@@ -103,6 +103,8 @@ private:
    // API thread, once per rendered frame: notifications are drawn inside rendered
    // frames and timed from their push, so one pushed while none render expires unseen.
    void PostStatusNotice();
+   // API thread, once per rendered frame until PinMAME answers: the machine's address space.
+   void QueryAddressSpace();
 
    const MsgPluginAPI* const m_msgApi;
    const uint32_t m_endpointId;
@@ -115,6 +117,7 @@ private:
    const unsigned int m_prepareFrameMsgId;
    const unsigned int m_readMemoryMsgId;
    const unsigned int m_writeMemoryMsgId;
+   const unsigned int m_machineStateMsgId;
 
    std::atomic<uint64_t> m_renderedFrame { 0 };
    std::atomic<bool> m_playerRunning { false };
@@ -129,14 +132,14 @@ private:
    TapView m_apiTap;
    DeclareSnapshot m_posted;
    bool m_havePosted = false;
+   bool m_addressSpaceKnown = false;
 
    Latch<DeclareSnapshot> m_declares;
    TapView m_workerTap; // worker only
 
    StatusLatch m_statusLatch;
-   StatusNotifier m_notifier; // API thread only, as are the two below
+   StatusNotifier m_notifier; // API thread only, as is the handle
    unsigned int m_noticeHandle = 0;
-   std::chrono::steady_clock::time_point m_noticeUntil { };
 
    std::mutex m_logMutex;
    std::deque<std::pair<int, std::string>> m_logQueue;

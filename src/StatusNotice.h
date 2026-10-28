@@ -4,8 +4,9 @@
 
 // Status indication (scorbitd SPEC-0002 REQ-6.7, 6.11): what the socket worker knows of
 // the daemon's Status and of the session, handed to the API thread, and turned there into
-// a notification on transitions only. No plugin-API surface can carry REQ-6.6's indicator
-// yet (SB-5996), so the notification is the interim primary surface.
+// a notification on transitions, repeated while a [!] state lasts (REQ-6.3, 6.9). No
+// plugin-API surface can carry REQ-6.6's indicator yet (SB-5996), so the notification is
+// the interim primary surface.
 
 #include "Latch.h"
 #include "WireProtocol.h"
@@ -39,6 +40,8 @@ public:
 
    // Without a session, the amber notice waits this long after the session went (REQ-6.11).
    static constexpr std::chrono::seconds NO_SESSION_AFTER { 5 };
+   // A [!] state still holding is posted again this long after it last was (REQ-6.3).
+   static constexpr std::chrono::seconds REFRESH_EVERY { 60 };
 
    // start counts as the moment there stopped being a session, for a plugin that never had one.
    explicit StatusNotifier(Clock::time_point start);
@@ -59,6 +62,7 @@ public:
 private:
    StatusRecord m_current;
    std::string m_posted; // last text posted; cleared while nothing may show, so the state reposts after
+   Clock::time_point m_postedAt { };
 };
 
 }

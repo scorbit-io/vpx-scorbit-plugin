@@ -17,6 +17,7 @@
 // gave up on (timeout, unload) is still safe for the API thread to complete; it
 // is only never installed.
 
+#include "OverlayState.h"
 #include "SeqLock.h"
 #include "WireProtocol.h"
 
@@ -32,6 +33,16 @@
 namespace Scorbit
 {
 
+// The main CPU's address space in bytes, for the platforms whose CPU is known: WPC, Data East,
+// Whitestar (6809), Gottlieb System 3 and Alvin G (65C02). 0 for any other, which is unchecked.
+inline uint64_t MainCpuAddressSpace(uint64_t hardwareGen)
+{
+   using namespace Overlay::Gen;
+   if (hardwareGen & (ALLWPC | DEDMD16 | DEDMD32 | DEDMD64 | ALLWS | GTS3 | ALVG | ALVG_DMD2))
+      return 0x10000;
+   return 0;
+}
+
 class MemoryBridge final
 {
 public:
@@ -39,7 +50,8 @@ public:
    using ReadFn = std::function<uint32_t(uint32_t address, uint8_t* out, uint32_t size)>;
    // Applies the ops in order as one batch and returns how many were applied: NO_WRITE_HANDLER
    // when nothing handled the message at all (a libpinmame without pinmame #634), 0 when a
-   // handler applied nothing (its wait timed out, the emulator being paused or stalled).
+   // handler applied nothing (its wait timed out, the emulator being paused or stalled, or,
+   // since pinmame 5fc234819, an op lay outside the CPU's address space).
    using WriteFn = std::function<uint32_t(const std::vector<Wire::WriteOp>& ops)>;
    static constexpr uint32_t NO_WRITE_HANDLER = 0xFFFFFFFFu;
 
@@ -75,7 +87,8 @@ public:
    // because it may still be applied, and a daemon that retried would apply it twice. A host with no write handler answers Unsupported, and every Write until the
    // next Clear then answers it at once; a handler that applied nothing answers Busy and is
    // not remembered, since it is transient. Per session rather than for the plugin's life,
-   // because a table that is stopping also leaves the message unhandled.
+   // because a table that is stopping also leaves the message unhandled. An op beyond the
+   // address space SetAddressSpace gave answers OutOfRange at once, never reaching the host.
    Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
@@ -94,6 +107,10 @@ public:
    // Once per rendered frame. An empty write function answers writes Unsupported.
    void Service(const ReadFn& read, uint64_t frame, bool playerRunning, bool gameRunning,
       const WriteFn& write);
+
+   // The running machine's address space in bytes, 0 while unknown. PinMAME answers a write
+   // with an op beyond it the same 0 as a timeout, so Write answers OutOfRange before posting.
+   void SetAddressSpace(uint64_t bytes) { m_addressSpace = bytes; }
 
    // Any thread. This session learned that the host applies no writes (no pinmame #634).
    bool WritesUnsupported() const { return m_writesUnsupported; }
@@ -170,6 +187,7 @@ private:
 
    std::atomic<bool> m_gameRunning { false };
    std::atomic<bool> m_writesUnsupported { false };
+   std::atomic<uint64_t> m_addressSpace { 0 };
 };
 
 }

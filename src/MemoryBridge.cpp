@@ -139,9 +139,14 @@ MemoryBridge::Result MemoryBridge::Write(const std::vector<Wire::WriteOp>& ops, 
       return Result::TooLarge;
    if (ops.empty())
       return Result::OutOfRange;
+   const uint64_t space = m_addressSpace;
    for (const Wire::WriteOp& op : ops)
+   {
       if (Wraps(op.address, static_cast<uint32_t>(op.bytes.size())))
          return Result::OutOfRange;
+      if (space != 0 && !op.bytes.empty() && op.address + uint64_t { op.bytes.size() } > space)
+         return Result::OutOfRange;
+   }
    if (m_writesUnsupported)
       return Result::Unsupported;
    if (!m_gameRunning)
