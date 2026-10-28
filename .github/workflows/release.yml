@@ -1,0 +1,136 @@
+name: Release
+
+# Builds the plugin on every platform plugin.cfg declares and, on a v* tag, attaches the zips,
+# SHA256SUMS and manifest.json to a DRAFT GitHub release. The installer reads
+# releases/latest/download/manifest.json, which a draft is not, so publishing the draft is the
+# deliberate step that ships to users (SB-6001).
+#
+# No secrets are used, and none may be added: the plugin carries no credentials (SB-5991), and
+# release assets on a public repo are readable by anyone. GITHUB_TOKEN creates the draft.
+#
+# A pull request that touches this release machinery builds every zip and the manifest without
+# releasing anything, so the workflow is proven before a tag ever runs it.
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release-manifest.py
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025,     platform: windows-x64,     test: true }
+          - { os: ubuntu-24.04,     platform: linux-x64,       test: true }
+          - { os: ubuntu-24.04-arm, platform: linux-aarch64,   test: true }
+          # 14.0 is what VPX's own bundled plugins target.
+          - { os: macos-15, platform: macos-arm64,     test: true,  cmake_extra: '-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0' }
+          - { os: macos-15, platform: macos-x64,       test: false, cmake_extra: '-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0' }
+          # Quoted: unquoted, the shell would take the ';' as the end of the command.
+          - { os: macos-15, platform: macos-universal, test: true,  cmake_extra: '"-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0' }
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Read the version
+        id: version
+        shell: bash
+        run: |
+          v=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' plugin.cfg)
+          [ -n "$v" ] || { echo "plugin.cfg has no X.Y.Z version"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match plugin.cfg version $v"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -A x64
+
+      - name: Configure
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_extra }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        if: matrix.test
+        run: ctest --test-dir build --build-config Release --no-tests=error --output-on-failure
+
+      # Ad-hoc: VPX's own bundle signature is replaced when the folder is copied in, so the
+      # installer re-signs the app anyway; this only keeps the library valid on its own.
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - build/stage/scorbit/plugin-scorbit.dylib
+          lipo -archs build/stage/scorbit/plugin-scorbit.dylib
+
+      - name: Zip
+        shell: bash
+        run: |
+          name="vpx-scorbit-plugin-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip"
+          ls -la build/stage/scorbit
+          cd build/stage
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "../../$name" scorbit > /dev/null
+          else
+            zip -qr "../../$name" scorbit
+          fi
+          cd ../..
+          unzip -l "$name"
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.platform }}
+          path: vpx-scorbit-plugin-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Download the zips
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS and manifest.json
+        run: |
+          v=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' plugin.cfg)
+          python3 -I scripts/release-manifest.py dist "$v" "${{ github.repository }}"
+          ls -la dist
+
+      - name: Upload the release set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-set
+          path: dist
+          retention-days: 14
+
+      # Draft only. Nothing reaches releases/latest until someone publishes it, which waits for
+      # the daemon release that replaces the plugin's old login.
+      - name: Create the draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --draft --verify-tag --title "${{ github.ref_name }}" --notes "Scorbit plugin for Visual Pinball X, ${{ github.ref_name }}. Requires VPX rev $(python3 -c "import json;print(json.load(open('dist/manifest.json'))['vpx_min_revision'])") or later and a running Scorbit daemon. Install with Scorbit Desktop."
