@@ -17,9 +17,9 @@ your VPX plugins directory, enable it in `VPinballX.ini`, and play.
 ## Requirements
 
 - A Visual Pinball X build at or after the commit pinned in
-  `cmake/vpx_headers.cmake` (currently master of 2026-10-17, rev 6289), with the
+  `cmake/vpx_headers.cmake` (currently master of 2026-10-27, rev 6461), with the
   PinMAME plugin. Memory writes need a PinMAME carrying `WriteMemory:1`
-  (vpinball/pinmame #634), which rev 6289 does. The plugin API changes layout between builds and has no
+  (vpinball/pinmame #634), which rev 6461 does. The plugin API changes layout between builds and has no
   version handshake, so a plugin loaded into an older VPX does not fail
   cleanly: it corrupts memory during table start. Match the pin to the VPX you
   run, and take VPX from the upstream CI artifacts until a release catches up.
@@ -180,7 +180,8 @@ hides by bit 0 of the control byte. Both go through the same message.
 ## Status
 
 The daemon sends its session and system state, and the plugin logs every one
-and shows a VPX notification when it changes. Without a daemon session for 5
+and shows a VPX notification when it changes, repeated every 60 seconds while a
+warning (`[!]`) lasts. Without a daemon session for 5
 seconds, the plugin says so itself, with the daemon's reason when it refused the
 connection. `ShowStatus = 0` turns all of it off.
 

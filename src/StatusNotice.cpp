@@ -105,9 +105,12 @@ std::string StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool show
    else if (now - m_current.since >= NO_SESSION_AFTER)
       want = DescribeNoSession(m_current.reason);
 
-   if (want.empty() || want == m_posted)
+   if (want.empty())
+      return { };
+   if (want == m_posted && !(want.starts_with("[!]") && now - m_postedAt >= REFRESH_EVERY))
       return { };
    m_posted = want;
+   m_postedAt = now;
    return want;
 }
 

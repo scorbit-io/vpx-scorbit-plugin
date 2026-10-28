@@ -465,6 +465,84 @@ void TestWriteLimitsAndNoGame()
    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
 }
 
+// pinmame 5fc234819 answers an op beyond the CPU's address space with the 0 it also gives a
+// timeout. Where the space is known, such a write answers OutOfRange without reaching the host.
+void TestWriteBeyondTheAddressSpace()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   int calls = 0;
+   const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
+   const MemoryBridge::WriteFn write = [&memory, &calls](const std::vector<Wire::WriteOp>& ops)
+   {
+      calls++;
+      return memory.Write(ops);
+   };
+   bridge.SetGameRunning(true);
+   bridge.SetAddressSpace(0x10000);
+   uint64_t frame = 0;
+   Wire::WriteReply reply;
+
+   const auto t0 = std::chrono::steady_clock::now();
+   CHECK(bridge.Write({ { 0xffff, { 1, 2 } } }, reply, BUDGET_MS, g_running) == Result::OutOfRange);
+   CHECK_MSG(bridge.Write({ { 0x3ffd, { 0xb4 } }, { 0x10000, { 1 } } }, reply, BUDGET_MS, g_running) == Result::OutOfRange,
+      "one op beyond the space refuses the whole batch, unlock included");
+   CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
+   CHECK(calls == 0);
+   CHECK(memory.At(0x3ffd) != 0xb4);
+
+   auto last = std::async(std::launch::async, [&] { return bridge.Write({ { 0xffff, { 9 } } }, reply, 2000, g_running); });
+   CHECK_MSG(ServeUntil(bridge, last, read, write, frame) == Result::Ok, "the last byte of the space is in it");
+   CHECK(memory.At(0xffff) == 9);
+   auto empty = std::async(std::launch::async,
+      [&] { return bridge.Write({ { 0x20000, { } }, { 0x100, { 4 } } }, reply, 2000, g_running); });
+   CHECK_MSG(ServeUntil(bridge, empty, read, write, frame) == Result::Ok, "an empty op is a no-op wherever it points");
+
+   bridge.SetAddressSpace(0);
+   auto unknown = std::async(std::launch::async, [&] { return bridge.Write({ { 0x20000, { 5 } } }, reply, 2000, g_running); });
+   CHECK_MSG(ServeUntil(bridge, unknown, read, write, frame) == Result::Ok, "an unknown space is not checked");
+   CHECK(calls == 3);
+}
+
+// A write queued before the API thread learns the space, as between SetRomId and the first
+// frame, is checked again when answered, and still never reaches the host.
+void TestWriteQueuedBeforeTheSpaceIsKnown()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   int calls = 0;
+   const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
+   const MemoryBridge::WriteFn write = [&memory, &calls](const std::vector<Wire::WriteOp>& ops)
+   {
+      calls++;
+      return memory.Write(ops);
+   };
+   bridge.SetGameRunning(true);
+   uint64_t frame = 0;
+   Wire::WriteReply reply;
+
+   auto pending = std::async(std::launch::async,
+      [&] { return bridge.Write({ { 0x3ffd, { 0xb4 } }, { 0x10000, { 1 } } }, reply, 2000, g_running); });
+   CHECK(WaitQueued(bridge, 1));
+   bridge.SetAddressSpace(0x10000);
+   CHECK(ServeUntil(bridge, pending, read, write, frame) == Result::OutOfRange);
+   CHECK(calls == 0);
+   CHECK(memory.At(0x3ffd) != 0xb4);
+}
+
+void TestMainCpuAddressSpace()
+{
+   using namespace Overlay::Gen;
+   CHECK(MainCpuAddressSpace(0) == 0);
+   CHECK(MainCpuAddressSpace(ALLWPC) == 0x10000);
+   CHECK(MainCpuAddressSpace(DEDMD32) == 0x10000);
+   CHECK(MainCpuAddressSpace(ALLWS) == 0x10000);
+   CHECK(MainCpuAddressSpace(GTS3) == 0x10000);
+   CHECK(MainCpuAddressSpace(ALVG_DMD2) == 0x10000);
+   CHECK_MSG(MainCpuAddressSpace(SAM) == 0, "ARM: not checked");
+   CHECK_MSG(MainCpuAddressSpace(CAPCOM) == 0, "68306: not checked");
+}
+
 // A libpinmame without pinmame #634 applies nothing. The first Write learns that from the host;
 // every later one answers at once, without queueing or calling the host again.
 void TestUnsupportedWriteIsRemembered()
@@ -626,5 +704,8 @@ int main()
    TestUnsupportedWriteIsRemembered();
    TestATimedOutWriteIsNotRemembered();
    TestATakenWriteIsNeverAnsweredBusy();
+   TestWriteBeyondTheAddressSpace();
+   TestWriteQueuedBeforeTheSpaceIsKnown();
+   TestMainCpuAddressSpace();
    return ScorbitTest::Summary("memory_bridge_test");
 }

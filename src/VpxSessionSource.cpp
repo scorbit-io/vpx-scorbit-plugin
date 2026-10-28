@@ -26,9 +26,6 @@ namespace Scorbit
 // drains them, which only happens if VPX has stopped ticking; keep the newest.
 static constexpr size_t LOG_QUEUE_LIMIT = 256;
 static constexpr int NOTICE_MS = 5000;
-// An update this close to expiry may land after VPX erased the notification, which then
-// comes back under a new handle the API never returns (vpinball #4228); push instead.
-static constexpr auto NOTICE_MARGIN = std::chrono::milliseconds(250);
 
 VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
    int (*showStatus)())
@@ -43,6 +40,7 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
    , m_readMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_READ_MEMORY))
    , m_writeMemoryMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_WRITE_MEMORY))
+   , m_machineStateMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_GET_MACHINE_STATE))
    , m_notifier(std::chrono::steady_clock::now())
 {
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
@@ -57,6 +55,7 @@ VpxSessionSource::~VpxSessionSource()
    m_msgApi->UnsubscribeMsg(m_prepareFrameMsgId, OnPrepareFrame, this);
    m_msgApi->UnsubscribeMsg(m_gameEndMsgId, OnGameEnd, this);
    m_msgApi->UnsubscribeMsg(m_gameStartMsgId, OnGameStart, this);
+   m_msgApi->ReleaseMsgID(m_machineStateMsgId);
    m_msgApi->ReleaseMsgID(m_writeMemoryMsgId);
    m_msgApi->ReleaseMsgID(m_readMemoryMsgId);
    m_msgApi->ReleaseMsgID(m_prepareFrameMsgId);
@@ -88,7 +87,6 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
    // Each player has its own notifications, numbered from 1, so the last table's handle
    // could name someone else's here; and this table has not seen the state yet.
    self->m_noticeHandle = 0;
-   self->m_noticeUntil = { };
    self->m_notifier.NewTable();
    self->UpdateDeclare();
    self->m_playerRunning = true;
@@ -102,6 +100,8 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    // The per-frame Service stops with the player, so say so here.
    self->m_gameRunning = false;
    self->m_memory.SetGameRunning(false);
+   self->m_addressSpaceKnown = false;
+   self->m_memory.SetAddressSpace(0);
    self->m_tablePath.clear();
    self->m_epoch++;
    self->UpdateDeclare();
@@ -115,6 +115,8 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
    // interesting lines happen while VPX sits at the table chooser.
    VpxSessionSource* self = static_cast<VpxSessionSource*>(userData);
    const uint64_t frame = ++self->m_renderedFrame;
+   // Before Service, so a write already queued on the game's first frame is range-checked too.
+   self->QueryAddressSpace();
    self->m_memory.Service(
       [self](uint32_t address, uint8_t* out, uint32_t size)
       {
@@ -134,13 +136,27 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
          for (const Wire::WriteOp& op : ops)
             host.push_back({ op.address, static_cast<uint32_t>(op.bytes.size()), op.bytes.data() });
          // Pre-filled with the sentinel: #634's handler always overwrites it (0 on a timeout),
-         // while an unsubscribed broadcast, or one during a table stop, leaves it untouched.
+         // while an unsubscribed broadcast leaves it untouched, as did a table stop before
+         // pinmame 5fc234819, which answers 0 for that too.
          PinMAMEWriteMemoryMsg msg { 1, static_cast<uint32_t>(host.size()), host.data(), MemoryBridge::NO_WRITE_HANDLER };
          self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_writeMemoryMsgId, &msg);
          return msg.applied;
       });
    self->UpdateDeclare();
    self->PostStatusNotice();
+}
+
+void VpxSessionSource::QueryAddressSpace()
+{
+   if (m_addressSpaceKnown || !m_gameRunning)
+      return;
+   PinMAMEMachineStateMsg state { };
+   state.version = 1;
+   m_msgApi->BroadcastMsg(m_endpointId, m_machineStateMsgId, &state);
+   if (state.hardwareGen == 0)
+      return;
+   m_addressSpaceKnown = true;
+   m_memory.SetAddressSpace(MainCpuAddressSpace(state.hardwareGen));
 }
 
 void VpxSessionSource::PostStatusNotice()
@@ -151,16 +167,15 @@ void VpxSessionSource::PostStatusNotice()
    if (text.empty() || m_vpxApi == nullptr)
       return;
    LOGI("Status notice: "s + text);
-   if (m_noticeHandle != 0 && now + NOTICE_MARGIN < m_noticeUntil)
-      m_vpxApi->UpdateNotification(m_noticeHandle, text.c_str(), NOTICE_MS);
-   else
-      m_noticeHandle = m_vpxApi->PushNotification(text.c_str(), NOTICE_MS);
-   m_noticeUntil = now + std::chrono::milliseconds(NOTICE_MS);
+   // Updates ours in place while VPX still shows it, else posts a new one (vpinball #4228).
+   m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, text.c_str(), NOTICE_MS);
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)
 {
    m_romId = romId;
+   m_addressSpaceKnown = false;
+   m_memory.SetAddressSpace(0);
    m_gameRunning = !romId.empty();
    m_memory.SetGameRunning(!romId.empty());
    UpdateDeclare();

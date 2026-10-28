@@ -157,6 +157,39 @@ void TestMarker()
    CHECK(StatusNotifier::Marker({ Wire::SESSION_TRACKING, 4, "" }) == "[?]");
 }
 
+// REQ-6.3's "periodically": a [!] state that holds is posted again on the interval, and
+// nothing else is. The API thread reuses its handle, so it stays one notification.
+void TestWarningRefreshesOnTheInterval()
+{
+   const Clock::time_point t0 = Clock::now();
+   const auto every = StatusNotifier::REFRESH_EVERY;
+   StatusNotifier n(t0);
+   CHECK(n.Frame(nullptr, true, t0 + seconds(5)) == NO_SESSION);
+   CHECK(n.Frame(nullptr, true, t0 + seconds(5) + every - milliseconds(1)).empty());
+   CHECK(n.Frame(nullptr, true, t0 + seconds(5) + every) == NO_SESSION);
+   CHECK_MSG(n.Frame(nullptr, true, t0 + seconds(5) + every + seconds(1)).empty(), "timed from the last post");
+   CHECK(n.Frame(nullptr, true, t0 + seconds(5) + 2 * every) == NO_SESSION);
+
+   const Clock::time_point t1 = t0 + seconds(1000);
+   const std::string noData = "[!] Scorbit: no data, ok";
+   CHECK(n.Frame(InSession(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK), true, t1) == noData);
+   CHECK(n.Frame(InSession(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK), true, t1 + every - seconds(1)).empty());
+   CHECK(n.Frame(InSession(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK), true, t1 + every) == noData);
+}
+
+void TestOnlyWarningsRefresh()
+{
+   const Clock::time_point t0 = Clock::now();
+   const auto every = StatusNotifier::REFRESH_EVERY;
+   StatusNotifier n(t0);
+   CHECK(n.Frame(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), true, t0) == "[OK] Scorbit: tracking, ok");
+   CHECK_MSG(n.Frame(nullptr, true, t0 + 3 * every).empty(), "[OK] posts once");
+   CHECK(n.Frame(InSession(Wire::SESSION_TRACKING, 99), true, t0 + 3 * every) == "[?] Scorbit: tracking, unknown (99)");
+   CHECK_MSG(n.Frame(nullptr, true, t0 + 6 * every).empty(), "[?] posts once");
+   CHECK(n.Frame(InSession(Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE), true, t0 + 6 * every).empty());
+   CHECK_MSG(n.Frame(nullptr, true, t0 + 9 * every).empty(), "hidden never posts");
+}
+
 }
 
 int main()
@@ -172,5 +205,7 @@ int main()
    TestNewTableShowsTheCurrentStateOnce();
    TestDescribe();
    TestMarker();
+   TestWarningRefreshesOnTheInterval();
+   TestOnlyWarningsRefresh();
    return ScorbitTest::Summary("status_notice_test");
 }

@@ -18,6 +18,15 @@ bool Wraps(uint32_t address, uint32_t length)
    return static_cast<uint64_t>(address) + length > 0x100000000ULL;
 }
 
+// True when a non-empty op ends past an address space of space bytes; 0 is unknown, never past.
+bool BeyondSpace(const std::vector<Wire::WriteOp>& ops, uint64_t space)
+{
+   for (const Wire::WriteOp& op : ops)
+      if (space != 0 && !op.bytes.empty() && op.address + uint64_t { op.bytes.size() } > space)
+         return true;
+   return false;
+}
+
 }
 
 MemoryBridge::Result MemoryBridge::Subscribe(const std::vector<Wire::MemoryRange>& ranges,
@@ -142,6 +151,9 @@ MemoryBridge::Result MemoryBridge::Write(const std::vector<Wire::WriteOp>& ops, 
    for (const Wire::WriteOp& op : ops)
       if (Wraps(op.address, static_cast<uint32_t>(op.bytes.size())))
          return Result::OutOfRange;
+   // Checked again when answered: the space may only become known after this is queued.
+   if (BeyondSpace(ops, m_addressSpace))
+      return Result::OutOfRange;
    if (m_writesUnsupported)
       return Result::Unsupported;
    if (!m_gameRunning)
@@ -180,7 +192,7 @@ MemoryBridge::Result MemoryBridge::Submit(const std::shared_ptr<Request>& reques
       // a game ending since the caller's check left no Service to answer this.
       if (!m_gameRunning)
       {
-         Answer(*request, { }, { }, 0, false);
+         Answer(*request, { }, { }, 0, false, 0);
          Queue one { request };
          Complete(one);
          return request->result;
@@ -233,7 +245,7 @@ void MemoryBridge::SetGameRunning(bool running)
       Queue pending;
       pending.swap(m_queue);
       for (const std::shared_ptr<Request>& request : pending)
-         Answer(*request, { }, { }, 0, false);
+         Answer(*request, { }, { }, 0, false, 0);
       Complete(pending);
    }
    // No snapshot outlives the game, so a restart cannot serve the last one's bytes.
@@ -269,7 +281,7 @@ void MemoryBridge::Service(const ReadFn& read, uint64_t frame, bool playerRunnin
 
    for (const std::shared_ptr<Request>& request : work)
    {
-      Answer(*request, read, write, frame, gameRunning);
+      Answer(*request, read, write, frame, gameRunning, m_addressSpace);
       // Snapshot the set this batch installs, so a Poll right after the
       // Subscribe reply already has it.
       if (request->kind == Request::Kind::Subscribe && request->subscriptionId > rangesId)
@@ -313,13 +325,18 @@ void MemoryBridge::PublishSnapshot(uint64_t rangesId, bool complete)
 }
 
 void MemoryBridge::Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
-   bool gameRunning)
+   bool gameRunning, uint64_t addressSpace)
 {
    if (request.kind == Request::Kind::Write)
    {
       if (!gameRunning)
       {
          request.result = Result::NoGame;
+         return;
+      }
+      if (BeyondSpace(request.ops, addressSpace))
+      {
+         request.result = Result::OutOfRange;
          return;
       }
       // Applied before this frame's snapshot is taken, so the next Poll shows the write.
