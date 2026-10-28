@@ -119,17 +119,19 @@ endif()
 
 # Assemble a ready-to-copy plugin folder: <build>/stage/scorbit/
 set(STAGE_DIR "${CMAKE_BINARY_DIR}/stage/scorbit")
-# Staging is a POST_BUILD step, so an edit to plugin.cfg alone must relink to reach it.
-set_property(TARGET plugin-scorbit APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/plugin.cfg")
-# Recreated on every stage, so files a previous revision staged (the SDK library and
-# assets/ until SB-5991) never survive in the folder that is copied as the plugin.
-add_custom_command(TARGET plugin-scorbit POST_BUILD
+# A custom target is out of date on every build in every generator, so a plugin.cfg-only
+# edit is staged without a relink (LINK_DEPENDS would cover Make and Ninja only, not Visual
+# Studio). The folder is recreated each time, so files a previous revision staged (the SDK
+# library and assets/ until SB-5991) never survive in what is copied as the plugin.
+add_custom_target(stage-plugin ALL
    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${STAGE_DIR}"
    COMMAND "${CMAKE_COMMAND}" -E make_directory "${STAGE_DIR}"
-   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:plugin-scorbit>" "${STAGE_DIR}/"
-   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/plugin.cfg" "${STAGE_DIR}/"
+   COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:plugin-scorbit>" "${STAGE_DIR}/"
+   COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_SOURCE_DIR}/plugin.cfg" "${STAGE_DIR}/"
    COMMENT "Staging plugin folder in ${STAGE_DIR}"
+   VERBATIM
 )
+add_dependencies(stage-plugin plugin-scorbit)
 
 endif()  # NOT SCORBIT_TRANSPORT_ONLY
 
