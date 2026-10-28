@@ -11,122 +11,29 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# Where a prebuilt Scorbit SDK lives (a directory containing include/ and the
-# library). Empty means build the SDK from source through CPM.
-set(SCORBIT_SDK_ROOT "" CACHE PATH "Prebuilt scorbit_sdk root; empty builds it from source")
-# Pinned to a main commit rather than the 2.0.4 tag: 2.0.4 fails to link on macOS
-# (fmt 12.1 symbols missing from libscorbit_sdk). Move to the next tag once released.
-set(_scorbit_sdk_default_tag "8ce6eb4f8c6e73ccec0a4c139650da0e0a46214e") # release CRT fix, SB-5150
-# A CACHE default never reaches a tree that already cached an earlier one, so a tree
-# still holding a retired default is moved forward; any other override is kept.
-# When moving the default, add the old one here.
-set(_scorbit_sdk_retired_tags
-   "c2f2045abba6ca5f8cbc911a3ca40ee9a3a1b43b"
-   "f62880a2e5b9d5507e6c57a161640899c62ec73c"
-   "c0d2f94582b250dde32072edabdf3e4da4fd7d43"
-   "8010fc15e0a9662ed41d96cbf745d9377dcb8e97")
-if(SCORBIT_SDK_GIT_TAG IN_LIST _scorbit_sdk_retired_tags)
-   message(STATUS "SCORBIT_SDK_GIT_TAG: moving retired default ${SCORBIT_SDK_GIT_TAG} to ${_scorbit_sdk_default_tag}")
-   set(SCORBIT_SDK_GIT_TAG "${_scorbit_sdk_default_tag}" CACHE STRING "scorbit_sdk tag or commit to build when SCORBIT_SDK_ROOT is empty" FORCE)
-endif()
-set(SCORBIT_SDK_GIT_TAG "${_scorbit_sdk_default_tag}" CACHE STRING "scorbit_sdk tag or commit to build when SCORBIT_SDK_ROOT is empty")
-
-# Secrets come from the environment or an untracked .env file (see .env.example);
-# neither is committed. SCORBIT_PROVIDER_KEY is compiled in as the default
-# providerKey setting; SCORBIT_SDK_ENCRYPT_SECRET is handed to the SDK build.
-if(EXISTS "${CMAKE_SOURCE_DIR}/.env")
-   file(STRINGS "${CMAKE_SOURCE_DIR}/.env" _env_lines)
-   foreach(_line IN LISTS _env_lines)
-      if(_line MATCHES "^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(.*)$")
-         set(_name "${CMAKE_MATCH_1}")
-         string(STRIP "${CMAKE_MATCH_2}" _value)
-         if(NOT "$ENV{${_name}}" STREQUAL "" OR "${_value}" STREQUAL "")
-            continue() # environment wins; empty values are ignored
-         endif()
-         set(ENV{${_name}} "${_value}")
-      endif()
-   endforeach()
-endif()
-if("$ENV{SCORBIT_PROVIDER_KEY}" STREQUAL "")
-   message(WARNING "SCORBIT_PROVIDER_KEY is not set: the plugin will have no default provider key")
-endif()
-if("$ENV{SCORBIT_SDK_ENCRYPT_SECRET}" STREQUAL "" AND NOT SCORBIT_SDK_ROOT)
-   message(WARNING "SCORBIT_SDK_ENCRYPT_SECRET is not set: the SDK built here cannot decrypt provider keys")
-endif()
-
-# The transport carries no Visual Pinball or Scorbit SDK dependency, so it builds
-# and tests on its own. CI uses that: the SDK fetch needs OpenSSL and libarchive on
-# the host, and both it and the header fetch need the network, none of which a
-# compile gate for the wire protocol should require.
+# The plugin holds no Scorbit identity and no secrets: scorbitd is the Scorbitron,
+# and the plugin only talks to it over a local socket (SB-5991).
 #
-# Declared before the CPM bootstrap because it gates it. cmake/CPM.cmake runs an
-# unconditional file(DOWNLOAD) when included, so leaving it above this option would
-# have meant a clean runner still reached the network on a transport-only configure.
+# The transport carries no Visual Pinball dependency, so it builds and tests on its
+# own, with no network. CI uses that for its compile gate on every platform; the full
+# plugin also needs the VPX headers, which are fetched at configure time.
 option(SCORBIT_TRANSPORT_ONLY "Build only the transport library and its tests" OFF)
 
 if(NOT SCORBIT_TRANSPORT_ONLY)
-   include(cmake/CPM.cmake)
-endif()
-if(NOT SCORBIT_TRANSPORT_ONLY)
    include(cmake/vpx_headers.cmake)
-endif()
-
-# Same pin as scorbit_sdk, added first so CPM reuses it inside the SDK build.
-if(NOT SCORBIT_TRANSPORT_ONLY)
-CPMAddPackage(
-   NAME nlohmann_json
-   URL https://github.com/nlohmann/json/archive/3946872265598aed5a7aea68cad4d9d1f168bd4b.tar.gz
-   URL_HASH SHA256=4784ccd3b66d46da6723cb69b3328b8b5548cf82b5c6e917a7636f20a4b40adf
-)
-endif()
-
-if(SCORBIT_TRANSPORT_ONLY)
-   # No SDK, no plugin target: the transport and its tests are the whole build.
-elseif(SCORBIT_SDK_ROOT)
-   add_library(scorbit_sdk SHARED IMPORTED)
-   file(GLOB _sdk_lib
-      "${SCORBIT_SDK_ROOT}/lib/libscorbit_sdk${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      "${SCORBIT_SDK_ROOT}/libscorbit_sdk${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      "${SCORBIT_SDK_ROOT}/lib/scorbit_sdk${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      "${SCORBIT_SDK_ROOT}/scorbit_sdk${CMAKE_SHARED_LIBRARY_SUFFIX}")
-   if(NOT _sdk_lib)
-      message(FATAL_ERROR "No scorbit_sdk shared library found under ${SCORBIT_SDK_ROOT}")
-   endif()
-   list(GET _sdk_lib 0 _sdk_lib)
-   set_target_properties(scorbit_sdk PROPERTIES
-      IMPORTED_LOCATION "${_sdk_lib}"
-      INTERFACE_INCLUDE_DIRECTORIES "${SCORBIT_SDK_ROOT}/include")
-   if(WIN32)
-      file(GLOB _sdk_implib "${SCORBIT_SDK_ROOT}/lib/scorbit_sdk.lib" "${SCORBIT_SDK_ROOT}/scorbit_sdk.lib")
-      if(_sdk_implib)
-         list(GET _sdk_implib 0 _sdk_implib)
-         set_target_properties(scorbit_sdk PROPERTIES IMPORTED_IMPLIB "${_sdk_implib}")
-      endif()
-   endif()
-else()
-   # Needs OpenSSL and libarchive on the host; see README.
-   CPMAddPackage(
-      NAME scorbit_sdk
-      GITHUB_REPOSITORY scorbit-io/scorbit_sdk
-      GIT_TAG ${SCORBIT_SDK_GIT_TAG}
-      OPTIONS
-         # Only options the SDK actually defines. CPM passes unknown ones through
-         # silently, so a stale name reads as a setting while doing nothing.
-         "SCORBIT_SDK_SHARED ON"
-   )
 endif()
 
 if(MSVC)
    # Mirror the POSIX set: C4100 is -Wunused-parameter, which POSIX turns off; C4201
    # (nameless struct/union) needs -pedantic and C4459 (hides a global) -Wshadow,
-   # neither of which POSIX enables. All three fire in VPX and nlohmann headers too.
+   # neither of which POSIX enables. All three fire in VPX headers too.
    set(SCORBIT_WARNINGS /W4 /Zc:__cplusplus /wd4100 /wd4201 /wd4459)
 else()
    set(SCORBIT_WARNINGS -Wall -Wextra -Wno-unused-parameter)
 endif()
 
-# The wire protocol and the socket worker carry no Visual Pinball or Scorbit SDK
-# dependency, so they build and test on their own against a scripted peer.
+# The wire protocol and the socket worker carry no Visual Pinball dependency, so they
+# build and test on their own against a scripted peer.
 add_library(scorbit-transport STATIC
    src/WireProtocol.h
    src/WireProtocol.cpp
@@ -165,8 +72,6 @@ if(NOT SCORBIT_TRANSPORT_ONLY)
 add_library(plugin-scorbit MODULE
    src/common.h
    src/ScorbitPlugin.cpp
-   src/Scorbit.h
-   src/Scorbit.cpp
    src/DmdTap.h
    src/DmdTap.cpp
    src/DmdOverlay.h
@@ -175,8 +80,6 @@ add_library(plugin-scorbit MODULE
    src/VpxSessionSource.h
    src/VpxSessionSource.cpp
    src/ScorbitPluginAPI.h
-   src/qrcodegen.h
-   src/qrcodegen.c
    src/QuitHook.h
 )
 if(APPLE)
@@ -188,15 +91,14 @@ endif()
 
 target_include_directories(plugin-scorbit PRIVATE src "${VPX_HEADERS_DIR}")
 target_compile_definitions(plugin-scorbit PRIVATE
-   "SCORBIT_DEFAULT_PROVIDER_KEY=\"$ENV{SCORBIT_PROVIDER_KEY}\""
    "SCORBIT_PLUGIN_VERSION=\"${PROJECT_VERSION}\""
    "SCORBIT_VPX_PLUGIN_API_COMMIT=\"${VPX_PLUGIN_API_COMMIT}\""
    "SCORBIT_VPX_PINNED_VERSION=\"${VPX_PINNED_VERSION}\""
    "SCORBIT_VPX_PINNED_REVISION=\"${VPX_PINNED_REVISION}\""
 )
-target_link_libraries(plugin-scorbit PRIVATE scorbit-transport scorbit_sdk nlohmann_json::nlohmann_json)
+target_link_libraries(plugin-scorbit PRIVATE scorbit-transport)
 if(MSVC)
-   # Same reason as scorbit-transport: fopen in DmdTap and Scorbit is checked before use.
+   # Same reason as scorbit-transport: fopen in DmdTap is checked before use.
    target_compile_definitions(plugin-scorbit PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -217,14 +119,19 @@ endif()
 
 # Assemble a ready-to-copy plugin folder: <build>/stage/scorbit/
 set(STAGE_DIR "${CMAKE_BINARY_DIR}/stage/scorbit")
-add_custom_command(TARGET plugin-scorbit POST_BUILD
-   COMMAND "${CMAKE_COMMAND}" -E make_directory "${STAGE_DIR}/assets"
-   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:plugin-scorbit>" "${STAGE_DIR}/"
-   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/plugin.cfg" "${STAGE_DIR}/"
-   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/assets/scorbit_machines.json" "${STAGE_DIR}/assets/"
-   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:scorbit_sdk>" "${STAGE_DIR}/"
+# A custom target is out of date on every build in every generator, so a plugin.cfg-only
+# edit is staged without a relink (LINK_DEPENDS would cover Make and Ninja only, not Visual
+# Studio). The folder is recreated each time, so files a previous revision staged (the SDK
+# library and assets/ until SB-5991) never survive in what is copied as the plugin.
+add_custom_target(stage-plugin ALL
+   COMMAND "${CMAKE_COMMAND}" -E rm -rf "${STAGE_DIR}"
+   COMMAND "${CMAKE_COMMAND}" -E make_directory "${STAGE_DIR}"
+   COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:plugin-scorbit>" "${STAGE_DIR}/"
+   COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_SOURCE_DIR}/plugin.cfg" "${STAGE_DIR}/"
    COMMENT "Staging plugin folder in ${STAGE_DIR}"
+   VERBATIM
 )
+add_dependencies(stage-plugin plugin-scorbit)
 
 endif()  # NOT SCORBIT_TRANSPORT_ONLY
 
@@ -232,11 +139,4 @@ option(SCORBIT_BUILD_TESTS "Build the transport tests" ON)
 if(SCORBIT_BUILD_TESTS)
    enable_testing()
    add_subdirectory(test)
-endif()
-
-if(NOT SCORBIT_TRANSPORT_ONLY AND NOT SCORBIT_SDK_ROOT AND (APPLE OR UNIX))
-   # The SDK's install name is versioned (libscorbit_sdk.2.dylib / .so.2); stage that name too.
-   add_custom_command(TARGET plugin-scorbit POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_SONAME_FILE:scorbit_sdk>" "${STAGE_DIR}/"
-   )
 endif()

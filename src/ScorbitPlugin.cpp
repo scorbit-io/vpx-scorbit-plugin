@@ -1,7 +1,6 @@
 // license:GPLv3+
 
 #include "common.h"
-#include "Scorbit.h"
 #include "DmdTap.h"
 #include "DmdOverlay.h"
 #include "QuitHook.h"
@@ -11,35 +10,17 @@
 #include "plugins/ControllerPlugin.h"
 #include "pinmame/PinMAMEPlugin.h"
 
-#include "nlohmann/json.hpp"
-
 #include <atomic>
-#include <climits>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#include <tchar.h>
-#else
-#include <dlfcn.h>
-#endif
-
-using json = nlohmann::json;
 using namespace PinballPlugin::Controller;
 
 namespace Scorbit {
 
 LPI_IMPLEMENT_CPP
-
-// Baked in at build time from SCORBIT_PROVIDER_KEY (environment or .env); empty
-// leaves the plugin disabled until the user sets providerKey in VPinballX.ini.
-#ifndef SCORBIT_DEFAULT_PROVIDER_KEY
-#define SCORBIT_DEFAULT_PROVIDER_KEY ""
-#endif
 
 // Identity the plugin sends in Hello, baked in by CMakeLists.txt.
 #ifndef SCORBIT_PLUGIN_VERSION
@@ -49,9 +30,8 @@ LPI_IMPLEMENT_CPP
 #define SCORBIT_VPX_PLUGIN_API_COMMIT ""
 #endif
 
-static constexpr double POLL_INTERVAL = 0.25;
 // The socket worker cannot log from its own thread, so its lines are drained
-// here. Independent of PollStates, which only runs while a game is tracked.
+// here, along with the Declare and overlay work the API thread owns.
 static constexpr double LOG_DRAIN_INTERVAL = 0.25;
 
 static const MsgPluginAPI* msgApi = nullptr;
@@ -60,17 +40,14 @@ static uint32_t endpointId = 0;
 static unsigned int getVpxApiId = 0;
 
 static std::unique_ptr<CtrlItemConsumer<ControllerDef>> controllers;
-static std::unique_ptr<CtrlItemConsumer<StateSrcId>> stateSources;
 
-// Raw pointer on purpose: a static unique_ptr would run ~Scorbit from
-// __cxa_finalize when the host exits without unloading plugins (e.g. the
-// signal handler exit path), spawning threads and calling into the already
-// finalized SDK. Abnormal exits leak instead; normal unload deletes below.
-static Scorbit* scorbit = nullptr;
-// Same reason: ~DmdTap joins a thread and unsubscribes through the host API.
+// Raw pointers on purpose: a static unique_ptr would run the destructors from
+// __cxa_finalize when the host exits without unloading plugins (e.g. the signal
+// handler exit path). ~DmdTap joins a thread and unsubscribes through the host API,
+// and ~SocketWorker joins the transport thread. Abnormal exits leak instead; normal
+// unload deletes below.
 static DmdTap* dmdTap = nullptr;
 static DmdOverlay* dmdOverlay = nullptr;
-// Same reason again: ~SocketWorker joins the transport thread.
 static VpxSessionSource* vpxSession = nullptr;
 static SocketWorker* socketWorker = nullptr;
 static std::atomic<bool> logDrainActive { false };
@@ -78,21 +55,6 @@ static std::atomic<bool> logDrainActive { false };
 static string currentRomId;
 static uint32_t pinmameEndpointId = 0;
 
-static std::atomic<bool> pollActive { false };
-static bool wasGameOver = true;
-static int64_t lastScores[4] = { 0, 0, 0, 0 };
-static int lastPlayers = 1;
-
-MSGPI_STRING_VAL_SETTING(setProvider, "provider", "Provider",
-   "Scorbit provider id", false, "vpxplugin", 64);
-MSGPI_STRING_VAL_SETTING(setEnv, "environment", "Environment",
-   "production or staging", true, "staging", 32);
-MSGPI_STRING_VAL_SETTING(setKey, "providerKey", "Provider key",
-   "Scorbit provider key", true, SCORBIT_DEFAULT_PROVIDER_KEY, 2048);
-MSGPI_STRING_VAL_SETTING(setKeyFile, "deviceKeyFile", "Device key file",
-   "Per-machine key filename, relative to the pref dir", false, "scorbit_device.key", 256);
-MSGPI_INT_VAL_SETTING(setLog, "logLevel", "Log level",
-   "0 quiet, 1 info, 2 debug", true, 0, 2, 2);
 MSGPI_STRING_VAL_SETTING(setDmdDump, "dmdDumpFile", "DMD dump file",
    "Write captured DMD frames to this file as dmddump text (one hex digit per pixel), empty to disable", false, "", 1024);
 MSGPI_STRING_VAL_SETTING(setOverlayDrop, "overlayDropDir", "Overlay drop directory",
@@ -102,162 +64,10 @@ MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
 MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
    "Show Scorbit status notifications, in a session or out of one", true, true);
 
-ScorbitConfig GetPluginConfig()
-{
-   ScorbitConfig c;
-   c.provider = setProvider_Get();
-   c.environment = setEnv_Get();
-   c.providerKey = setKey_Get();
-   c.deviceKeyFile = setKeyFile_Get();
-   c.logLevel = setLog_Get();
-   return c;
-}
-
-// Game states published by libpinmame from a tomlogic memory map (see
-// https://github.com/tomlogic/pinmame-nvram-maps): each map entry becomes an
-// INT64 state of the PMPI_GROUP_GAMESTATE source whose desc holds the JSON
-// group path (e.g. "game_state\scores\Player 1"), so states are matched on
-// the standardized game_state keys, not on the per-map display labels.
-struct GameStates
-{
-   CtlResId id { };
-   unsigned int nStates = 0;
-   unsigned int scores[4] = { UINT_MAX, UINT_MAX, UINT_MAX, UINT_MAX };
-   unsigned int ball = UINT_MAX;
-   unsigned int gameOver = UINT_MAX;
-   unsigned int playerCount = UINT_MAX;
-   unsigned int currentPlayer = UINT_MAX;
-};
-
-static GameStates states;
-
 static void FilterControllers(std::vector<ControllerDef>& items)
 {
    std::erase_if(items, [](const ControllerDef& def)
       { return def.gameId == nullptr || !std::string_view(def.gameId).starts_with(PMPI_GAMEID_PREFIX); });
-}
-
-static void FilterStateSources(std::vector<StateSrcId>& items)
-{
-   std::erase_if(items, [](const StateSrcId& src)
-      { return src.id.endpointId != pinmameEndpointId || src.id.resId != PMPI_GROUP_GAMESTATE; });
-}
-
-static void ResolveStates()
-{
-   states = { };
-
-   stateSources->With([](const std::vector<StateSrcId>& items)
-   {
-   for (const StateSrcId& src : items)
-   {
-      GameStates resolved;
-      resolved.id = src.id;
-      resolved.nStates = src.nStates;
-      unsigned int nScores = 0;
-      for (unsigned int i = 0; i < src.nStates; i++)
-      {
-         const StateDef& def = src.stateDefs[i];
-         if (def.dataFormat != CTLPI_STATE_FORMAT_INT64 || def.GetState == nullptr)
-            continue;
-         const std::string_view path = def.desc ? def.desc : "";
-         if (path.starts_with("game_state\\scores\\"sv) && nScores < 4)
-            resolved.scores[nScores++] = i;
-         else if (path.starts_with("game_state\\current_ball"sv))
-            resolved.ball = i;
-         else if (path.starts_with("game_state\\game_over"sv))
-            resolved.gameOver = i;
-         else if (path.starts_with("game_state\\player_count"sv))
-            resolved.playerCount = i;
-         else if (path.starts_with("game_state\\current_player"sv))
-            resolved.currentPlayer = i;
-      }
-      if (resolved.scores[0] != UINT_MAX && resolved.gameOver != UINT_MAX)
-      {
-         states = resolved;
-         LOGI("Game states resolved: scores="s + std::to_string(nScores)
-            + " ball=" + (states.ball != UINT_MAX ? "yes" : "no")
-            + " playerCount=" + (states.playerCount != UINT_MAX ? "yes" : "no")
-            + " currentPlayer=" + (states.currentPlayer != UINT_MAX ? "yes" : "no"));
-         return;
-      }
-   }
-   });
-}
-
-// libpinmame leaves pResult untouched when the machine is not running or the
-// memory region is unmapped, so the default value must be preset by the caller.
-static int64_t ReadState(const StateSrcId& src, unsigned int index, int64_t defValue)
-{
-   if (index >= src.nStates)
-      return defValue;
-   int64_t value = defValue;
-   src.stateDefs[index].GetState(src.stateDefs[index].callContext, &value);
-   return value;
-}
-
-static void UpdateSession(const StateSrcId& src)
-{
-   const bool gameOver = ReadState(src, states.gameOver, 1) != 0;
-   const int ball = static_cast<int>(ReadState(src, states.ball, 0));
-   const int64_t playerCount = ReadState(src, states.playerCount, 1);
-   const int players = (playerCount < 1 || playerCount > 4) ? 1 : static_cast<int>(playerCount);
-   const int64_t currentPlayer = ReadState(src, states.currentPlayer, 1);
-   const int player = (currentPlayer < 1 || currentPlayer > 4) ? 1 : static_cast<int>(currentPlayer);
-
-   int64_t s[4];
-   for (int i = 0; i < 4; i++)
-      s[i] = ReadState(src, states.scores[i], 0);
-
-   if (!gameOver && wasGameOver)
-   {
-      LOGI("Game started ("s + std::to_string(players) + " players)");
-      scorbit->StartSession();
-   }
-
-   if (!gameOver)
-   {
-      const bool changed = s[0] != lastScores[0] || s[1] != lastScores[1]
-         || s[2] != lastScores[2] || s[3] != lastScores[3];
-      if (changed)
-         scorbit->SendUpdate(static_cast<double>(s[0]), static_cast<double>(s[1]),
-            static_cast<double>(s[2]), static_cast<double>(s[3]), ball, player, players);
-      for (int i = 0; i < 4; i++)
-         lastScores[i] = s[i];
-      lastPlayers = players;
-   }
-
-   if (gameOver && !wasGameOver)
-   {
-      LOGI("Game over, p1="s + std::to_string(s[0]));
-      scorbit->StopSession(static_cast<double>(s[0]), static_cast<double>(s[1]),
-         static_cast<double>(s[2]), static_cast<double>(s[3]), players);
-   }
-
-   wasGameOver = gameOver;
-}
-
-static void PollStates(void*)
-{
-   if (!pollActive || !scorbit)
-      return;
-
-   if (states.nStates != 0)
-   {
-      stateSources->With([](const std::vector<StateSrcId>& items)
-      {
-         for (const StateSrcId& src : items)
-         {
-            if (src.id.id == states.id.id && src.nStates == states.nStates)
-            {
-               UpdateSession(src);
-               break;
-            }
-         }
-      });
-   }
-
-   msgApi->RunOnMainThread(endpointId, POLL_INTERVAL, PollStates, nullptr);
 }
 
 // API thread. Reschedules itself for the plugin's lifetime, so a line the
@@ -277,98 +87,8 @@ static void DrainSocketLog(void*)
    msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
 }
 
-static void StartPoll()
-{
-   wasGameOver = true;
-   for (int64_t& v : lastScores)
-      v = 0;
-   lastPlayers = 1;
-   if (!pollActive.exchange(true))
-      msgApi->RunOnMainThread(endpointId, POLL_INTERVAL, PollStates, nullptr);
-}
-
-static void StopPoll()
-{
-   if (!pollActive.exchange(false))
-      return;
-   if (scorbit && !wasGameOver)
-      scorbit->StopSession(static_cast<double>(lastScores[0]), static_cast<double>(lastScores[1]),
-         static_cast<double>(lastScores[2]), static_cast<double>(lastScores[3]), lastPlayers);
-   wasGameOver = true;
-}
-
-struct MachineInfo
-{
-   int machineId = 0;
-   string uuid;
-};
-
-static std::filesystem::path GetPluginPath()
-{
-#ifdef _WIN32
-   HMODULE hm = nullptr;
-   if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, _T("ScorbitPluginLoad"), &hm) == 0)
-      return std::filesystem::path();
-
-   std::wstring pathBuf;
-   DWORD size = MAX_PATH;
-   while (true)
-   {
-      pathBuf.resize(size);
-      const DWORD length = ::GetModuleFileNameW(hm, pathBuf.data(), size);
-      if (length == 0)
-         return std::filesystem::path();
-      if (length < size)
-      {
-         pathBuf.resize(length);
-         break;
-      }
-      size *= 2;
-   }
-   std::filesystem::path path(pathBuf);
-#else
-   Dl_info info { };
-   if (dladdr((void*)&GetPluginPath, &info) == 0 || !info.dli_fname)
-      return std::filesystem::path();
-
-   char pathBuf[PATH_MAX];
-   if (!realpath(info.dli_fname, pathBuf))
-      return std::filesystem::path();
-   std::filesystem::path path(pathBuf);
-#endif
-   return path.empty() ? path : path.parent_path();
-}
-
-static bool LookupMachine(const string& romId, MachineInfo& info)
-{
-   const std::filesystem::path file = GetPluginPath() / "assets"sv / "scorbit_machines.json"sv;
-
-   std::ifstream f(file);
-   if (!f.is_open())
-   {
-      LOGI("No machines file at "s + file.string()
-         + " - expected JSON like { \"" + romId + "\": { \"machineId\": 1582, \"uuid\": \"...\" } }");
-      return false;
-   }
-
-   try
-   {
-      json machines;
-      f >> machines;
-      if (machines.is_object() && machines.contains(romId) && machines[romId].is_object())
-      {
-         info.machineId = machines[romId].value("machineId", 0);
-         info.uuid = machines[romId].value("uuid", "");
-         return info.machineId != 0;
-      }
-   }
-   catch (const json::exception& e)
-   {
-      LOGE("Failed to parse "s + file.string() + ": " + e.what());
-   }
-   return false;
-}
-
+// The daemon is the Scorbitron: it reads the game from memory and frames and talks to
+// Scorbit. The plugin only tells it which ROM is running and where its display is.
 static void OnControllersChanged()
 {
    string romId;
@@ -386,41 +106,18 @@ static void OnControllersChanged()
    if (romId == currentRomId && controllerEndpointId == pinmameEndpointId)
       return;
 
-   StopPoll();
-   delete scorbit;
-   scorbit = nullptr;
    currentRomId = romId;
    pinmameEndpointId = controllerEndpointId;
 
-   // Re-filter the state sources and the display source for the controller that is now emulating
-   stateSources->Refresh();
+   // Re-filter the display source for the controller that is now emulating
    if (dmdTap)
       dmdTap->SetController(pinmameEndpointId);
    if (dmdOverlay)
       dmdOverlay->SetController(pinmameEndpointId);
-   // The transport declares the ROM independently of whether Scorbit has a
-   // machine mapping for it: the daemon wants the frames either way.
    if (vpxSession)
       vpxSession->SetRomId(romId);
 
-   if (romId.empty())
-   {
-      LOGI("Game ended"s);
-      return;
-   }
-
-   MachineInfo machine;
-   if (!LookupMachine(romId, machine))
-   {
-      LOGI("romId="s + romId + " has no Scorbit machine mapping - Scorbit idle");
-      return;
-   }
-
-   LOGI("New game: romId="s + romId + " machineId=" + std::to_string(machine.machineId));
-
-   scorbit = new Scorbit(vpxApi);
-   if (scorbit->DoInit(machine.machineId, romId, machine.uuid))
-      StartPoll();
+   LOGI(romId.empty() ? "Game ended"s : "New game: romId="s + romId);
 }
 
 }
@@ -429,9 +126,8 @@ using namespace Scorbit;
 
 MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload();
 
-// VPX's application quit exits without unloading plugins. Static teardown then runs
-// libpinmame's exit-time controller broadcast into ~Scorbit after the SDK's statics
-// are gone (SB-5039). Unload while the process is still whole.
+// VPX's application quit exits without unloading plugins, so static teardown would run
+// against a half-finished process. Unload while the process is still whole (SB-5039).
 static bool unloadingAtQuit = false;
 
 static void UnloadOnQuit()
@@ -439,8 +135,6 @@ static void UnloadOnQuit()
    if (msgApi == nullptr)
       return;
    LOGI("Scorbit plugin unloading at quit: VPX did not unload it"s);
-   if (scorbit)
-      scorbit->PrepareForQuit();
    unloadingAtQuit = true;
    ScorbitPluginUnload();
 }
@@ -456,11 +150,6 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
    msgApi->BroadcastMsg(endpointId, getVpxApiId = msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_MSG_GET_API), &vpxApi);
 
-   msgApi->RegisterSetting(endpointId, &setProvider);
-   msgApi->RegisterSetting(endpointId, &setEnv);
-   msgApi->RegisterSetting(endpointId, &setKey);
-   msgApi->RegisterSetting(endpointId, &setKeyFile);
-   msgApi->RegisterSetting(endpointId, &setLog);
    msgApi->RegisterSetting(endpointId, &setDmdDump);
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);
    msgApi->RegisterSetting(endpointId, &setSocketPath);
@@ -468,7 +157,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
-      // A relative dump path is taken against the pref dir, like deviceKeyFile.
+      // A relative dump path is taken against the pref dir.
       std::filesystem::path dump = setDmdDump_Get();
       if (!dump.empty() && dump.is_relative() && vpxApi != nullptr)
       {
@@ -509,18 +198,11 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    logDrainActive = true;
    msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
 
-   stateSources = std::make_unique<CtrlItemConsumer<StateSrcId>>(msgApi, endpointId, CTLPI_STATE_GET_SRC_MSG, CTLPI_STATE_ON_SRC_CHG_MSG,
-      [](std::vector<StateSrcId>& items) { FilterStateSources(items); }, nullptr, []() { ResolveStates(); });
    controllers = std::make_unique<CtrlItemConsumer<ControllerDef>>(msgApi, endpointId, CTLPI_CONTROLLERS_GET_MSG, CTLPI_CONTROLLERS_ON_CHG_MSG,
       [](std::vector<ControllerDef>& items) { FilterControllers(items); }, nullptr, []() { OnControllersChanged(); });
 
-   const ScorbitConfig c = GetPluginConfig();
-   LOGI("Scorbit plugin loaded. provider="s + c.provider
-      + " env=" + c.environment
-      + " key=" + (c.providerKey.empty() ? "MISSING (Scorbit will stay disabled)"s
-                                         : ("present (" + std::to_string(c.providerKey.size()) + " chars)")));
+   LOGI("Scorbit plugin loaded "s + SCORBIT_PLUGIN_VERSION);
 
-   stateSources->Subscribe();
    controllers->Subscribe();
 }
 
@@ -538,7 +220,6 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    if (unloadingAtQuit)
       dmdOverlay->Detach();
 
-   StopPoll();
    logDrainActive = false;
    // Joins the transport thread, so nothing reads vpxSession or dmdTap after
    // this returns. Bye goes out from the worker as it leaves its serve loop.
@@ -547,9 +228,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    msgApi->FlushPendingCallbacks(endpointId);
 
    controllers->Unsubscribe();
-   stateSources->Unsubscribe();
    controllers = nullptr;
-   stateSources = nullptr;
    delete vpxSession;
    vpxSession = nullptr;
    if (!unloadingAtQuit)
@@ -558,11 +237,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    delete dmdTap;
    dmdTap = nullptr;
 
-   delete scorbit;
-   scorbit = nullptr;
    currentRomId.clear();
    pinmameEndpointId = 0;
-   states = { };
 
    // Unsubscribing the controllers above can queue a deferred overlay withdrawal after
    // the first flush. Run it now, while this library is still loaded; it finds the
