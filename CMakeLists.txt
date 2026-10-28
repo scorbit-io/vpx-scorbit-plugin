@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(vpx-scorbit-plugin VERSION 0.1.0 LANGUAGES C CXX)
+# plugin.cfg is the one place the version is set: VPX and the installer read it there, and
+# the plugin reports the same value to the daemon in Hello (SB-6001).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/plugin.cfg" _cfg_version REGEX "^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"$")
+if(NOT _cfg_version MATCHES "\"([0-9]+\\.[0-9]+\\.[0-9]+)\"")
+   message(FATAL_ERROR "plugin.cfg has no 'version = \"X.Y.Z\"' line")
+endif()
+set(_plugin_version "${CMAKE_MATCH_1}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/plugin.cfg")
+
+project(vpx-scorbit-plugin VERSION ${_plugin_version} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
