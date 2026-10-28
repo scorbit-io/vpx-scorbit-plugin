@@ -89,7 +89,8 @@ public:
    // not remembered, since it is transient. Per session rather than for the plugin's life,
    // because before pinmame 5fc234819 a table that was stopping also left the message unhandled.
    // An op beyond the
-   // address space SetAddressSpace gave answers OutOfRange at once, never reaching the host.
+   // address space SetAddressSpace gave answers OutOfRange, never reaching the host: at once,
+   // or when answered if the space became known while it was queued.
    Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
       const std::atomic<bool>& running);
 
@@ -151,7 +152,7 @@ private:
    void ResetSubscription();
    // Reads only; touches no shared state, so it runs without the lock.
    static void Answer(Request& request, const ReadFn& read, const WriteFn& write, uint64_t frame,
-      bool gameRunning);
+      bool gameRunning, uint64_t addressSpace);
    // Under m_mutex.
    void Complete(Queue& requests);
    // Reads only, into m_nextSnapshot; true when every range read in full.

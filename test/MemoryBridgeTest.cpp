@@ -504,6 +504,32 @@ void TestWriteBeyondTheAddressSpace()
    CHECK(calls == 3);
 }
 
+// A write queued before the API thread learns the space, as between SetRomId and the first
+// frame, is checked again when answered, and still never reaches the host.
+void TestWriteQueuedBeforeTheSpaceIsKnown()
+{
+   MemoryBridge bridge;
+   FakeMemory memory;
+   int calls = 0;
+   const MemoryBridge::ReadFn read = [&memory](uint32_t a, uint8_t* o, uint32_t s) { return memory.Read(a, o, s); };
+   const MemoryBridge::WriteFn write = [&memory, &calls](const std::vector<Wire::WriteOp>& ops)
+   {
+      calls++;
+      return memory.Write(ops);
+   };
+   bridge.SetGameRunning(true);
+   uint64_t frame = 0;
+   Wire::WriteReply reply;
+
+   auto pending = std::async(std::launch::async,
+      [&] { return bridge.Write({ { 0x3ffd, { 0xb4 } }, { 0x10000, { 1 } } }, reply, 2000, g_running); });
+   CHECK(WaitQueued(bridge, 1));
+   bridge.SetAddressSpace(0x10000);
+   CHECK(ServeUntil(bridge, pending, read, write, frame) == Result::OutOfRange);
+   CHECK(calls == 0);
+   CHECK(memory.At(0x3ffd) != 0xb4);
+}
+
 void TestMainCpuAddressSpace()
 {
    using namespace Overlay::Gen;
@@ -679,6 +705,7 @@ int main()
    TestATimedOutWriteIsNotRemembered();
    TestATakenWriteIsNeverAnsweredBusy();
    TestWriteBeyondTheAddressSpace();
+   TestWriteQueuedBeforeTheSpaceIsKnown();
    TestMainCpuAddressSpace();
    return ScorbitTest::Summary("memory_bridge_test");
 }
