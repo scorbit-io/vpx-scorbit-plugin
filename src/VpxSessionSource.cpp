@@ -115,6 +115,8 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
    // interesting lines happen while VPX sits at the table chooser.
    VpxSessionSource* self = static_cast<VpxSessionSource*>(userData);
    const uint64_t frame = ++self->m_renderedFrame;
+   // Before Service, so a write already queued on the game's first frame is range-checked too.
+   self->QueryAddressSpace();
    self->m_memory.Service(
       [self](uint32_t address, uint8_t* out, uint32_t size)
       {
@@ -134,12 +136,12 @@ void VpxSessionSource::OnPrepareFrame(const unsigned int, void* userData, void*)
          for (const Wire::WriteOp& op : ops)
             host.push_back({ op.address, static_cast<uint32_t>(op.bytes.size()), op.bytes.data() });
          // Pre-filled with the sentinel: #634's handler always overwrites it (0 on a timeout),
-         // while an unsubscribed broadcast, or one during a table stop, leaves it untouched.
+         // while an unsubscribed broadcast leaves it untouched, as did a table stop before
+         // pinmame 5fc234819, which answers 0 for that too.
          PinMAMEWriteMemoryMsg msg { 1, static_cast<uint32_t>(host.size()), host.data(), MemoryBridge::NO_WRITE_HANDLER };
          self->m_msgApi->BroadcastMsg(self->m_endpointId, self->m_writeMemoryMsgId, &msg);
          return msg.applied;
       });
-   self->QueryAddressSpace();
    self->UpdateDeclare();
    self->PostStatusNotice();
 }

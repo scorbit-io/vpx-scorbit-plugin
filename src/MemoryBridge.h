@@ -33,8 +33,8 @@
 namespace Scorbit
 {
 
-// The main CPU's address space in bytes, for the platforms whose CPU is known: WPC, Data East,
-// Whitestar (6809), Gottlieb System 3 and Alvin G (65C02). 0 for any other, which is unchecked.
+// The main CPU's address space in bytes, for the platforms whose CPU is known: WPC and Whitestar
+// (6809), Data East DMD (6808), Gottlieb System 3 and Alvin G (65C02). 0 for any other: unchecked.
 inline uint64_t MainCpuAddressSpace(uint64_t hardwareGen)
 {
    using namespace Overlay::Gen;
@@ -87,7 +87,8 @@ public:
    // because it may still be applied, and a daemon that retried would apply it twice. A host with no write handler answers Unsupported, and every Write until the
    // next Clear then answers it at once; a handler that applied nothing answers Busy and is
    // not remembered, since it is transient. Per session rather than for the plugin's life,
-   // because a table that is stopping also leaves the message unhandled. An op beyond the
+   // because before pinmame 5fc234819 a table that was stopping also left the message unhandled.
+   // An op beyond the
    // address space SetAddressSpace gave answers OutOfRange at once, never reaching the host.
    Result Write(const std::vector<Wire::WriteOp>& ops, Wire::WriteReply& out, int budgetMs,
       const std::atomic<bool>& running);
