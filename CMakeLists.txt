@@ -121,7 +121,10 @@ endif()
 set(STAGE_DIR "${CMAKE_BINARY_DIR}/stage/scorbit")
 # Staging is a POST_BUILD step, so an edit to plugin.cfg alone must relink to reach it.
 set_property(TARGET plugin-scorbit APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/plugin.cfg")
+# Recreated on every stage, so files a previous revision staged (the SDK library and
+# assets/ until SB-5991) never survive in the folder that is copied as the plugin.
 add_custom_command(TARGET plugin-scorbit POST_BUILD
+   COMMAND "${CMAKE_COMMAND}" -E rm -rf "${STAGE_DIR}"
    COMMAND "${CMAKE_COMMAND}" -E make_directory "${STAGE_DIR}"
    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:plugin-scorbit>" "${STAGE_DIR}/"
    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/plugin.cfg" "${STAGE_DIR}/"
