@@ -47,7 +47,8 @@ jobs:
         id: version
         shell: bash
         run: |
-          v=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' plugin.cfg)
+          # Windows checks plugin.cfg out with CRLF; strip CRs rather than rely on Git Bash's sed doing it.
+          v=$(tr -d '\r' < plugin.cfg | sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p')
           [ -n "$v" ] || { echo "plugin.cfg has no X.Y.Z version"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
             echo "tag ${GITHUB_REF_NAME} does not match plugin.cfg version $v"; exit 1
