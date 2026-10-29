@@ -44,11 +44,12 @@ The same on every platform:
   - It first looks for space the table does not draw in: on the playfield's display, outside the
     playfield window when that window does not fill the display (windowed mode, or a portrait
     table pillarboxed on a landscape screen).
-  - Failing that, it takes a corner the user chooses with a new plugin setting (`StatusCorner`,
-    default top right) and draws at a reduced, settable opacity (`StatusOpacity`).
-  - `StatusWindow = 0` turns the window off for a table or cabinet where every corner is in use,
-    leaving the notifications as the surface.
-  - `ShowStatus = 0` hides both, as today.
+  - **Failing that, by default there is no window**, and the notifications stay the surface. Lower
+    opacity does not stop a light covering game content, so the default keeps the requirement.
+  - A user who knows a corner their tables leave empty can opt in with a new plugin setting,
+    `StatusCorner` (unset by default; top left, top right, bottom left or bottom right), and
+    `StatusOpacity` for how strongly it draws there.
+  - `ShowStatus = 0` hides the window and the notifications, as today.
 - Shown only while VPX is the active application and a table is playing. Hidden when the user
   switches away, and shown again on return, so it never sits on top of another application.
 - Driven by the plugin's whole local status record, not the daemon's `Status` alone. The daemon
@@ -109,7 +110,7 @@ The same on every platform:
 | Not visible over VPX's fullscreen | macOS | windowed, borderless fullscreen and exclusive fullscreen (`Window.cpp:89-121`, 257-262), each with a cropped screenshot of the corner |
 | Hidden by exclusive fullscreen | Windows | VPX's `ExclusiveFullscreen` on BGFX D3D11/12. A topmost layered window over an exclusive swap chain is typically not shown; if so, that mode falls back to notifications, and the note records it |
 | Adds latency in borderless fullscreen | Windows | a window overlapping a fullscreen swap chain can take it off independent flip, adding a frame of latency. Compare `PresentMon` with the window shown and hidden |
-| Covers game content | all | windowed and pillarboxed tables: the window sits outside the playfield; full-bleed tables: screenshots of the chosen corner on a few tables, to set the default corner and opacity |
+| Covers game content | all | windowed and pillarboxed tables: the window sits outside the playfield; full-bleed tables: no window by default; with `StatusCorner` set, screenshots of that corner on a few tables |
 | Stays on top of other apps | all | switch away from VPX mid-game and back; the window hides and returns |
 | Hidden under the playfield | X11 | windowed and fullscreen, with and without a compositor; the window stays above after the playfield is raised |
 | Multi-screen cabinets | all | the window follows the playfield's display, not the backglass's; check on a two-display setup |
