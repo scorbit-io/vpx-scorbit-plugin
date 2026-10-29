@@ -37,12 +37,16 @@ jobs:
         include:
           # Runner choices follow vpinball/pinmame's libpinmame.yml, the closest
           # analogue in the programme. Its matrix covers twelve targets including
-          # Android, iOS and tvOS; this one covers the five in plugin.cfg.
+          # Android, iOS and tvOS; this one covers the six in plugin.cfg.
           #
           # pinmame uses windows-2025-vs2026 to match the toolchain VPX itself is
           # built with. windows-2025 is used here because it is a standard label with
           # no availability question; switch if the VS version ever matters.
           - { os: windows-2025,     platform: windows, arch: x64,     test: true }
+          # 32-bit runs natively on the x64 runner (WOW64), so the wire vectors are
+          # checked from a 32-bit build talking to a 64-bit daemon's encoding (SB-6069).
+          - { os: windows-2025,     platform: windows, arch: x86,     test: true,
+              cmake_extra: "-A Win32" }
           - { os: ubuntu-24.04,     platform: linux,   arch: x64,     test: true }
           # Native arm64, not cross-compiled, so the tests actually run on the target.
           - { os: ubuntu-24.04-arm, platform: linux,   arch: aarch64, test: true }
@@ -78,9 +82,15 @@ jobs:
   # headers fetched at configure time, so no package manager is involved. Kept apart
   # from the transport gate, whose speed is the point of it.
   windows-plugin:
-    name: windows-x64-plugin
+    name: windows-${{ matrix.arch }}-plugin
     runs-on: windows-2025
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, vs_arch: x64 }
+          - { arch: x86, vs_arch: Win32 }
 
     steps:
       - name: Check out
@@ -89,7 +99,7 @@ jobs:
       # Visual Studio generator, which finds MSVC unaided; Ninja would need a vcvars
       # step first.
       - name: Configure
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B build -A ${{ matrix.vs_arch }}
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -104,11 +114,18 @@ jobs:
         shell: pwsh
         run: |
           $stage = "build/stage/scorbit"
-          $dll = (Select-String -Path plugin.cfg -Pattern '^windows\.x64\s*=\s*"(.+)"').Matches.Groups[1].Value
-          if (-not $dll) { throw "plugin.cfg declares no windows.x64 library" }
+          $key = "windows.${{ matrix.arch }}"
+          $dll = (Select-String -Path plugin.cfg -Pattern ('^' + [regex]::Escape($key) + '\s*=\s*"(.+)"')).Matches.Groups[1].Value
+          if (-not $dll) { throw "plugin.cfg declares no $key library" }
           foreach ($f in @($dll, "plugin.cfg")) {
             if (-not (Test-Path (Join-Path $stage $f))) { throw "staged folder is missing $f" }
           }
+          # VPX picks the key by its own pointer width, so the DLL has to match the key.
+          $bytes = [IO.File]::ReadAllBytes((Join-Path $stage $dll))
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          $want = @{ x64 = 0x8664; x86 = 0x14c }["${{ matrix.arch }}"]
+          if ($machine -ne $want) { throw ("{0} is machine 0x{1:x}, expected 0x{2:x}" -f $dll, $machine, $want) }
           # The plugin carries no SDK and no credentials since SB-5991.
           if (Get-ChildItem $stage -Recurse -Filter "*scorbit_sdk*") { throw "a scorbit_sdk library was staged" }
           Get-ChildItem $stage -Recurse -File | ForEach-Object { "{0,10}  {1}" -f $_.Length, $_.FullName.Substring((Resolve-Path $stage).Path.Length + 1) }
@@ -116,7 +133,7 @@ jobs:
       - name: Upload the staged plugin
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: plugin-scorbit-windows-x64
+          name: plugin-scorbit-windows-${{ matrix.arch }}
           path: build/stage/scorbit
           if-no-files-found: error
           retention-days: 14

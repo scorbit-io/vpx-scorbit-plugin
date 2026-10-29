@@ -42,7 +42,12 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-CI uploads the staged Windows plugin as a workflow artifact.
+For a 32-bit VPX, configure with `-A Win32` instead. That builds
+`plugin-scorbit.dll`, which a 32-bit VPX loads through `plugin.cfg`'s
+`windows.x86` key, beside the x64 `plugin-scorbit64.dll`. It still talks to the
+64-bit Scorbit daemon, so 32-bit VPX is supported on 64-bit Windows.
+
+CI uploads the staged Windows plugins, x64 and x86, as workflow artifacts.
 
 To build and test only the transport — the wire protocol, socket worker and wire
 dump — with no VPX headers and no network fetch:
