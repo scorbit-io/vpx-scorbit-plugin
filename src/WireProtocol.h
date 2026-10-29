@@ -515,10 +515,13 @@ struct GameOp
    bool operator==(const GameOp&) const = default;
 };
 
-// Game request: one commit, in call order. The reply is empty.
+// Game request: one commit, in call order. The reply is empty. batch_id leads on the wire:
+// counted from 1 per plugin load and kept across reconnects, so the daemon acknowledges a
+// replayed batch without applying it twice.
 struct GameBatch
 {
    std::vector<GameOp> ops;
+   uint32_t batchId = 0;
 
    bool operator==(const GameBatch&) const = default;
 };

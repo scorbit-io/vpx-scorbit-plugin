@@ -1607,13 +1607,14 @@ void TestAuthoredTableWithAuthoredDaemon()
    // --- The Game committed before it, then one refused, which is logged and survived
    CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
    Wire::GameBatch batch;
-   CHECK(Wire::Decode(msg.payload, batch) && batch == start);
+   CHECK(Wire::Decode(msg.payload, batch) && batch.ops == start.ops);
+   CHECK_MSG(batch.batchId == 1, "batch ids count from 1 per plugin load");
    CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
 
    const Wire::GameBatch score { { Op(Wire::GAME_SCORE, 1, 12340, 0) } };
    source.Commit(1, score);
    CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
-   CHECK(Wire::Decode(msg.payload, batch) && batch == score);
+   CHECK(Wire::Decode(msg.payload, batch) && batch.ops == score.ops && batch.batchId == 2);
    CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, msg.header.seq,
       Wire::Encode(Wire::ErrorPayload { Wire::ERR_TOO_LARGE, "queue full" })));
 
@@ -1622,7 +1623,7 @@ void TestAuthoredTableWithAuthoredDaemon()
    source.Commit(1, end);
    source.Set(MakeDeclare("", 0, 0, 0, 0), { });
    CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
-   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch == end, "the session continues past an error");
+   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == end.ops, "the session continues past an error");
    CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
    CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
    CHECK(Wire::Decode(msg.payload, declare));
@@ -1686,12 +1687,107 @@ void TestGamesCommittedBeforeConnecting()
    CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
    Wire::GameBatch batch;
    CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
-   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch == start, "the game's start, not the batch before it");
+   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == start.ops, "the game's start, not the batch before it");
    CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
    CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
-   CHECK(Wire::Decode(msg.payload, batch) && batch == score);
+   CHECK(Wire::Decode(msg.payload, batch) && batch.ops == score.ops);
    CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
    CHECK_MSG(peer.Silent(300), "nothing else follows");
+   worker.Stop();
+}
+
+// The daemon acknowledged the game's start, then the session dropped: the batches committed
+// meanwhile go on as is after the reconnect, and nothing acknowledged is sent again.
+void TestGameContinuesAcrossReconnect()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball") } };
+   source.Commit(1, start);
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Silent(200));
+
+   peer.CloseClient();
+   const Wire::GameBatch tail { { Op(Wire::GAME_SCORE, 1, 12340, 0) } };
+   source.Commit(1, tail);
+
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   Wire::GameBatch batch;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == tail.ops,
+      "the tail of a game whose start was acknowledged, not the acknowledged start again");
+   CHECK_MSG(batch.batchId == 2, "the id runs on across the reconnect");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(peer.Silent(300), "nothing acknowledged is replayed");
+   worker.Stop();
+}
+
+// A batch in flight when the session dropped, never acknowledged, is replayed after the
+// reconnect with its original batch_id, so the daemon can skip it if it had applied it.
+void TestInFlightGameKeepsItsId()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball") } };
+   source.Commit(1, start);
+   Wire::GameBatch first;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, first));
+   peer.CloseClient(); // before any acknowledgement
+
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   Wire::GameBatch again;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK_MSG(Wire::Decode(msg.payload, again) && again == first, "the same batch, batch_id included");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(peer.Silent(300), "sent once more, not again");
    worker.Stop();
 }
 
@@ -1750,6 +1846,8 @@ int main()
    TestRefusedHelloReason();
    TestAuthoredTableWithAuthoredDaemon();
    TestGamesCommittedBeforeConnecting();
+   TestGameContinuesAcrossReconnect();
+   TestInFlightGameKeepsItsId();
    TestAuthoredTableWithoutAuthoredDaemon();
    return ScorbitTest::Summary("socket_worker_test");
 }

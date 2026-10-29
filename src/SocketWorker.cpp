@@ -437,16 +437,21 @@ bool SocketWorker::Connect()
    m_seq = 0;
    m_haveDeclared = false;
    m_declared = { };
-   // A new session gets only the latest game committed while no daemon listened, from its
-   // start: batches without the game_start before them mean nothing to it.
-   m_source.TakeGames(m_games);
-   size_t keepFrom = m_games.size();
-   for (size_t i = m_games.size(); i-- > 0;)
-      if (!m_games[i].batch.ops.empty() && m_games[i].batch.ops.front().kind == Wire::GAME_START)
-      {
-         keepFrom = i;
-         break;
-      }
+   // Only never-acknowledged batches are left to replay, so nothing is counted twice. They go
+   // on as is when they continue a game the daemon acknowledged the start of; otherwise those
+   // before the first game_start are a fragment the new session cannot place, and are dropped.
+   TakeSourceGames();
+   size_t keepFrom = 0;
+   if (m_games.empty() || m_games.front().epoch != m_gameOpenEpoch)
+   {
+      keepFrom = m_games.size();
+      for (size_t i = 0; i < m_games.size(); i++)
+         if (!m_games[i].batch.ops.empty() && m_games[i].batch.ops.front().kind == Wire::GAME_START)
+         {
+            keepFrom = i;
+            break;
+         }
+   }
    if (keepFrom != 0)
    {
       Log(LOG_LEVEL_INFO, "Socket: dropped " + std::to_string(keepFrom) + " Game batches committed while disconnected");
@@ -940,6 +945,17 @@ bool SocketWorker::Handshake()
    return true;
 }
 
+void SocketWorker::TakeSourceGames()
+{
+   std::deque<GamePost> taken;
+   m_source.TakeGames(taken);
+   for (GamePost& post : taken)
+   {
+      post.batch.batchId = m_nextBatchId++;
+      m_games.push_back(std::move(post));
+   }
+}
+
 bool SocketWorker::AuthoredAllowed() const
 {
    return m_peerMinor >= 1 && (m_peerCapabilities & Wire::CAP_AUTHORED_TABLES) != 0;
@@ -1013,7 +1029,7 @@ bool SocketWorker::MaybeDeclare()
 
 bool SocketWorker::SendGames()
 {
-   m_source.TakeGames(m_games);
+   TakeSourceGames();
    while (!m_games.empty() && m_haveDeclared)
    {
       GamePost& front = m_games.front();
@@ -1043,9 +1059,17 @@ bool SocketWorker::SendGames()
       Wire::Message reply;
       if (!Exchange(Wire::TYPE_GAME, payload, GAME_TIMEOUT_MS, reply))
          return false;
-      m_games.pop_front();
       if (!reply.header.IsError())
+      {
+         // game_start is only ever first in a batch and game_end only last.
+         if (front.batch.ops.front().kind == Wire::GAME_START)
+            m_gameOpenEpoch = front.epoch;
+         if (front.batch.ops.back().kind == Wire::GAME_END)
+            m_gameOpenEpoch = 0;
+         m_games.pop_front();
          continue;
+      }
+      m_games.pop_front();
       // Logged once per code per Declare and otherwise carried on: the daemon drops what it
       // must (too_large drops the whole game), and a later game can still score.
       Wire::ErrorPayload e;

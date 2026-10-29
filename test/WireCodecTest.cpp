@@ -661,17 +661,17 @@ void TestSliceFiveGoldenVectors()
       uint32_t seq;
       Wire::GameBatch batch;
    } games[] = {
-      { "start by button", "0c000000" "3000" "0000" "09000000" "0100" "01" "00", 9,
-         { { Op(Wire::GAME_START, 0) } } },
-      { "ball 1, player 1 scores 12,340",
-         "1a000000" "3000" "0000" "0a000000" "0200" "03" "01" "05" "01" "3430000000000000" "00000000", 10,
-         { { Op(Wire::GAME_BALL, 1), Op(Wire::GAME_SCORE, 1, 12340, 0) } } },
-      { "mode completed, then game end",
-         "1a000000" "3000" "0000" "0b000000" "0200" "08" "0c00" "4d423a4d756c746962616c6c" "02", 11,
-         { { Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball"), Op(Wire::GAME_END) } } },
-      { "add expiring for 3 s",
-         "1d000000" "3000" "0000" "0c000000" "0100" "07" "03000000" "0c00" "4d423a4d756c746962616c6c", 12,
-         { { Op(Wire::GAME_ADD_MODE_EXPIRING, 0, 0, 0, 3, "MB:Multiball") } } },
+      { "batch 1, start by button", "10000000" "3000" "0000" "09000000" "01000000" "0100" "01" "00", 9,
+         { { Op(Wire::GAME_START, 0) }, 1 } },
+      { "batch 2, add expiring for 3 s",
+         "21000000" "3000" "0000" "0a000000" "02000000" "0100" "07" "03000000" "0c00" "4d423a4d756c746962616c6c", 10,
+         { { Op(Wire::GAME_ADD_MODE_EXPIRING, 0, 0, 0, 3, "MB:Multiball") }, 2 } },
+      { "batch 3, ball 1, player 1 scores 12,340",
+         "1e000000" "3000" "0000" "0b000000" "03000000" "0200" "03" "01" "05" "01" "3430000000000000" "00000000", 11,
+         { { Op(Wire::GAME_BALL, 1), Op(Wire::GAME_SCORE, 1, 12340, 0) }, 3 } },
+      { "batch 4, mode completed, then game end",
+         "1e000000" "3000" "0000" "0c000000" "04000000" "0200" "08" "0c00" "4d423a4d756c746962616c6c" "02", 12,
+         { { Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball"), Op(Wire::GAME_END) }, 4 } },
    };
    for (const auto& g : games)
    {
@@ -747,16 +747,19 @@ void TestSliceFiveGoldenVectors()
 void TestGameRejections()
 {
    const auto rejects = [](const std::string& hex) { Wire::GameBatch out; return !Wire::Decode(ScorbitTest::Unhex(hex), out); };
-   CHECK_MSG(rejects("0000"), "count 0");
-   CHECK_MSG(rejects("0101" + Repeat("0a", 257)), "count 257");
-   CHECK_MSG(!rejects("0001" + Repeat("0a", 256)), "count 256");
-   CHECK_MSG(rejects("0100" "0b"), "unknown kind 11");
-   CHECK_MSG(rejects("0100" "00"), "unknown kind 0");
-   CHECK_MSG(rejects("0200" "0a" "0100"), "game_start not first");
-   CHECK_MSG(rejects("0200" "02" "0a"), "game_end not last");
-   CHECK_MSG(!rejects("0200" "0100" "02"), "start then end");
-   CHECK_MSG(rejects("0100" "05" "01" "3430"), "a score cut short");
-   CHECK_MSG(rejects("0200" "0a"), "fewer ops than the count");
+   // Every payload leads with its u32 batch_id.
+   const std::string id = "07000000";
+   CHECK_MSG(rejects("070000"), "shorter than a batch_id");
+   CHECK_MSG(rejects(id + "0000"), "count 0");
+   CHECK_MSG(rejects(id + "0101" + Repeat("0a", 257)), "count 257");
+   CHECK_MSG(!rejects(id + "0001" + Repeat("0a", 256)), "count 256");
+   CHECK_MSG(rejects(id + "0100" "0b"), "unknown kind 11");
+   CHECK_MSG(rejects(id + "0100" "00"), "unknown kind 0");
+   CHECK_MSG(rejects(id + "0200" "0a" "0100"), "game_start not first");
+   CHECK_MSG(rejects(id + "0200" "02" "0a"), "game_end not last");
+   CHECK_MSG(!rejects(id + "0200" "0100" "02"), "start then end");
+   CHECK_MSG(rejects(id + "0100" "05" "01" "3430"), "a score cut short");
+   CHECK_MSG(rejects(id + "0200" "0a"), "fewer ops than the count");
 
    // Encode holds to the same rules rather than sending what the daemon refuses.
    CHECK(Wire::Encode(Wire::GameBatch { }).empty());

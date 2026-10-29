@@ -735,6 +735,7 @@ std::vector<uint8_t> Encode(const GameBatch& v)
    if (!ValidGameBatch(v))
       return { };
    Writer w;
+   w.U32(v.batchId);
    w.U16(static_cast<uint16_t>(v.ops.size()));
    for (const GameOp& op : v.ops)
    {
@@ -773,7 +774,7 @@ bool Decode(const std::vector<uint8_t>& payload, GameBatch& out)
    uint16_t count = 0;
    out.ops.clear();
    // Every op is at least its kind byte, so a count the payload cannot hold is refused first.
-   if (!r.U16(count) || count == 0 || count > MAX_GAME_OPS || r.Remaining() < count)
+   if (!r.U32(out.batchId) || !r.U16(count) || count == 0 || count > MAX_GAME_OPS || r.Remaining() < count)
       return false;
    out.ops.reserve(count);
    for (uint16_t i = 0; i < count && r.Ok(); i++)

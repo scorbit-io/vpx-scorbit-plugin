@@ -191,6 +191,8 @@ private:
    bool SendGames();
    // HelloAck offered authored tables at a minor that carries them.
    bool AuthoredAllowed() const;
+   // Moves what the source committed into m_games, giving each batch the next id.
+   void TakeSourceGames();
    // Takes a newly posted declaration into m_current, if there is one.
    void TakeDeclare();
    bool Dispatch(const Wire::Message& msg);
@@ -261,8 +263,13 @@ private:
    uint16_t m_peerMinor = 0;
    uint32_t m_peerCapabilities = 0;
    bool m_loggedNoAuthored = false;      // once per connection
-   // Batches taken from the source and not yet sent, kept across connections.
+   // Batches taken from the source and not yet acknowledged, kept across connections.
    std::deque<GamePost> m_games;
+   // The Declare epoch whose game_start the daemon acknowledged, 0 when no game is open. The
+   // daemon keeps that game open across a reconnect to the same table, so its tail goes on as is.
+   uint64_t m_gameOpenEpoch = 0;
+   // Each batch's id is fixed when it is taken from the source, so a replay carries its own.
+   uint32_t m_nextBatchId = 1;
    // Game outcomes already logged since the last Declare: error codes by bit, and bit 0 for
    // batches dropped because nothing authored was declared.
    uint32_t m_gameLogged = 0;
