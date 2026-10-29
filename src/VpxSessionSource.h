@@ -20,6 +20,7 @@
 #include "AuthoredTable.h"
 #include "DmdOverlay.h"
 #include "DmdTap.h"
+#include "GameQueue.h"
 #include "MemoryBridge.h"
 #include "SocketWorker.h"
 #include "StatusNotice.h"
@@ -158,12 +159,9 @@ private:
    bool m_loggedDroppedOps = false;
    bool m_loggedIgnoredCall = false;
 
-   // Committed batches, API thread to worker. Bounded in ops; past the bound, batches are
-   // dropped until one starts a game, so the daemon never sees a game without its start.
-   std::mutex m_gameMutex;
-   std::deque<GamePost> m_games;
-   size_t m_queuedOps = 0;
-   bool m_gameOverflow = false;
+   // Committed batches, API thread to worker; when full it keeps the newest games.
+   GameQueue m_games { MAX_QUEUED_GAME_OPS };
+   bool m_loggedQueueDrop = false;
 
    Latch<DeclareSnapshot> m_declares;
    TapView m_workerTap; // worker only

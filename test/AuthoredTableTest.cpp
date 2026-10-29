@@ -4,14 +4,17 @@
 // native paths become UTF-8, and that a dump never holds the bytes a sender marks sensitive.
 
 #include "AuthoredTable.h"
+#include "GameQueue.h"
 #include "WireDump.h"
 
 #include "Check.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -116,6 +119,64 @@ void TestDumpRedactsSensitiveSpans()
    CHECK(std::string(clipped.end() - 3, clipped.end()) == "***");
 }
 
+
+GamePost Post(uint8_t first, size_t ops)
+{
+   GamePost post;
+   post.epoch = 1;
+   Wire::GameOp op;
+   op.kind = first;
+   post.batch.ops.push_back(op);
+   op.kind = Wire::GAME_CLEAR_MODES;
+   post.batch.ops.resize(ops, op);
+   return post;
+}
+
+std::vector<GamePost> Posts(std::initializer_list<std::pair<uint8_t, size_t>> list)
+{
+   std::vector<GamePost> out;
+   for (const auto& [first, ops] : list)
+      out.push_back(Post(first, ops));
+   return out;
+}
+
+std::vector<size_t> Sizes(GameQueue& q)
+{
+   std::deque<GamePost> taken;
+   q.TakeAll(taken);
+   std::vector<size_t> sizes;
+   for (const GamePost& p : taken)
+      sizes.push_back(p.batch.ops.size());
+   return sizes;
+}
+
+// While no daemon takes anything the queue fills; a new game then evicts the oldest whole
+// game rather than being refused, so the newest games are the ones kept.
+void TestGameQueueKeepsTheNewestGames()
+{
+   GameQueue q(10);
+   CHECK(!q.Push(Posts({ { Wire::GAME_START, 3 }, { Wire::GAME_CLEAR_MODES, 2 } })));
+   CHECK(!q.Push(Posts({ { Wire::GAME_START, 5 } })));
+   CHECK(q.QueuedOps() == 10);
+   CHECK_MSG(q.Push(Posts({ { Wire::GAME_START, 4 } })), "a drop is reported");
+   CHECK_MSG(Sizes(q) == (std::vector<size_t> { 5, 4 }), "the oldest game, start and tail, went first");
+   CHECK(q.QueuedOps() == 0);
+}
+
+// One game alone outgrows the queue: its later batches are refused until a new start, which
+// may then evict it whole.
+void TestGameQueueRefusesAnOutgrownGame()
+{
+   GameQueue q(6);
+   CHECK(!q.Push(Posts({ { Wire::GAME_START, 3 } })));
+   CHECK(q.Push(Posts({ { Wire::GAME_CLEAR_MODES, 4 } })));
+   CHECK_MSG(q.Push(Posts({ { Wire::GAME_CLEAR_MODES, 1 } })), "the rest of that game is refused, though it would fit");
+   CHECK(q.QueuedOps() == 3);
+   CHECK_MSG(q.Push(Posts({ { Wire::GAME_START, 5 } })), "the new game evicts the old one");
+   CHECK(Sizes(q) == std::vector<size_t> { 5 });
+   CHECK_MSG(!q.Push(Posts({ { Wire::GAME_CLEAR_MODES, 1 } })), "and the new game's tail is taken again");
+   CHECK(Sizes(q) == std::vector<size_t> { 1 });
+}
 }
 
 int main()
@@ -123,5 +184,7 @@ int main()
    TestMachineIds();
    TestNativePaths();
    TestDumpRedactsSensitiveSpans();
+   TestGameQueueKeepsTheNewestGames();
+   TestGameQueueRefusesAnOutgrownGame();
    return ScorbitTest::Summary("authored_table_test");
 }

@@ -26,8 +26,6 @@ namespace Scorbit
 // drains them, which only happens if VPX has stopped ticking; keep the newest.
 static constexpr size_t LOG_QUEUE_LIMIT = 256;
 static constexpr int NOTICE_MS = 5000;
-// The daemon's own Game queue cap (slice 5). A script that never commits is held to it too.
-static constexpr size_t MAX_QUEUED_GAME_OPS = 16384;
 
 VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
    int (*showStatus)())
@@ -117,6 +115,7 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    self->m_loggedRomWins = false;
    self->m_loggedDroppedOps = false;
    self->m_loggedIgnoredCall = false;
+   self->m_loggedQueueDrop = false;
    self->m_epoch++;
    self->UpdateDeclare();
 }
@@ -276,36 +275,16 @@ void VpxSessionSource::ScriptCommit()
       posts.back().batch.ops.push_back(std::move(op));
    }
 
-   bool overflowed = false;
+   if (m_games.Push(std::move(posts)) && !m_loggedQueueDrop)
    {
-      std::lock_guard lock(m_gameMutex);
-      for (GamePost& post : posts)
-      {
-         const bool starts = post.batch.ops.front().kind == Wire::GAME_START;
-         if (m_gameOverflow && !starts)
-            continue;
-         if (m_queuedOps + post.batch.ops.size() > MAX_QUEUED_GAME_OPS)
-         {
-            overflowed = !m_gameOverflow;
-            m_gameOverflow = true;
-            continue;
-         }
-         m_gameOverflow = false;
-         m_queuedOps += post.batch.ops.size();
-         m_games.push_back(std::move(post));
-      }
+      m_loggedQueueDrop = true;
+      LOGW("script: Scorbit game calls dropped, the daemon is not taking them; the oldest games go first (logged once per table)"s);
    }
-   if (overflowed)
-      LOGW("script: Scorbit game calls dropped, the daemon is not taking them; the game resumes at its next start"s);
 }
 
 void VpxSessionSource::TakeGames(std::deque<GamePost>& out)
 {
-   std::lock_guard lock(m_gameMutex);
-   for (GamePost& post : m_games)
-      out.push_back(std::move(post));
-   m_games.clear();
-   m_queuedOps = 0;
+   m_games.TakeAll(out);
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)
