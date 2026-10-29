@@ -4,6 +4,7 @@
 #include "DmdTap.h"
 #include "DmdOverlay.h"
 #include "QuitHook.h"
+#include "ScriptBinding.h"
 #include "SocketWorker.h"
 #include "VpxSessionSource.h"
 
@@ -185,6 +186,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    // The daemon listens and the plugin connects, so this starts whether or not
    // a daemon is running and retries once a second until one is.
    vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get);
+   // Before the table script runs, which is when its CreateObject is resolved.
+   RegisterScriptBinding(msgApi, endpointId, vpxSession);
    {
       SocketWorkerConfig cfg;
       cfg.socketPath = setSocketPath_Get();
@@ -229,6 +232,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
 
    controllers->Unsubscribe();
    controllers = nullptr;
+   UnregisterScriptBinding();
    delete vpxSession;
    vpxSession = nullptr;
    if (!unloadingAtQuit)

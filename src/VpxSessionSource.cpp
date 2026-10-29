@@ -74,6 +74,13 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
       self->m_vpxApi->GetTableInfo(&info);
       if (info.path != nullptr)
          tablePath = Wire::TableFileName(info.path);
+      // Every table, declared or not and with or without PinMAME: the daemon finds the
+      // script from these (SB-5990). Never logged.
+      self->m_authored.tablePath = NativePathToUtf8(info.path);
+      VPXInfo vpx { };
+      self->m_vpxApi->GetVpxInfo(&vpx);
+      self->m_authored.vpxPath = NativePathToUtf8(vpx.path);
+      self->m_authored.prefPath = NativePathToUtf8(vpx.prefPath);
    }
 
    self->m_tablePath = std::move(tablePath);
@@ -103,6 +110,7 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    self->m_addressSpaceKnown = false;
    self->m_memory.SetAddressSpace(0);
    self->m_tablePath.clear();
+   self->m_authored = { };
    self->m_epoch++;
    self->UpdateDeclare();
 }
@@ -169,6 +177,21 @@ void VpxSessionSource::PostStatusNotice()
    LOGI("Status notice: "s + text);
    // Updates ours in place while VPX still shows it, else posts a new one (vpinball #4228).
    m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, text.c_str(), NOTICE_MS);
+}
+
+void VpxSessionSource::DeclareMachine(const std::string& machineId)
+{
+   // Logged and ignored rather than raised: a script error would stop the author's table.
+   if (!ValidMachineId(machineId))
+   {
+      LOGW("script: Scorbit.Declare ignored, \""s + machineId.substr(0, 80) + "\" is not a machine id (1 to 64 printable characters, no spaces)");
+      return;
+   }
+   if (!m_authored.machineId.empty() && m_authored.machineId != machineId)
+      LOGI("script: Scorbit.Declare replaces machine "s + m_authored.machineId + " with " + machineId);
+   else
+      LOGI("script: Scorbit.Declare machine "s + machineId);
+   m_authored.machineId = machineId;
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)

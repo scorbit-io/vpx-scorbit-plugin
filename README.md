@@ -185,6 +185,27 @@ warning (`[!]`) lasts. Without a daemon session for 5
 seconds, the plugin says so itself, with the daemon's reason when it refused the
 connection. `ShowStatus = 0` turns all of it off.
 
+## Table scripts
+
+**In progress.** An original table, one with no ROM for the daemon to recognise, will be
+able to identify itself to Scorbit from its script:
+
+```vbscript
+Dim Scorbit
+On Error Resume Next
+Set Scorbit = CreateObject("Scorbit.Table")
+On Error Goto 0
+If IsObject(Scorbit) Then Scorbit.Declare "<machine id>"
+```
+
+VPX hands that `CreateObject` to this plugin. Without the plugin it fails, which is why
+the script guards it: the table must still run on a VPX without Scorbit. `Declare` takes
+a machine id of 1 to 64 printable characters; anything else is logged and ignored rather
+than raised as a script error. At each table start the plugin also notes the table, VPX
+and preferences folders, which the daemon will need to find the table's script. None of
+this reaches the daemon yet: it waits for the protocol messages that carry it. Those paths
+never appear in the log, and a wire dump blanks them.
+
 ## Layout
 
 ```
