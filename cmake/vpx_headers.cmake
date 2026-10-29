@@ -38,6 +38,9 @@ _fetch_header("${_vpx_raw}/MsgPlugin.h"        "${VPX_HEADERS_DIR}/plugins/MsgPl
 _fetch_header("${_vpx_raw}/ControllerPlugin.h" "${VPX_HEADERS_DIR}/plugins/ControllerPlugin.h" "b9b48930d6ed63844c5e341aad91d3c8cff01f02ee45dfbba2a45c0c9bdf3f53")
 _fetch_header("${_vpx_raw}/VPXPlugin.h"        "${VPX_HEADERS_DIR}/plugins/VPXPlugin.h"        "7f821c5f309c554e42db69c3afb295deed77a1dcc4579627dc38df20ca6cad19")
 _fetch_header("${_vpx_raw}/LoggingPlugin.h"    "${VPX_HEADERS_DIR}/plugins/LoggingPlugin.h"    "46e98350f86e34936cc250824421de366e5dce5ecd1636ba904faddae537f4b0")
+# The script bindings (SB-5990). Upstream marks this API a work in progress, so re-check
+# it on every pin bump: a changed ScriptClassDef or ScriptVariant breaks the bindings silently.
+_fetch_header("${_vpx_raw}/ScriptablePlugin.h" "${VPX_HEADERS_DIR}/plugins/ScriptablePlugin.h" "b947292e29f0f947177b45f09aecfb5db9e5fec5ae8c484c9535cdb90dab8a91")
 
 set(_pinmame_raw "https://raw.githubusercontent.com/vpinball/pinmame/${PINMAME_PLUGIN_API_COMMIT}/src/libpinmame")
 _fetch_header("${_pinmame_raw}/PinMAMEPlugin.h" "${VPX_HEADERS_DIR}/pinmame/PinMAMEPlugin.h" "69a0b80b421bcddabbaa20521b4b70e25e22ddeff1611fa18828f8e2b9b4bcf5")
