@@ -39,9 +39,22 @@ The same on every platform:
   room for the glyph).
 - Redrawn only when the status changes. A pulse is an OS-side animation (Core Animation, or a
   layered-window timer), never per-frame work on VPX's render path.
-- Placed on the display the playfield window is on, in a corner chosen by a new plugin setting
-  (`StatusCorner`, default top right). `ShowStatus = 0` hides it, along with the notifications.
-- The daemon's `Status` (slice 4) drives it: no wire change.
+- Placement, against "never cover game content": no corner of a full-bleed fullscreen table is
+  guaranteed free, so the plugin cannot promise that on its own.
+  - It first looks for space the table does not draw in: on the playfield's display, outside the
+    playfield window when that window does not fill the display (windowed mode, or a portrait
+    table pillarboxed on a landscape screen).
+  - Failing that, it takes a corner the user chooses with a new plugin setting (`StatusCorner`,
+    default top right) and draws at a reduced, settable opacity (`StatusOpacity`).
+  - `StatusWindow = 0` turns the window off for a table or cabinet where every corner is in use,
+    leaving the notifications as the surface.
+  - `ShowStatus = 0` hides both, as today.
+- Shown only while VPX is the active application and a table is playing. Hidden when the user
+  switches away, and shown again on return, so it never sits on top of another application.
+- Driven by the plugin's whole local status record, not the daemon's `Status` alone. The daemon
+  cannot report a connection that never started, or one that dropped after being healthy, so the
+  light also shows the plugin's own no-session state, after the same 5 s grace the
+  notifications use (`StatusRecord`, `StatusNotifier::NO_SESSION_AFTER`). No wire change.
 - Drawing: the Scorbitron's colours and pulses (REQ-6.2) plus the REQ-6.5 glyph, so no state is
   told by colour alone. The support text stays in the notification, which keeps posting
   `[!]` states (SB-6006).
@@ -52,7 +65,8 @@ The same on every platform:
 
 - An `NSPanel` with `NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless`.
   `canBecomeKeyWindow` and `canBecomeMainWindow` return `NO`, `ignoresMouseEvents = YES`,
-  `hidesOnDeactivate = NO`, `opaque = NO` with a clear background.
+  `hidesOnDeactivate = YES`, so it goes when VPX stops being the active application and comes back
+  when it returns; `opaque = NO`, with a clear background.
 - `collectionBehavior` includes `.canJoinAllSpaces`, `.fullScreenAuxiliary` and `.stationary`.
   VPX's fullscreen is SDL's, which on macOS puts the window in its own Space by default; only a
   full-screen-auxiliary window may show there.
@@ -66,11 +80,22 @@ The same on every platform:
   WS_EX_TOOLWINDOW`, `WS_POPUP`, shown with `SW_SHOWNOACTIVATE`, drawn with
   `UpdateLayeredWindow` (per-pixel alpha).
 - Owned by no window, so that clicking VPX never reorders it below.
+- Hidden while the foreground window belongs to another process. A `SetWinEventHook` on
+  `EVENT_SYSTEM_FOREGROUND`, out of context, tells the plugin when the foreground changes;
+  the plugin shows the window again when VPX's process regains it.
 
 ### Linux
 
 - X11: an override-redirect window with an empty input shape (XShape), so it takes no input and
   no focus.
+  - The window manager does not stack an override-redirect window, so nothing keeps it above the
+    playfield by itself. The plugin restacks it: `XRaiseWindow` after the playfield is mapped or
+    raised (seen from `ConfigureNotify` on the playfield's parent), and on each state change.
+    Raising an override-redirect window moves no focus.
+  - It is unmapped while another application's window is focused (`_NET_ACTIVE_WINDOW`), as on
+    the other platforms.
+  - A compositing window manager may unredirect a fullscreen playfield, which can hide any window
+    above it; the prototype's risk table covers that.
 - Wayland: clients cannot position windows or keep them on top, short of the layer-shell
   protocol, which SDL and most compositors used for VPX don't offer. **Unsupported**: the
   notification stays the surface. The plugin detects the driver the way VPX does
@@ -84,6 +109,9 @@ The same on every platform:
 | Not visible over VPX's fullscreen | macOS | windowed, borderless fullscreen and exclusive fullscreen (`Window.cpp:89-121`, 257-262), each with a cropped screenshot of the corner |
 | Hidden by exclusive fullscreen | Windows | VPX's `ExclusiveFullscreen` on BGFX D3D11/12. A topmost layered window over an exclusive swap chain is typically not shown; if so, that mode falls back to notifications, and the note records it |
 | Adds latency in borderless fullscreen | Windows | a window overlapping a fullscreen swap chain can take it off independent flip, adding a frame of latency. Compare `PresentMon` with the window shown and hidden |
+| Covers game content | all | windowed and pillarboxed tables: the window sits outside the playfield; full-bleed tables: screenshots of the chosen corner on a few tables, to set the default corner and opacity |
+| Stays on top of other apps | all | switch away from VPX mid-game and back; the window hides and returns |
+| Hidden under the playfield | X11 | windowed and fullscreen, with and without a compositor; the window stays above after the playfield is raised |
 | Multi-screen cabinets | all | the window follows the playfield's display, not the backglass's; check on a two-display setup |
 | Cost on the render path | all | none by design: frame times with and without the window, from VPX's own performance overlay |
 
