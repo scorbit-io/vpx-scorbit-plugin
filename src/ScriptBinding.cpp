@@ -66,7 +66,8 @@ public:
    {
       if (s_session == nullptr)
          return;
-      if (!std::isfinite(score) || std::fabs(score) > MAX_EXACT_SCORE)
+      // A fraction is refused rather than truncated, so 12.9 never silently scores 12.
+      if (!std::isfinite(score) || std::fabs(score) > MAX_EXACT_SCORE || score != std::trunc(score))
       {
          s_session->ScriptCallIgnored("Scorbit.SetScore ignored, the score is not an integer within 2^53");
          return;
