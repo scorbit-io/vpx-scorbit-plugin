@@ -22,8 +22,10 @@ namespace Scorbit
 class VpxSessionSource;
 
 // API thread, once each at plugin load and unload. Without the scriptable API (an older
-// VPX), registration logs once and the plugin runs on without the object.
+// VPX), registration logs once and the plugin runs on without the object. At quit a
+// script object may outlive the unload and still point at the class, so then the class
+// is left registered for the process to end with, and objects only stop forwarding.
 void RegisterScriptBinding(const MsgPluginAPI* msgApi, uint32_t endpointId, VpxSessionSource* session);
-void UnregisterScriptBinding();
+void UnregisterScriptBinding(bool atQuit);
 
 }

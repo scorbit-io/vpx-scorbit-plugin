@@ -75,9 +75,11 @@ void RegisterScriptBinding(const MsgPluginAPI* msgApi, uint32_t endpointId, VpxS
    s_scriptApi->SetCOMObjectOverride(PROG_ID, Scorbit_Table_SCD);
 }
 
-void UnregisterScriptBinding()
+void UnregisterScriptBinding(bool atQuit)
 {
    s_session = nullptr;
+   if (atQuit)
+      return;
    if (s_scriptApi != nullptr)
    {
       s_scriptApi->SetCOMObjectOverride(PROG_ID, nullptr);

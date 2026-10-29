@@ -232,7 +232,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
 
    controllers->Unsubscribe();
    controllers = nullptr;
-   UnregisterScriptBinding();
+   UnregisterScriptBinding(unloadingAtQuit);
    delete vpxSession;
    vpxSession = nullptr;
    if (!unloadingAtQuit)

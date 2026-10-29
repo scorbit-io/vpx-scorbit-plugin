@@ -184,13 +184,21 @@ void VpxSessionSource::DeclareMachine(const std::string& machineId)
    // Logged and ignored rather than raised: a script error would stop the author's table.
    if (!ValidMachineId(machineId))
    {
-      LOGW("script: Scorbit.Declare ignored, \""s + machineId.substr(0, 80) + "\" is not a machine id (1 to 64 printable characters, no spaces)");
+      // Escaped, so a newline from the script cannot forge a log line.
+      std::string shown = machineId.substr(0, 80);
+      for (char& c : shown)
+         if (c < 0x20 || c > 0x7E)
+            c = '?';
+      LOGW("script: Scorbit.Declare ignored, \""s + shown + "\" is not a machine id (1 to 64 printable characters, no spaces)");
       return;
    }
-   if (!m_authored.machineId.empty() && m_authored.machineId != machineId)
-      LOGI("script: Scorbit.Declare replaces machine "s + m_authored.machineId + " with " + machineId);
-   else
+   // Logged on a change only: a script may call it from a timer.
+   if (machineId == m_authored.machineId)
+      return;
+   if (m_authored.machineId.empty())
       LOGI("script: Scorbit.Declare machine "s + machineId);
+   else
+      LOGI("script: Scorbit.Declare replaces machine "s + m_authored.machineId + " with " + machineId);
    m_authored.machineId = machineId;
 }
 
