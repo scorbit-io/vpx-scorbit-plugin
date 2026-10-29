@@ -12,16 +12,30 @@
 #include <windows.h>
 #endif
 
+#include <utility>
+
 namespace Scorbit
 {
 
-bool ValidMachineId(const std::string& id)
+bool CanonicalMachineId(const std::string& id, std::string& out)
 {
-   if (id.empty() || id.size() > 64)
+   if (id.size() != 36)
       return false;
-   for (const char c : id)
-      if (c < 0x21 || c > 0x7E)
+   std::string lower(id);
+   for (size_t i = 0; i < lower.size(); i++)
+   {
+      char& c = lower[i];
+      if (i == 8 || i == 13 || i == 18 || i == 23)
+      {
+         if (c != '-')
+            return false;
+      }
+      else if (c >= 'A' && c <= 'F')
+         c = static_cast<char>(c - 'A' + 'a');
+      else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
          return false;
+   }
+   out = std::move(lower);
    return true;
 }
 

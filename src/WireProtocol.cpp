@@ -25,6 +25,7 @@ const char* TypeName(uint16_t type)
    case TYPE_NVRAM: return "NvRam";
    case TYPE_OVERLAY: return "Overlay";
    case TYPE_STATUS: return "Status";
+   case TYPE_GAME: return "Game";
    default: return "unknown";
    }
 }
@@ -45,6 +46,7 @@ const char* ErrorName(uint16_t code)
    case ERR_TOO_LARGE: return "too_large";
    case ERR_STALE: return "stale";
    case ERR_UNSTABLE: return "unstable";
+   case ERR_NOT_AUTHORED: return "not_authored";
    default: return "unknown";
    }
 }
@@ -279,8 +281,10 @@ bool Decode(const std::vector<uint8_t>& payload, HelloAck& out)
    return r.Ok();
 }
 
-std::vector<uint8_t> Encode(const Declare& v)
+std::vector<uint8_t> Encode(const Declare& v, uint16_t peerMinor, std::vector<SensitiveSpan>* sensitive)
 {
+   if (sensitive != nullptr)
+      sensitive->clear();
    Writer w;
    w.Str(v.romId);
    w.Str(v.tablePath);
@@ -291,7 +295,24 @@ std::vector<uint8_t> Encode(const Declare& v)
    w.U8(v.shades);
    w.U32(v.sourceGeneration);
    w.Str(v.identifyFormat);
-   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+   if (peerMinor >= 1)
+   {
+      w.U8(v.tableKind);
+      w.Str(v.machineUuid);
+      for (const std::string* path : { &v.tableFullPath, &v.vpxAppPath, &v.prefsPath })
+      {
+         if (sensitive != nullptr && !path->empty())
+            sensitive->push_back({ w.Data().size() + 2, path->size() });
+         w.Str(*path);
+      }
+   }
+   if (!w.Ok())
+   {
+      if (sensitive != nullptr)
+         sensitive->clear();
+      return { };
+   }
+   return w.Take();
 }
 
 bool Decode(const std::vector<uint8_t>& payload, Declare& out)
@@ -306,6 +327,19 @@ bool Decode(const std::vector<uint8_t>& payload, Declare& out)
    r.U8(out.shades);
    r.U32(out.sourceGeneration);
    r.Str(out.identifyFormat);
+   out.tableKind = TABLE_ROM;
+   out.machineUuid.clear();
+   out.tableFullPath.clear();
+   out.vpxAppPath.clear();
+   out.prefsPath.clear();
+   if (r.Ok() && !r.AtEnd())
+   {
+      r.U8(out.tableKind);
+      r.Str(out.machineUuid);
+      r.Str(out.tableFullPath);
+      r.Str(out.vpxAppPath);
+      r.Str(out.prefsPath);
+   }
    return r.Ok();
 }
 
@@ -666,6 +700,124 @@ bool Decode(const std::vector<uint8_t>& payload, Status& out)
    r.U8(out.systemState);
    r.Str(out.supportText);
    return r.Ok() && out.supportText.size() <= MAX_SUPPORT_TEXT_BYTES;
+}
+
+namespace
+{
+
+bool KnownGameOp(uint8_t kind)
+{
+   return kind >= GAME_START && kind <= GAME_CLEAR_MODES;
+}
+
+// The rules a batch must meet on both sides: the daemon answers malformed otherwise.
+bool ValidGameBatch(const GameBatch& v)
+{
+   if (v.ops.empty() || v.ops.size() > MAX_GAME_OPS)
+      return false;
+   for (size_t i = 0; i < v.ops.size(); i++)
+   {
+      const uint8_t kind = v.ops[i].kind;
+      if (!KnownGameOp(kind))
+         return false;
+      if (kind == GAME_START && i != 0)
+         return false;
+      if (kind == GAME_END && i != v.ops.size() - 1)
+         return false;
+   }
+   return true;
+}
+
+}
+
+std::vector<uint8_t> Encode(const GameBatch& v)
+{
+   if (!ValidGameBatch(v))
+      return { };
+   Writer w;
+   w.U32(v.batchId);
+   w.U16(static_cast<uint16_t>(v.ops.size()));
+   for (const GameOp& op : v.ops)
+   {
+      w.U8(op.kind);
+      switch (op.kind)
+      {
+      case GAME_START:
+      case GAME_BALL:
+      case GAME_ACTIVE_PLAYER:
+         w.U8(op.value);
+         break;
+      case GAME_SCORE:
+         w.U8(op.value);
+         w.U64(static_cast<uint64_t>(op.score));
+         w.U32(static_cast<uint32_t>(op.feature));
+         break;
+      case GAME_ADD_MODE_EXPIRING:
+         w.U32(op.seconds);
+         w.Str(op.mode);
+         break;
+      case GAME_ADD_MODE:
+      case GAME_MODE_COMPLETED:
+      case GAME_REMOVE_MODE:
+         w.Str(op.mode);
+         break;
+      default:
+         break;
+      }
+   }
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, GameBatch& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint16_t count = 0;
+   out.ops.clear();
+   // Every op is at least its kind byte, so a count the payload cannot hold is refused first.
+   if (!r.U32(out.batchId) || !r.U16(count) || count == 0 || count > MAX_GAME_OPS || r.Remaining() < count)
+      return false;
+   out.ops.reserve(count);
+   for (uint16_t i = 0; i < count && r.Ok(); i++)
+   {
+      GameOp op;
+      r.U8(op.kind);
+      switch (op.kind)
+      {
+      case GAME_START:
+      case GAME_BALL:
+      case GAME_ACTIVE_PLAYER:
+         r.U8(op.value);
+         break;
+      case GAME_SCORE:
+      {
+         uint64_t score = 0;
+         uint32_t feature = 0;
+         r.U8(op.value);
+         r.U64(score);
+         r.U32(feature);
+         op.score = static_cast<int64_t>(score);
+         op.feature = static_cast<int32_t>(feature);
+         break;
+      }
+      case GAME_ADD_MODE_EXPIRING:
+         r.U32(op.seconds);
+         r.Str(op.mode);
+         break;
+      case GAME_ADD_MODE:
+      case GAME_MODE_COMPLETED:
+      case GAME_REMOVE_MODE:
+         r.Str(op.mode);
+         break;
+      case GAME_END:
+      case GAME_CLEAR_MODES:
+         break;
+      default:
+         // Ops carry no length, so an unknown one cannot be skipped.
+         return false;
+      }
+      out.ops.push_back(std::move(op));
+   }
+   return r.Ok() && ValidGameBatch(out);
 }
 
 }

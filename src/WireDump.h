@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "WireProtocol.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -10,12 +12,8 @@
 namespace Scorbit
 {
 
-// A run of bytes within one frame that must not reach a dump.
-struct SensitiveSpan
-{
-   size_t offset = 0;
-   size_t length = 0;
-};
+// Here a span counts from the first byte of the frame, length prefix included.
+using SensitiveSpan = Wire::SensitiveSpan;
 
 // Records complete wire frames to a file. Off unless SCORBIT_WIRE_DUMP names a path.
 //

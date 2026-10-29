@@ -2,7 +2,7 @@
 
 #pragma once
 
-// Wire protocol 1.0 between the Scorbit daemon and this plugin.
+// Wire protocol 1.1 between the Scorbit daemon and this plugin.
 //
 // The daemon listens on a user-scoped local socket and the plugin connects. On
 // the wire every integer is little-endian and a string is a u16 byte count
@@ -31,7 +31,7 @@ namespace Scorbit::Wire
 {
 
 inline constexpr uint16_t PROTO_MAJOR = 1;
-inline constexpr uint16_t PROTO_MINOR = 0;
+inline constexpr uint16_t PROTO_MINOR = 1;
 
 // Largest message accepted from the peer, counted from the first byte of the
 // length field. Sends are held one header below it so a peer that measures the
@@ -61,6 +61,8 @@ enum MsgType : uint16_t
    TYPE_NVRAM = 20,
    TYPE_OVERLAY = 32,
    TYPE_STATUS = 33,
+   // Slice 5, plugin to daemon only: one committed batch of an authored table's game calls.
+   TYPE_GAME = 48,
 };
 
 enum MsgFlags : uint16_t
@@ -83,14 +85,16 @@ enum ErrorCode : uint16_t
    ERR_MALFORMED = 7,
    ERR_NO_GAME = 8,
    ERR_OUT_OF_RANGE = 9,
-   // Slice 2 only, for an over-sized subscription. An over-sized wire frame is
-   // ERR_MALFORMED, not this.
+   // An over-sized subscription, a Game over MAX_GAME_OPS, or the daemon's Game queue
+   // overflowing. An over-sized wire frame is ERR_MALFORMED, not this.
    ERR_TOO_LARGE = 10,
    ERR_STALE = 11,
    ERR_UNSTABLE = 12,
+   // A Game while the current Declare is a ROM table.
+   ERR_NOT_AUTHORED = 13,
 };
 
-// Hello capability bits. Slice 1 offers identify frames and nothing else.
+// Hello and HelloAck capability bits.
 enum Capability : uint32_t
 {
    CAP_IDENTIFY_FRAMES = 1u << 0,
@@ -100,6 +104,8 @@ enum Capability : uint32_t
    CAP_HALT = 1u << 4,
    CAP_OVERLAY = 1u << 5,
    CAP_STATES = 1u << 6,
+   // Hello: the plugin has the table-script bindings. HelloAck: the daemon serves authored tables.
+   CAP_AUTHORED_TABLES = 1u << 7,
 };
 
 const char* TypeName(uint16_t type);
@@ -156,6 +162,15 @@ private:
    size_t m_size;
    size_t m_pos = 0;
    bool m_ok = true;
+};
+
+// The bytes of a string field the sender marks sensitive: the UTF-8 bytes only, never the u16
+// length before them, so a dump that blanks them still decodes. Offsets count from the first
+// byte of the payload.
+struct SensitiveSpan
+{
+   size_t offset = 0;
+   size_t length = 0;
 };
 
 struct Header
@@ -225,6 +240,12 @@ inline std::string TableFileName(const std::string& path)
    return cut == std::string::npos ? path : path.substr(cut + 1);
 }
 
+enum TableKind : uint8_t
+{
+   TABLE_ROM = 0,
+   TABLE_AUTHORED = 1,
+};
+
 struct Declare
 {
    std::string romId;
@@ -236,6 +257,13 @@ struct Declare
    uint8_t shades = 0;              // 4 or 16, 0 when there is no conforming source
    uint32_t sourceGeneration = 0;
    std::string identifyFormat;      // "BITPLANE2", "BITPLANE4" or empty
+   // Appended in 1.1 (slice 5). Empty for a ROM table. The three paths are full host paths:
+   // never logged, and blanked in wire dumps.
+   uint8_t tableKind = TABLE_ROM;
+   std::string machineUuid;         // lower-case canonical uuid
+   std::string tableFullPath;
+   std::string vpxAppPath;
+   std::string prefsPath;
 
    bool operator==(const Declare&) const = default;
 };
@@ -456,9 +484,50 @@ struct Status
    bool operator==(const Status&) const = default;
 };
 
+// --- Slice 5 authored tables (protocol 1.1) -------------------------------------
+
+inline constexpr size_t MAX_GAME_OPS = 256;
+
+enum GameOpKind : uint8_t
+{
+   GAME_START = 1,               // value: origin, 0 start button, 1 lobby
+   GAME_END = 2,
+   GAME_BALL = 3,                // value: ball
+   GAME_ACTIVE_PLAYER = 4,       // value: player
+   GAME_SCORE = 5,               // value: player; score, feature
+   GAME_ADD_MODE = 6,            // mode
+   GAME_ADD_MODE_EXPIRING = 7,   // seconds, mode
+   GAME_MODE_COMPLETED = 8,      // mode
+   GAME_REMOVE_MODE = 9,         // mode
+   GAME_CLEAR_MODES = 10,
+};
+
+// One op of a commit. Only the fields its kind names are on the wire.
+struct GameOp
+{
+   uint8_t kind = 0;
+   uint8_t value = 0;
+   int64_t score = 0;
+   int32_t feature = 0;
+   uint32_t seconds = 0;
+   std::string mode;
+
+   bool operator==(const GameOp&) const = default;
+};
+
+// Game request: one commit, in call order. The reply is empty. batch_id leads on the wire:
+// counted from 1 per plugin load and kept across reconnects, so the daemon acknowledges a
+// replayed batch without applying it twice.
+struct GameBatch
+{
+   std::vector<GameOp> ops;
+   uint32_t batchId = 0;
+
+   bool operator==(const GameBatch&) const = default;
+};
+
 std::vector<uint8_t> Encode(const Hello& v);
 std::vector<uint8_t> Encode(const HelloAck& v);
-std::vector<uint8_t> Encode(const Declare& v);
 std::vector<uint8_t> Encode(const FrameRequest& v);
 std::vector<uint8_t> Encode(const FrameReply& v);
 std::vector<uint8_t> Encode(const Pong& v);
@@ -474,12 +543,18 @@ std::vector<uint8_t> Encode(const NvRamParameters& v);
 std::vector<uint8_t> Encode(const OverlayRequest& v);
 std::vector<uint8_t> Encode(const OverlayControl& v);
 std::vector<uint8_t> Encode(const Status& v);
+std::vector<uint8_t> Encode(const GameBatch& v);
+
+// The layout the peer negotiated: minor 0 stops after identify_format, 1 appends the slice 5
+// fields. When sensitive is given, it receives the spans of the three path strings.
+std::vector<uint8_t> Encode(const Declare& v, uint16_t peerMinor, std::vector<SensitiveSpan>* sensitive = nullptr);
 
 // Every Decode requires each field it declares to be present and ignores any
 // bytes trailing them. That is the compatibility rule: appending a field is a
 // minor bump, so a 1.0 reader must not refuse a 1.1 payload it can still read.
 bool Decode(const std::vector<uint8_t>& payload, Hello& out);
 bool Decode(const std::vector<uint8_t>& payload, HelloAck& out);
+// Reads the 1.1 fields when the payload carries them, and leaves them empty when it does not.
 bool Decode(const std::vector<uint8_t>& payload, Declare& out);
 bool Decode(const std::vector<uint8_t>& payload, FrameRequest& out);
 bool Decode(const std::vector<uint8_t>& payload, FrameReply& out);
@@ -497,5 +572,8 @@ bool Decode(const std::vector<uint8_t>& payload, OverlayRequest& out);
 bool Decode(const std::vector<uint8_t>& payload, OverlayControl& out);
 // Also false when support_text is over MAX_SUPPORT_TEXT_BYTES.
 bool Decode(const std::vector<uint8_t>& payload, Status& out);
+// False unless the count is 1 to MAX_GAME_OPS, every kind is known, and game_start is first
+// and game_end last when present.
+bool Decode(const std::vector<uint8_t>& payload, GameBatch& out);
 
 }

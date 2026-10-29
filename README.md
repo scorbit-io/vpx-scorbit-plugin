@@ -122,8 +122,9 @@ rotates its token is picked up without restarting VPX.
 
 `src/WireProtocol.*` is the whole wire format: little-endian, a `u32` length
 followed by `u16` type, `u16` flags and a `u32` sequence number, then the
-payload. This build speaks protocol 1.0 and serves Hello, Declare, Frame, Ping,
-Bye, the memory messages, Overlay and Status. A type it does not serve is
+payload. This build speaks protocol 1.1 and serves Hello, Declare, Frame, Ping,
+Bye, the memory messages, Overlay and Status, and sends Game for table scripts. It
+still talks to a 1.0 daemon, without the table-script calls. A type it does not serve is
 answered with `unsupported_type` rather than ignored. Frames cross as one shade
 index per pixel, row major, exactly as the tap captured them.
 
@@ -187,25 +188,55 @@ connection. `ShowStatus = 0` turns all of it off.
 
 ## Table scripts
 
-**In progress.** An original table, one with no ROM for the daemon to recognise, will be
-able to identify itself to Scorbit from its script:
+An original table, one with no ROM for the daemon to recognise, can identify itself to
+Scorbit and report its game from its script. The calls mirror the Scorbit SDK's:
 
 ```vbscript
 Dim Scorbit
 On Error Resume Next
 Set Scorbit = CreateObject("Scorbit.Table")
-If IsObject(Scorbit) Then Scorbit.Declare "<machine id>"
 On Error Goto 0
+If IsObject(Scorbit) Then Scorbit.Declare "<machine uuid>"
+
+' later, from the table's game logic
+If IsObject(Scorbit) Then
+   Scorbit.SetGameStarted 0          ' 0 start button, 1 lobby
+   Scorbit.SetCurrentBall 1
+   Scorbit.SetActivePlayer 1
+   Scorbit.SetScore 1, 12340         ' player, score[, feature]
+   Scorbit.AddMode "MB:Multiball"
+   Scorbit.Commit
+End If
 ```
 
 VPX hands that `CreateObject` to this plugin. Without the plugin it fails, which is why
-the script guards it: the table must still run on a VPX without Scorbit. `Declare` takes
-one string, a machine id of 1 to 64 printable characters. Any other string is logged and
-ignored rather than raised as a script error, but a call with no argument or two is a
-script error, which the guard above also catches. At each table start the plugin also notes the table, VPX
-and preferences folders, which the daemon will need to find the table's script. None of
-this reaches the daemon yet: it waits for the protocol messages that carry it. Those paths
-never appear in the log, and a wire dump blanks them.
+the script guards every use: the table must still run on a VPX without Scorbit.
+
+| Call | Does |
+|---|---|
+| `Declare uuid` | names the Scorbit machine: a uuid in 8-4-4-4-12 hex, any case |
+| `SetGameStarted origin` | 0 start button, 1 lobby |
+| `SetGameFinished` | ends the game and commits |
+| `SetCurrentBall ball`, `SetActivePlayer player` | |
+| `SetScore player, score[, feature]` | score up to 2^53; feature defaults to 0 |
+| `AddMode mode`, `AddModeExpiring seconds, mode` | mode names up to 128 bytes |
+| `SetModeCompleted mode`, `RemoveMode mode`, `ClearModes` | |
+| `Commit` | sends every call since the last commit, in order |
+
+Calls are held in the plugin until `Commit`. An argument that does not fit, such as a
+malformed uuid, a score past 2^53 or a long mode name, is logged and ignored rather than
+raised as a script error; a call with the wrong number of arguments is still a script error.
+Game calls made before `Declare`, or before the table starts, are dropped. The script runs
+before the table starts, so a `Declare` made then goes to the daemon at table start; one
+made later goes at once.
+
+When PinMAME runs a ROM the ROM wins: `Declare` and the game calls are logged and ignored.
+A daemon that does not serve table scripts (protocol 1.0, or without the capability) gets
+the table as it would without a `Declare`, and no game calls.
+
+With a `Declare`, the plugin sends the daemon the table, VPX and preferences folders, which
+it needs to find the table's script. Those paths never appear in the log, and a wire dump
+blanks them.
 
 ## Layout
 
