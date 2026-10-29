@@ -47,6 +47,7 @@ constexpr int HELLO_TIMEOUT_MS = 1000;
 // A nonblocking connect still in progress after this is treated as a daemon not accepting.
 constexpr int CONNECT_TIMEOUT_MS = 1000;
 constexpr int DECLARE_TIMEOUT_MS = 1000;
+constexpr int GAME_TIMEOUT_MS = 1000;
 constexpr int PONG_TIMEOUT_MS = 2000;
 constexpr int SEND_TIMEOUT_MS = 1000;
 // Reading the rest of a message whose length header has already arrived.
@@ -436,6 +437,21 @@ bool SocketWorker::Connect()
    m_seq = 0;
    m_haveDeclared = false;
    m_declared = { };
+   // A new session gets only the latest game committed while no daemon listened, from its
+   // start: batches without the game_start before them mean nothing to it.
+   m_source.TakeGames(m_games);
+   size_t keepFrom = m_games.size();
+   for (size_t i = m_games.size(); i-- > 0;)
+      if (!m_games[i].batch.ops.empty() && m_games[i].batch.ops.front().kind == Wire::GAME_START)
+      {
+         keepFrom = i;
+         break;
+      }
+   if (keepFrom != 0)
+   {
+      Log(LOG_LEVEL_INFO, "Socket: dropped " + std::to_string(keepFrom) + " Game batches committed while disconnected");
+      m_games.erase(m_games.begin(), m_games.begin() + static_cast<std::ptrdiff_t>(keepFrom));
+   }
    return true;
 }
 
@@ -755,7 +771,8 @@ bool SocketWorker::ReadMessage(Wire::Message& out, int timeoutMs)
    return true;
 }
 
-bool SocketWorker::SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload)
+bool SocketWorker::SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload,
+   const std::vector<Wire::SensitiveSpan>& sensitive)
 {
    const std::vector<uint8_t> bytes = Wire::EncodeMessage(type, flags, seq, payload);
    if (bytes.empty())
@@ -763,7 +780,15 @@ bool SocketWorker::SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, 
       Log(LOG_LEVEL_ERROR, "Socket: refusing to send an oversized "s + Wire::TypeName(type) + " message");
       return false;
    }
-   m_wireDump.Sent(bytes.data(), bytes.size());
+   if (sensitive.empty())
+      m_wireDump.Sent(bytes.data(), bytes.size());
+   else
+   {
+      std::vector<SensitiveSpan> framed = sensitive;
+      for (SensitiveSpan& span : framed)
+         span.offset += Wire::LENGTH_BYTES + Wire::HEADER_BYTES;
+      m_wireDump.Sent(bytes.data(), bytes.size(), framed);
+   }
    return SendAll(bytes.data(), bytes.size(), SEND_TIMEOUT_MS);
 }
 
@@ -775,10 +800,11 @@ bool SocketWorker::SendError(uint16_t type, uint32_t seq, uint16_t code, const s
    return SendWireMessage(type, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, seq, Wire::Encode(e));
 }
 
-bool SocketWorker::Exchange(uint16_t type, const std::vector<uint8_t>& payload, int timeoutMs, Wire::Message& reply)
+bool SocketWorker::Exchange(uint16_t type, const std::vector<uint8_t>& payload, int timeoutMs, Wire::Message& reply,
+   const std::vector<Wire::SensitiveSpan>& sensitive)
 {
    const uint32_t seq = ++m_seq;
-   if (!SendWireMessage(type, 0, seq, payload))
+   if (!SendWireMessage(type, 0, seq, payload, sensitive))
    {
       Log(LOG_LEVEL_WARN, "Socket: sending "s + Wire::TypeName(type) + " failed");
       return false;
@@ -843,7 +869,8 @@ bool SocketWorker::Handshake()
    // from the first Write, which answers unsupported_operation on a libpinmame without #634.
    hello.capabilities = Wire::CAP_IDENTIFY_FRAMES
       | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u)
-      | (m_overlay != nullptr ? Wire::CAP_OVERLAY : 0u);
+      | (m_overlay != nullptr ? Wire::CAP_OVERLAY : 0u)
+      | (m_config.authoredTables ? Wire::CAP_AUTHORED_TABLES : 0u);
 
    // Hello's vpx_revision is the build the plugin API headers were pinned to.
    // The plugin API exposes no runtime version, so this is what the plugin
@@ -896,6 +923,9 @@ bool SocketWorker::Handshake()
    m_connected = true;
    m_lastOnce.clear();
    m_loggedNvRam = false;
+   m_peerMinor = ack.protoMinor;
+   m_peerCapabilities = ack.capabilities;
+   m_loggedNoAuthored = false;
    // The daemon sends Status after the first Declare, on every connection.
    m_statusRecord = { };
    m_statusRecord.inSession = true;
@@ -905,8 +935,14 @@ bool SocketWorker::Handshake()
       m_memory->Clear();
    Log(LOG_LEVEL_INFO, "Socket: connected to daemon " + ack.daemonVersion + " (protocol "
       + std::to_string(ack.protoMajor) + '.' + std::to_string(ack.protoMinor)
-      + ", session " + std::to_string(ack.sessionId) + ')');
+      + ", session " + std::to_string(ack.sessionId)
+      + (AuthoredAllowed() ? ", authored tables" : "") + ')');
    return true;
+}
+
+bool SocketWorker::AuthoredAllowed() const
+{
+   return m_peerMinor >= 1 && (m_peerCapabilities & Wire::CAP_AUTHORED_TABLES) != 0;
 }
 
 void SocketWorker::TakeDeclare()
@@ -918,9 +954,32 @@ void SocketWorker::TakeDeclare()
 bool SocketWorker::MaybeDeclare()
 {
    TakeDeclare();
+   // A table change: what the old table committed goes out before the Declare that ends it,
+   // so a game_end flushed just before the table stopped is not lost. The source posts a
+   // batch before the Declare that follows it, so taking that Declare has made it visible.
+   if (m_haveDeclared && m_current.epoch != m_declared.epoch && !SendGames())
+      return false;
    if (m_haveDeclared && m_current == m_declared)
       return true;
    const DeclareSnapshot now = m_current;
+
+   Wire::Declare sent = now.declare;
+   if (sent.tableKind == Wire::TABLE_AUTHORED && !AuthoredAllowed())
+   {
+      if (!m_loggedNoAuthored)
+      {
+         Log(LOG_LEVEL_WARN, "Socket: the daemon does not serve authored tables, so this table is declared without "
+            "its Scorbit machine and its game calls are dropped");
+         m_loggedNoAuthored = true;
+      }
+      sent.tableKind = Wire::TABLE_ROM;
+      sent.machineUuid.clear();
+      sent.tableFullPath.clear();
+      sent.vpxAppPath.clear();
+      sent.prefsPath.clear();
+   }
+   std::vector<Wire::SensitiveSpan> sensitive;
+   const std::vector<uint8_t> payload = Wire::Encode(sent, m_peerMinor, &sensitive);
 
    // A Declare clears the subscription on both sides; cleared before it goes out,
    // so a Poll crossing it never serves the previous ROM's addresses.
@@ -928,7 +987,7 @@ bool SocketWorker::MaybeDeclare()
       m_memory->Clear();
 
    Wire::Message reply;
-   if (!Exchange(Wire::TYPE_DECLARE, Wire::Encode(now.declare), DECLARE_TIMEOUT_MS, reply))
+   if (!Exchange(Wire::TYPE_DECLARE, payload, DECLARE_TIMEOUT_MS, reply, sensitive))
       return false;
    if (reply.header.IsError())
    {
@@ -940,12 +999,64 @@ bool SocketWorker::MaybeDeclare()
 
    m_declared = now;
    m_haveDeclared = true;
-   const Wire::Declare& d = now.declare;
+   m_gameLogged = 0;
+   // The paths are never logged (REQ-12.6).
+   const Wire::Declare& d = sent;
    Log(LOG_LEVEL_INFO, "Socket: declared romId=" + (d.romId.empty() ? "(none)" : d.romId)
+      + (d.tableKind == Wire::TABLE_AUTHORED ? " authored machine=" + d.machineUuid : std::string())
       + " display=" + std::to_string(d.width) + 'x' + std::to_string(d.height)
       + '/' + std::to_string(d.shades) + " shades"
       + " generation=" + std::to_string(d.sourceGeneration)
       + " format=" + (d.identifyFormat.empty() ? "(none)" : d.identifyFormat));
+   return true;
+}
+
+bool SocketWorker::SendGames()
+{
+   m_source.TakeGames(m_games);
+   while (!m_games.empty() && m_haveDeclared)
+   {
+      GamePost& front = m_games.front();
+      if (front.epoch > m_declared.epoch)
+         return true;  // its Declare has not gone out yet
+      const bool authored = m_declared.declare.tableKind == Wire::TABLE_AUTHORED && AuthoredAllowed();
+      if (front.epoch == m_declared.epoch && !authored)
+      {
+         // The authored Declare this batch follows may have been posted after this loop
+         // last looked; it goes out first.
+         TakeDeclare();
+         if (!(m_current == m_declared))
+            return true;
+      }
+      const std::vector<uint8_t> payload = authored ? Wire::Encode(front.batch) : std::vector<uint8_t> { };
+      if (front.epoch < m_declared.epoch || payload.empty())
+      {
+         if ((m_gameLogged & 1u) == 0)
+         {
+            Log(LOG_LEVEL_WARN, "Socket: dropped a Game: its table is no longer declared, or not as an authored table");
+            m_gameLogged |= 1u;
+         }
+         m_games.pop_front();
+         continue;
+      }
+
+      Wire::Message reply;
+      if (!Exchange(Wire::TYPE_GAME, payload, GAME_TIMEOUT_MS, reply))
+         return false;
+      m_games.pop_front();
+      if (!reply.header.IsError())
+         continue;
+      // Logged once per code per Declare and otherwise carried on: the daemon drops what it
+      // must (too_large drops the whole game), and a later game can still score.
+      Wire::ErrorPayload e;
+      Wire::Decode(reply.payload, e);
+      const uint32_t bit = 1u << (e.code < 31 ? e.code : 31);
+      if ((m_gameLogged & bit) == 0)
+      {
+         Log(LOG_LEVEL_WARN, "Socket: daemon refused Game: "s + Wire::ErrorName(e.code) + " - " + e.reason);
+         m_gameLogged |= bit;
+      }
+   }
    return true;
 }
 
@@ -968,7 +1079,7 @@ void SocketWorker::Serve()
    bool alive = true;
    while (m_running)
    {
-      if (!MaybeDeclare())
+      if (!MaybeDeclare() || !SendGames())
       {
          alive = !m_running;
          break;

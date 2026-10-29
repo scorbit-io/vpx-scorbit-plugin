@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <string>
 #include <thread>
@@ -71,6 +72,14 @@ struct SessionSnapshot
    bool playerRunning = false;
 };
 
+// One committed batch of an authored table's game calls (slice 5), tagged with the Declare
+// epoch it was committed under, so a batch from a table that has since changed is dropped.
+struct GamePost
+{
+   uint64_t epoch = 0;
+   Wire::GameBatch batch;
+};
+
 // Everything the worker reads about the running game. Every method must be
 // safe to call from the worker thread.
 class ISessionSource
@@ -82,6 +91,8 @@ public:
    virtual std::unique_ptr<DeclareSnapshot> TakeDeclare() = 0;
    virtual void GetFrame(FrameSnapshot& out) = 0;
    virtual void GetSession(SessionSnapshot& out) = 0;
+   // Appends every batch committed since the last call to out, in commit order.
+   virtual void TakeGames(std::deque<GamePost>& out) { }
 };
 
 // Where Overlay requests go (slice 4). Every method is called on the worker thread and
@@ -116,6 +127,8 @@ struct SocketWorkerConfig
    std::string tokenPath;
    std::string pluginVersion;
    std::string pluginApiCommit;
+   // The table-script bindings are registered: Hello advertises authored_tables.
+   bool authoredTables = false;
 };
 
 class SocketWorker final
@@ -173,6 +186,11 @@ private:
    bool Handshake();
    void Serve();
    bool MaybeDeclare();
+   // Sends the batches committed under the Declare last sent, drops older ones, and leaves
+   // newer ones for after their Declare. False closes the session.
+   bool SendGames();
+   // HelloAck offered authored tables at a minor that carries them.
+   bool AuthoredAllowed() const;
    // Takes a newly posted declaration into m_current, if there is one.
    void TakeDeclare();
    bool Dispatch(const Wire::Message& msg);
@@ -196,12 +214,15 @@ private:
    // or SendMessageW, so the declaration and the definition textually disagree and
    // MSVC rejects the member. Renamed rather than #undef'd, because any later
    // include of windows.h would quietly put the macro back.
-   bool SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload);
+   // sensitive counts from the start of the payload.
+   bool SendWireMessage(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload,
+      const std::vector<Wire::SensitiveSpan>& sensitive = { });
    bool SendError(uint16_t type, uint32_t seq, uint16_t code, const std::string& reason);
    bool SendIdlePing();
    // Sends a request and pumps the socket until its response arrives, serving
    // any request that overtakes it. False closes the session.
-   bool Exchange(uint16_t type, const std::vector<uint8_t>& payload, int timeoutMs, Wire::Message& reply);
+   bool Exchange(uint16_t type, const std::vector<uint8_t>& payload, int timeoutMs, Wire::Message& reply,
+      const std::vector<Wire::SensitiveSpan>& sensitive = { });
    // -1 error, 0 timeout, 1 readable.
    int WaitReadable(int timeoutMs);
    bool ReadExact(uint8_t* dst, size_t size, int timeoutMs);
@@ -236,6 +257,15 @@ private:
    DeclareSnapshot m_current;
    DeclareSnapshot m_declared;
    bool m_haveDeclared = false;
+   // What HelloAck offered this connection.
+   uint16_t m_peerMinor = 0;
+   uint32_t m_peerCapabilities = 0;
+   bool m_loggedNoAuthored = false;      // once per connection
+   // Batches taken from the source and not yet sent, kept across connections.
+   std::deque<GamePost> m_games;
+   // Game outcomes already logged since the last Declare: error codes by bit, and bit 0 for
+   // batches dropped because nothing authored was declared.
+   uint32_t m_gameLogged = 0;
    bool m_loggedNvRam = false;           // NvRam is logged once per session
    Clock::time_point m_lastActivity { };
    std::string m_lastOnce;

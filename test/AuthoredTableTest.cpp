@@ -23,14 +23,32 @@ namespace
 
 void TestMachineIds()
 {
-   CHECK(ValidMachineId("1582"));
-   CHECK(ValidMachineId("a"));
-   CHECK(ValidMachineId(std::string(64, 'x')));
-   CHECK_MSG(!ValidMachineId(""), "empty");
-   CHECK_MSG(!ValidMachineId(std::string(65, 'x')), "over 64");
-   CHECK_MSG(!ValidMachineId("15 82"), "a space");
-   CHECK_MSG(!ValidMachineId("1582\n"), "a control character");
-   CHECK_MSG(!ValidMachineId("caf\xc3\xa9"), "non-ASCII");
+   const std::string canonical = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
+   std::string out;
+   CHECK(CanonicalMachineId(canonical, out) && out == canonical);
+   out.clear();
+   CHECK_MSG(CanonicalMachineId("0B6C2F6E-7D1A-4C3E-9F20-5A8E1D4B7C90", out) && out == canonical, "upper case is lowered");
+   CHECK_MSG(CanonicalMachineId("0b6C2f6E-7d1A-4c3E-9f20-5A8e1D4b7C90", out) && out == canonical, "mixed case is lowered");
+
+   const char* refused[] = {
+      "",
+      "1582",
+      "0b6c2f6e7d1a4c3e9f205a8e1d4b7c90",         // no dashes
+      "{0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90}",   // braces
+      "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c9",      // short
+      "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c900",    // long
+      "0b6c2f6e-7d1a-4c3e-9f20_5a8e1d4b7c90",     // a dash elsewhere
+      "0b6c2f6e-7d1a-4c3e-9f2-05a8e1d4b7c90",     // a dash moved
+      "0b6c2f6g-7d1a-4c3e-9f20-5a8e1d4b7c90",     // not hex
+      " b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90",     // a space
+      "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c9\n",    // a control character
+   };
+   for (const char* id : refused)
+   {
+      out = "untouched";
+      CHECK_MSG(!CanonicalMachineId(id, out) && out == "untouched", id);
+   }
+   CHECK_MSG(!CanonicalMachineId("0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7\xc3\xa9", out), "non-ASCII");
 }
 
 void TestNativePaths()

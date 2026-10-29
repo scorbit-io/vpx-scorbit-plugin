@@ -26,6 +26,8 @@ namespace Scorbit
 // drains them, which only happens if VPX has stopped ticking; keep the newest.
 static constexpr size_t LOG_QUEUE_LIMIT = 256;
 static constexpr int NOTICE_MS = 5000;
+// The daemon's own Game queue cap (slice 5). A script that never commits is held to it too.
+static constexpr size_t MAX_QUEUED_GAME_OPS = 16384;
 
 VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
    int (*showStatus)())
@@ -111,6 +113,10 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    self->m_memory.SetAddressSpace(0);
    self->m_tablePath.clear();
    self->m_authored = { };
+   self->m_ops.clear();
+   self->m_loggedRomWins = false;
+   self->m_loggedDroppedOps = false;
+   self->m_loggedIgnoredCall = false;
    self->m_epoch++;
    self->UpdateDeclare();
 }
@@ -182,24 +188,124 @@ void VpxSessionSource::PostStatusNotice()
 void VpxSessionSource::DeclareMachine(const std::string& machineId)
 {
    // Logged and ignored rather than raised: a script error would stop the author's table.
-   if (!ValidMachineId(machineId))
+   std::string canonical;
+   if (!CanonicalMachineId(machineId, canonical))
    {
       // Escaped, so a newline from the script cannot forge a log line.
       std::string shown = machineId.substr(0, 80);
       for (char& c : shown)
          if (c < 0x20 || c > 0x7E)
             c = '?';
-      LOGW("script: Scorbit.Declare ignored, \""s + shown + "\" is not a machine id (1 to 64 printable characters, no spaces)");
+      LOGW("script: Scorbit.Declare ignored, \""s + shown + "\" is not a machine id (a uuid, 8-4-4-4-12 hex digits)");
       return;
    }
    // Logged on a change only: a script may call it from a timer.
-   if (machineId == m_authored.machineId)
+   if (canonical == m_authored.machineId)
       return;
    if (m_authored.machineId.empty())
-      LOGI("script: Scorbit.Declare machine "s + machineId);
+      LOGI("script: Scorbit.Declare machine "s + canonical);
    else
-      LOGI("script: Scorbit.Declare replaces machine "s + m_authored.machineId + " with " + machineId);
-   m_authored.machineId = machineId;
+      LOGI("script: Scorbit.Declare replaces machine "s + m_authored.machineId + " with " + canonical);
+   m_authored.machineId = std::move(canonical);
+   UpdateDeclare();
+}
+
+bool VpxSessionSource::AuthoredReady() const
+{
+   return !m_authored.machineId.empty() && m_romId.empty() && !m_authored.tablePath.empty()
+      && !m_authored.vpxPath.empty() && !m_authored.prefPath.empty();
+}
+
+void VpxSessionSource::ScriptCallIgnored(const std::string& why)
+{
+   if (m_loggedIgnoredCall)
+      return;
+   m_loggedIgnoredCall = true;
+   LOGW("script: "s + why + " (logged once per table)");
+}
+
+void VpxSessionSource::ScriptGameOp(const Wire::GameOp& op)
+{
+   if (!AuthoredReady())
+   {
+      if (!m_loggedDroppedOps)
+      {
+         m_loggedDroppedOps = true;
+         LOGW(m_romId.empty() ? "script: Scorbit game calls dropped until Scorbit.Declare names the machine and the game starts"s
+                              : "script: Scorbit game calls dropped, a ROM is running ("s + m_romId + ")");
+      }
+      return;
+   }
+   if (m_ops.size() >= MAX_QUEUED_GAME_OPS)
+   {
+      ScriptCallIgnored("Scorbit game calls dropped, "s + std::to_string(m_ops.size()) + " are waiting for Commit");
+      return;
+   }
+   m_ops.push_back(op);
+}
+
+void VpxSessionSource::ScriptCommit()
+{
+   if (m_ops.empty())
+      return;
+   std::vector<Wire::GameOp> ops;
+   ops.swap(m_ops);
+   // A ROM may have started between the calls and this commit.
+   if (!AuthoredReady())
+   {
+      if (!m_loggedDroppedOps)
+      {
+         m_loggedDroppedOps = true;
+         LOGW("script: Scorbit game calls dropped at Commit, the table is no longer an authored one"s);
+      }
+      return;
+   }
+
+   // A batch may hold game_start only first and game_end only last, and at most MAX_GAME_OPS,
+   // so a commit is cut before each start, after each end, and at the size bound.
+   std::vector<GamePost> posts;
+   for (Wire::GameOp& op : ops)
+   {
+      if (posts.empty() || posts.back().batch.ops.size() == Wire::MAX_GAME_OPS
+         || (op.kind == Wire::GAME_START && !posts.back().batch.ops.empty())
+         || posts.back().batch.ops.back().kind == Wire::GAME_END)
+      {
+         posts.emplace_back();
+         posts.back().epoch = m_epoch;
+      }
+      posts.back().batch.ops.push_back(std::move(op));
+   }
+
+   bool overflowed = false;
+   {
+      std::lock_guard lock(m_gameMutex);
+      for (GamePost& post : posts)
+      {
+         const bool starts = post.batch.ops.front().kind == Wire::GAME_START;
+         if (m_gameOverflow && !starts)
+            continue;
+         if (m_queuedOps + post.batch.ops.size() > MAX_QUEUED_GAME_OPS)
+         {
+            overflowed = !m_gameOverflow;
+            m_gameOverflow = true;
+            continue;
+         }
+         m_gameOverflow = false;
+         m_queuedOps += post.batch.ops.size();
+         m_games.push_back(std::move(post));
+      }
+   }
+   if (overflowed)
+      LOGW("script: Scorbit game calls dropped, the daemon is not taking them; the game resumes at its next start"s);
+}
+
+void VpxSessionSource::TakeGames(std::deque<GamePost>& out)
+{
+   std::lock_guard lock(m_gameMutex);
+   for (GamePost& post : m_games)
+      out.push_back(std::move(post));
+   m_games.clear();
+   m_queuedOps = 0;
 }
 
 void VpxSessionSource::SetRomId(const std::string& romId)
@@ -294,6 +400,20 @@ void VpxSessionSource::UpdateDeclare()
    d.shades = static_cast<uint8_t>(has ? f.shades : 0);
    d.sourceGeneration = static_cast<uint32_t>(m_apiTap.generation);
    d.identifyFormat = !has ? "" : (f.shades == 16 ? "BITPLANE4" : "BITPLANE2");
+   if (AuthoredReady())
+   {
+      d.tableKind = Wire::TABLE_AUTHORED;
+      d.machineUuid = m_authored.machineId;
+      d.tableFullPath = m_authored.tablePath;
+      d.vpxAppPath = m_authored.vpxPath;
+      d.prefsPath = m_authored.prefPath;
+   }
+   else if (!m_authored.machineId.empty() && !m_romId.empty() && !m_loggedRomWins)
+   {
+      // A hybrid table: memory extraction is the trusted path, and both would double-report.
+      m_loggedRomWins = true;
+      LOGI("script: Scorbit.Declare ignored, a ROM is running ("s + m_romId + ")");
+   }
    now.epoch = m_epoch;
    now.surfaceGeneration = m_overlay.SurfaceGeneration();
    if (m_havePosted && now == m_posted)
