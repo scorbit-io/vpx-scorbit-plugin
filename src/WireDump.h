@@ -5,9 +5,17 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace Scorbit
 {
+
+// A run of bytes within one frame that must not reach a dump.
+struct SensitiveSpan
+{
+   size_t offset = 0;
+   size_t length = 0;
+};
 
 // Records complete wire frames to a file. Off unless SCORBIT_WIRE_DUMP names a path.
 //
@@ -26,6 +34,10 @@ namespace Scorbit
 //   u64  micros      since Open()
 //   u32  length      bytes of wire frame that follow
 //   u8[length]       the wire frame, length prefix + header + payload
+//
+// Bytes the sender marks sensitive, such as an authored Declare's host paths (SB-5990), are
+// written as '*' at their full length, so a redacted frame still decodes and a dump stays
+// shareable.
 //
 // Owned by SocketWorker and touched only from the worker thread. Every record is
 // flushed, so a dump left by a crashed session is still readable.
@@ -47,7 +59,8 @@ public:
 
    bool Enabled() const { return m_file != nullptr; }
 
-   void Sent(const uint8_t* data, size_t size);
+   // Spans past the end of the frame are clipped to it.
+   void Sent(const uint8_t* data, size_t size, const std::vector<SensitiveSpan>& sensitive = { });
 
    // A received frame is held in two pieces: the length prefix that was read first and
    // the body that followed. They are recorded as one frame, as they arrived on the wire.
@@ -58,6 +71,7 @@ private:
 
    std::FILE* m_file = nullptr;
    uint64_t m_openMicros = 0;
+   std::vector<uint8_t> m_redacted; // a sent frame with its sensitive spans blanked
 };
 
 }

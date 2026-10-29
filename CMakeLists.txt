@@ -44,6 +44,8 @@ endif()
 # The wire protocol and the socket worker carry no Visual Pinball dependency, so they
 # build and test on their own against a scripted peer.
 add_library(scorbit-transport STATIC
+   src/AuthoredTable.h
+   src/AuthoredTable.cpp
    src/WireProtocol.h
    src/WireProtocol.cpp
    src/MemoryBridge.h
@@ -88,6 +90,8 @@ add_library(plugin-scorbit MODULE
    src/OverlayPlacement.h
    src/VpxSessionSource.h
    src/VpxSessionSource.cpp
+   src/ScriptBinding.h
+   src/ScriptBinding.cpp
    src/ScorbitPluginAPI.h
    src/QuitHook.h
 )

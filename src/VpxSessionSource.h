@@ -17,6 +17,7 @@
 // drained back on the API thread. Status comes back the same way, through a
 // latch the API thread drains once per rendered frame into a notification.
 
+#include "AuthoredTable.h"
 #include "DmdOverlay.h"
 #include "DmdTap.h"
 #include "MemoryBridge.h"
@@ -50,6 +51,12 @@ public:
 
    // API thread only. Empty means no game.
    void SetRomId(const std::string& romId);
+
+   // API thread only: the table script's Scorbit.Declare (SB-5990). The script runs before
+   // OnGameStart, so the id is kept until the game ends; a later call replaces it. Held
+   // host-side until the authored Declare has a wire layout (SB-5984).
+   void DeclareMachine(const std::string& machineId);
+   const AuthoredTable& Authored() const { return m_authored; }
 
    // API thread only. Builds the declaration and posts it to the worker when it
    // changed. Called per rendered frame and from the plugin's timer, so it stays
@@ -133,6 +140,7 @@ private:
    DeclareSnapshot m_posted;
    bool m_havePosted = false;
    bool m_addressSpaceKnown = false;
+   AuthoredTable m_authored;
 
    Latch<DeclareSnapshot> m_declares;
    TapView m_workerTap; // worker only
