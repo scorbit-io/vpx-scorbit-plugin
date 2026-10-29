@@ -195,7 +195,8 @@ void VpxSessionSource::DeclareMachine(const std::string& machineId)
       for (char& c : shown)
          if (c < 0x20 || c > 0x7E)
             c = '?';
-      LOGW("script: Scorbit.Declare ignored, \""s + shown + "\" is not a machine id (a uuid, 8-4-4-4-12 hex digits)");
+      // Once per table, as a script may call it from a timer.
+      ScriptCallIgnored("Scorbit.Declare ignored, \""s + shown + "\" is not a machine id (a uuid, 8-4-4-4-12 hex digits)");
       return;
    }
    // Logged on a change only: a script may call it from a timer.
@@ -204,7 +205,13 @@ void VpxSessionSource::DeclareMachine(const std::string& machineId)
    if (m_authored.machineId.empty())
       LOGI("script: Scorbit.Declare machine "s + canonical);
    else
+   {
       LOGI("script: Scorbit.Declare replaces machine "s + m_authored.machineId + " with " + canonical);
+      // A new epoch: what the old machine committed goes out under its own Declare first, and
+      // what it called but never committed is dropped, never sent as the new machine's.
+      m_epoch++;
+      m_ops.clear();
+   }
    m_authored.machineId = std::move(canonical);
    UpdateDeclare();
 }

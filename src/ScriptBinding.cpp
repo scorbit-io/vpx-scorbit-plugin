@@ -53,16 +53,16 @@ public:
          s_session->DeclareMachine(machineId != nullptr ? machineId : "");
    }
 
-   void SetGameStarted(int origin) { Small("SetGameStarted", Wire::GAME_START, origin); }
+   void SetGameStarted(double origin) { Small("SetGameStarted", Wire::GAME_START, origin); }
    void SetGameFinished()
    {
       Op(Of(Wire::GAME_END));
       Commit();
    }
-   void SetCurrentBall(int ball) { Small("SetCurrentBall", Wire::GAME_BALL, ball); }
-   void SetActivePlayer(int player) { Small("SetActivePlayer", Wire::GAME_ACTIVE_PLAYER, player); }
+   void SetCurrentBall(double ball) { Small("SetCurrentBall", Wire::GAME_BALL, ball); }
+   void SetActivePlayer(double player) { Small("SetActivePlayer", Wire::GAME_ACTIVE_PLAYER, player); }
 
-   void SetScore(int player, double score, int feature)
+   void SetScore(double player, double score, double feature)
    {
       if (s_session == nullptr)
          return;
@@ -73,23 +73,18 @@ public:
          return;
       }
       Wire::GameOp op = Of(Wire::GAME_SCORE);
-      if (!SmallValue("SetScore", player, op.value))
+      if (!SmallValue("SetScore", player, op.value) || !InRange("SetScore", feature, -2147483648.0, 2147483647.0))
          return;
       op.score = static_cast<int64_t>(score);
-      op.feature = feature;
+      op.feature = static_cast<int32_t>(feature);
       Op(op);
    }
 
    void AddMode(const char* mode) { Mode("AddMode", Wire::GAME_ADD_MODE, mode); }
-   void AddModeExpiring(int seconds, const char* mode)
+   void AddModeExpiring(double seconds, const char* mode)
    {
-      if (s_session == nullptr)
+      if (s_session == nullptr || !InRange("AddModeExpiring", seconds, 0.0, 4294967295.0))
          return;
-      if (seconds < 0)
-      {
-         s_session->ScriptCallIgnored("Scorbit.AddModeExpiring ignored, seconds is negative");
-         return;
-      }
       Mode("AddModeExpiring", Wire::GAME_ADD_MODE_EXPIRING, mode, static_cast<uint32_t>(seconds));
    }
    void SetModeCompleted(const char* mode) { Mode("SetModeCompleted", Wire::GAME_MODE_COMPLETED, mode); }
@@ -116,19 +111,27 @@ private:
          s_session->ScriptGameOp(op);
    }
 
-   // Range checks are the SDK's (contract §3); this only refuses what a u8 cannot carry.
-   static bool SmallValue(const char* verb, int v, uint8_t& out)
+   // Numbers arrive as double: VPX converts an int parameter before this code runs and raises a
+   // script error on overflow, so the range is checked here, where it can be logged instead.
+   static bool InRange(const char* verb, double v, double lo, double hi)
    {
-      if (v < 0 || v > 255)
-      {
-         s_session->ScriptCallIgnored("Scorbit."s + verb + " ignored, " + std::to_string(v) + " is outside 0 to 255");
+      if (std::isfinite(v) && v == std::trunc(v) && v >= lo && v <= hi)
+         return true;
+      s_session->ScriptCallIgnored("Scorbit."s + verb + " ignored, an argument is not a whole number from "
+         + std::to_string(static_cast<long long>(lo)) + " to " + std::to_string(static_cast<long long>(hi)));
+      return false;
+   }
+
+   // Range checks are the SDK's (contract §3); this only refuses what a u8 cannot carry.
+   static bool SmallValue(const char* verb, double v, uint8_t& out)
+   {
+      if (!InRange(verb, v, 0.0, 255.0))
          return false;
-      }
       out = static_cast<uint8_t>(v);
       return true;
    }
 
-   static void Small(const char* verb, uint8_t kind, int v)
+   static void Small(const char* verb, uint8_t kind, double v)
    {
       Wire::GameOp op = Of(kind);
       if (s_session != nullptr && SmallValue(verb, v, op.value))
@@ -158,18 +161,18 @@ PSC_CLASS_START(Scorbit_Table, ScorbitTable)
    // would not survive a null.
    members.push_back({ { "Declare", 0 }, { "void", 0 }, 1, { { "string", 0 } },
       [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->Declare(pArgs[0].vString.string); } });
-   PSC_FUNCTION1(void, SetGameStarted, int)
+   PSC_FUNCTION1(void, SetGameStarted, double)
    PSC_FUNCTION0(void, SetGameFinished)
-   PSC_FUNCTION1(void, SetCurrentBall, int)
-   PSC_FUNCTION1(void, SetActivePlayer, int)
+   PSC_FUNCTION1(void, SetCurrentBall, double)
+   PSC_FUNCTION1(void, SetActivePlayer, double)
    // Two members of one name: VPX picks the overload by argument count, so feature is optional.
-   members.push_back({ { "SetScore", 0 }, { "void", 0 }, 2, { { "int", 0 }, { "double", 0 } },
-      [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->SetScore(pArgs[0].vInt, pArgs[1].vDouble, 0); } });
-   PSC_FUNCTION3(void, SetScore, int, double, int)
+   members.push_back({ { "SetScore", 0 }, { "void", 0 }, 2, { { "double", 0 }, { "double", 0 } },
+      [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->SetScore(pArgs[0].vDouble, pArgs[1].vDouble, 0); } });
+   PSC_FUNCTION3(void, SetScore, double, double, double)
    members.push_back({ { "AddMode", 0 }, { "void", 0 }, 1, { { "string", 0 } },
       [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->AddMode(pArgs[0].vString.string); } });
-   members.push_back({ { "AddModeExpiring", 0 }, { "void", 0 }, 2, { { "int", 0 }, { "string", 0 } },
-      [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->AddModeExpiring(pArgs[0].vInt, pArgs[1].vString.string); } });
+   members.push_back({ { "AddModeExpiring", 0 }, { "void", 0 }, 2, { { "double", 0 }, { "string", 0 } },
+      [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->AddModeExpiring(pArgs[0].vDouble, pArgs[1].vString.string); } });
    members.push_back({ { "SetModeCompleted", 0 }, { "void", 0 }, 1, { { "string", 0 } },
       [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->SetModeCompleted(pArgs[0].vString.string); } });
    members.push_back({ { "RemoveMode", 0 }, { "void", 0 }, 1, { { "string", 0 } },

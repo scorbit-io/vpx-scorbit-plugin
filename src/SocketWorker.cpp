@@ -437,26 +437,6 @@ bool SocketWorker::Connect()
    m_seq = 0;
    m_haveDeclared = false;
    m_declared = { };
-   // Only never-acknowledged batches are left to replay, so nothing is counted twice. They go
-   // on as is when they continue a game the daemon acknowledged the start of; otherwise those
-   // before the first game_start are a fragment the new session cannot place, and are dropped.
-   TakeSourceGames();
-   size_t keepFrom = 0;
-   if (m_games.empty() || m_games.front().epoch != m_gameOpenEpoch)
-   {
-      keepFrom = m_games.size();
-      for (size_t i = 0; i < m_games.size(); i++)
-         if (!m_games[i].batch.ops.empty() && m_games[i].batch.ops.front().kind == Wire::GAME_START)
-         {
-            keepFrom = i;
-            break;
-         }
-   }
-   if (keepFrom != 0)
-   {
-      Log(LOG_LEVEL_INFO, "Socket: dropped " + std::to_string(keepFrom) + " Game batches committed while disconnected");
-      m_games.erase(m_games.begin(), m_games.begin() + static_cast<std::ptrdiff_t>(keepFrom));
-   }
    return true;
 }
 
@@ -931,6 +911,27 @@ bool SocketWorker::Handshake()
    m_peerMinor = ack.protoMinor;
    m_peerCapabilities = ack.capabilities;
    m_loggedNoAuthored = false;
+   // Taken only once a session exists, so a daemon refusing Hello leaves them in the source's
+   // bounded queue. Only never-acknowledged batches are left to replay, so nothing is counted
+   // twice. They go on as is when they continue a game the daemon acknowledged the start of;
+   // otherwise those before the first game_start are a fragment the session cannot place.
+   TakeSourceGames();
+   size_t keepFrom = 0;
+   if (m_games.empty() || m_games.front().epoch != m_gameOpenEpoch)
+   {
+      keepFrom = m_games.size();
+      for (size_t i = 0; i < m_games.size(); i++)
+         if (!m_games[i].batch.ops.empty() && m_games[i].batch.ops.front().kind == Wire::GAME_START)
+         {
+            keepFrom = i;
+            break;
+         }
+   }
+   if (keepFrom != 0)
+   {
+      Log(LOG_LEVEL_INFO, "Socket: dropped " + std::to_string(keepFrom) + " Game batches committed while disconnected");
+      m_games.erase(m_games.begin(), m_games.begin() + static_cast<std::ptrdiff_t>(keepFrom));
+   }
    // The daemon sends Status after the first Declare, on every connection.
    m_statusRecord = { };
    m_statusRecord.inSession = true;
