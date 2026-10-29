@@ -46,6 +46,7 @@ endif()
 add_library(scorbit-transport STATIC
    src/AuthoredTable.h
    src/AuthoredTable.cpp
+   src/GameQueue.h
    src/WireProtocol.h
    src/WireProtocol.cpp
    src/MemoryBridge.h

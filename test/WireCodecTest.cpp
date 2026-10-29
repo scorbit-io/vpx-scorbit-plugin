@@ -89,7 +89,7 @@ void TestHello()
       tokenHex += "30313233343536373839616263646566";
    const std::string expected =
       "0100"              // proto_major
-      "0000"              // proto_minor
+      "0100"              // proto_minor, 1.1
       "0500" "302e312e30" // plugin_version "0.1.0"
       "0400" "35353839"   // vpx_revision "5589"
       "0300" "616263"     // plugin_api_commit "abc"
@@ -135,7 +135,7 @@ void TestDeclare()
    d.sourceGeneration = 3;
    d.identifyFormat = "BITPLANE2";
 
-   const std::vector<uint8_t> payload = Wire::Encode(d);
+   const std::vector<uint8_t> payload = Wire::Encode(d, 0);
    const std::string expected =
       "0500" "696a5f6c37"       // rom_id "ij_l7"
       "0600" "2f742e767078"     // table_path "/t.vpx"
@@ -156,7 +156,7 @@ void TestDeclare()
    Wire::Declare none;
    none.vpxRevision = "5589";
    none.sourceGeneration = 12;
-   const std::vector<uint8_t> nonePayload = Wire::Encode(none);
+   const std::vector<uint8_t> nonePayload = Wire::Encode(none, 0);
    Wire::Declare noneBack;
    CHECK(Wire::Decode(nonePayload, noneBack));
    CHECK(noneBack == none);
@@ -265,7 +265,7 @@ void TestMalformed()
    d.shades = 4;
    d.sourceGeneration = 3;
    d.identifyFormat = "BITPLANE2";
-   std::vector<uint8_t> payload = Wire::Encode(d);
+   std::vector<uint8_t> payload = Wire::Encode(d, 0);
    for (size_t cut = 1; cut < payload.size(); cut++)
    {
       std::vector<uint8_t> truncated(payload.begin(), payload.begin() + static_cast<long>(payload.size() - cut));
@@ -313,10 +313,10 @@ void TestForwardCompatibility()
    d.shades = 4;
    d.sourceGeneration = 3;
    d.identifyFormat = "BITPLANE2";
-   std::vector<uint8_t> payload = Wire::Encode(d);
+   std::vector<uint8_t> payload = Wire::Encode(d, Wire::PROTO_MINOR);
    const size_t known = payload.size();
 
-   // A 1.1 daemon appends a field this build has never heard of.
+   // A later minor appends a field this build has never heard of.
    Wire::Writer extra;
    extra.U32(0xCAFEF00D);
    extra.Str("something new");
@@ -324,7 +324,7 @@ void TestForwardCompatibility()
    CHECK(payload.size() > known);
 
    Wire::Declare back;
-   CHECK_MSG(Wire::Decode(payload, back), "a 1.0 reader must accept an appended field");
+   CHECK_MSG(Wire::Decode(payload, back), "a 1.1 reader must accept an appended field");
    CHECK(back == d);
 
    // The same for every other payload the plugin reads off the wire.
@@ -631,6 +631,149 @@ void TestSliceFourTruncation()
    CHECK_MSG(!Wire::Decode(Wire::Encode(over), status), "support_text over 256 bytes is malformed");
 }
 
+// A GameOp with the fields its kind does not use left at zero.
+Wire::GameOp Op(uint8_t kind, uint8_t value = 0, int64_t score = 0, int32_t feature = 0, uint32_t seconds = 0,
+   const std::string& mode = { })
+{
+   return Wire::GameOp { kind, value, score, feature, seconds, mode };
+}
+
+// Whole wire frames from the slice 5 contract (protocol 1.1, SB-5984), §8, verbatim.
+void TestSliceFiveGoldenVectors()
+{
+   const auto frame = [](uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload)
+   {
+      return ScorbitTest::Hex(Wire::EncodeMessage(Wire::TYPE_GAME, flags, seq, payload));
+   };
+   const auto decodeGame = [](const std::string& hex, uint32_t seq, Wire::GameBatch& out)
+   {
+      const std::vector<uint8_t> bytes = ScorbitTest::Unhex(hex);
+      Wire::Message msg;
+      return Wire::DecodeBody(bytes.data() + Wire::LENGTH_BYTES, bytes.size() - Wire::LENGTH_BYTES, msg)
+         && msg.header.type == Wire::TYPE_GAME && msg.header.seq == seq && !msg.header.IsResponse()
+         && Wire::Decode(msg.payload, out);
+   };
+
+   const struct
+   {
+      const char* name;
+      std::string hex;
+      uint32_t seq;
+      Wire::GameBatch batch;
+   } games[] = {
+      { "batch 1, start by button", "10000000" "3000" "0000" "09000000" "01000000" "0100" "01" "00", 9,
+         { { Op(Wire::GAME_START, 0) }, 1 } },
+      { "batch 2, add expiring for 3 s",
+         "21000000" "3000" "0000" "0a000000" "02000000" "0100" "07" "03000000" "0c00" "4d423a4d756c746962616c6c", 10,
+         { { Op(Wire::GAME_ADD_MODE_EXPIRING, 0, 0, 0, 3, "MB:Multiball") }, 2 } },
+      { "batch 3, ball 1, player 1 scores 12,340",
+         "1e000000" "3000" "0000" "0b000000" "03000000" "0200" "03" "01" "05" "01" "3430000000000000" "00000000", 11,
+         { { Op(Wire::GAME_BALL, 1), Op(Wire::GAME_SCORE, 1, 12340, 0) }, 3 } },
+      { "batch 4, mode completed, then game end",
+         "1e000000" "3000" "0000" "0c000000" "04000000" "0200" "08" "0c00" "4d423a4d756c746962616c6c" "02", 12,
+         { { Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball"), Op(Wire::GAME_END) }, 4 } },
+   };
+   for (const auto& g : games)
+   {
+      const std::string encoded = frame(0, g.seq, Wire::Encode(g.batch));
+      CHECK_MSG(encoded == g.hex, std::string(g.name) + ": " + encoded);
+      Wire::GameBatch back;
+      CHECK_MSG(decodeGame(g.hex, g.seq, back) && back == g.batch, g.name);
+   }
+
+   CHECK(frame(Wire::FLAG_RESPONSE, 9, { }) == "08000000" "3000" "0100" "09000000");
+
+   const std::string notAuthored = "0c000000" "3000" "0300" "0a000000" "0d00" "0000";
+   CHECK(frame(Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, 10,
+      Wire::Encode(Wire::ErrorPayload { Wire::ERR_NOT_AUTHORED, "" })) == notAuthored);
+   CHECK(std::string(Wire::ErrorName(Wire::ERR_NOT_AUTHORED)) == "not_authored");
+   CHECK(std::string(Wire::TypeName(Wire::TYPE_GAME)) == "Game");
+
+   const std::string uuid = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
+   const std::string declareHex = "86000000" "0300" "0000" "03000000"
+      "0000" "0900" "4f726269742e767078" "0600" "31302e382e31" "0700" "61316232633364"
+      "0000" "0000" "00" "00000000" "0000"
+      "01"
+      "2400" "30623663326636652d376431612d346333652d396632302d356138653164346237633930"
+      "0c00" "2f542f4f726269742e767078"
+      "0c00" "2f412f5650696e62616c6c58"
+      "1000" "2f502f5650696e62616c6c582e696e69";
+   Wire::Declare authored;
+   authored.tablePath = "Orbit.vpx";
+   authored.vpxVersion = "10.8.1";
+   authored.vpxRevision = "a1b2c3d";
+   authored.tableKind = Wire::TABLE_AUTHORED;
+   authored.machineUuid = uuid;
+   authored.tableFullPath = "/T/Orbit.vpx";
+   authored.vpxAppPath = "/A/VPinballX";
+   authored.prefsPath = "/P/VPinballX.ini";
+   std::vector<Wire::SensitiveSpan> spans;
+   const std::vector<uint8_t> payload = Wire::Encode(authored, 1, &spans);
+   const std::string encoded = ScorbitTest::Hex(Wire::EncodeMessage(Wire::TYPE_DECLARE, 0, 3, payload));
+   CHECK_MSG(encoded == declareHex, encoded);
+   const std::vector<uint8_t> bytes = ScorbitTest::Unhex(declareHex);
+   Wire::Message msg;
+   CHECK(Wire::DecodeBody(bytes.data() + Wire::LENGTH_BYTES, bytes.size() - Wire::LENGTH_BYTES, msg));
+   Wire::Declare back;
+   CHECK(Wire::Decode(msg.payload, back) && back == authored);
+
+   // The spans are each path's UTF-8 bytes, without its length prefix.
+   CHECK(spans.size() == 3);
+   const std::string* paths[] = { &authored.tableFullPath, &authored.vpxAppPath, &authored.prefsPath };
+   for (size_t i = 0; i < spans.size() && i < 3; i++)
+   {
+      const Wire::SensitiveSpan& span = spans[i];
+      CHECK(span.offset + span.length <= payload.size());
+      CHECK_MSG(std::string(payload.begin() + static_cast<long>(span.offset),
+         payload.begin() + static_cast<long>(span.offset + span.length)) == *paths[i], "span " + std::to_string(i));
+   }
+
+   // The same table to a 1.0 peer stops after identify_format, and carries no span.
+   const std::vector<uint8_t> old = Wire::Encode(authored, 0, &spans);
+   CHECK(old.size() == payload.size() - (1 + 2 + 36 + 2 + 12 + 2 + 12 + 2 + 16));
+   CHECK(spans.empty());
+   Wire::Declare oldBack;
+   CHECK(Wire::Decode(old, oldBack));
+   CHECK(oldBack.tableKind == Wire::TABLE_ROM && oldBack.machineUuid.empty() && oldBack.prefsPath.empty());
+
+   // Cut anywhere inside the appended fields, a 1.1 Declare is refused.
+   for (size_t keep = old.size() + 1; keep < payload.size(); keep++)
+   {
+      std::vector<uint8_t> truncated(payload.begin(), payload.begin() + static_cast<long>(keep));
+      CHECK_MSG(!Wire::Decode(truncated, back), "accepted a 1.1 Declare cut to " + std::to_string(keep));
+   }
+}
+
+void TestGameRejections()
+{
+   const auto rejects = [](const std::string& hex) { Wire::GameBatch out; return !Wire::Decode(ScorbitTest::Unhex(hex), out); };
+   // Every payload leads with its u32 batch_id.
+   const std::string id = "07000000";
+   CHECK_MSG(rejects("070000"), "shorter than a batch_id");
+   CHECK_MSG(rejects(id + "0000"), "count 0");
+   CHECK_MSG(rejects(id + "0101" + Repeat("0a", 257)), "count 257");
+   CHECK_MSG(!rejects(id + "0001" + Repeat("0a", 256)), "count 256");
+   CHECK_MSG(rejects(id + "0100" "0b"), "unknown kind 11");
+   CHECK_MSG(rejects(id + "0100" "00"), "unknown kind 0");
+   CHECK_MSG(rejects(id + "0200" "0a" "0100"), "game_start not first");
+   CHECK_MSG(rejects(id + "0200" "02" "0a"), "game_end not last");
+   CHECK_MSG(!rejects(id + "0200" "0100" "02"), "start then end");
+   CHECK_MSG(rejects(id + "0100" "05" "01" "3430"), "a score cut short");
+   CHECK_MSG(rejects(id + "0200" "0a"), "fewer ops than the count");
+
+   // Encode holds to the same rules rather than sending what the daemon refuses.
+   CHECK(Wire::Encode(Wire::GameBatch { }).empty());
+   CHECK(Wire::Encode(Wire::GameBatch { { Op(Wire::GAME_CLEAR_MODES), Op(Wire::GAME_START) } }).empty());
+   CHECK(Wire::Encode(Wire::GameBatch { { Op(Wire::GAME_END), Op(Wire::GAME_CLEAR_MODES) } }).empty());
+   CHECK(Wire::Encode(Wire::GameBatch { { Op(11) } }).empty());
+   CHECK(Wire::Encode(Wire::GameBatch { std::vector<Wire::GameOp>(Wire::MAX_GAME_OPS + 1, Op(Wire::GAME_CLEAR_MODES)) }).empty());
+
+   // A negative score and feature survive the trip as two's complement.
+   const Wire::GameBatch negative { { Op(Wire::GAME_SCORE, 2, -5, -1) } };
+   Wire::GameBatch back;
+   CHECK(Wire::Decode(Wire::Encode(negative), back) && back == negative);
+}
+
 int main()
 {
    TestFraming();
@@ -649,5 +792,7 @@ int main()
    TestWriteRoundTripsAndTruncation();
    TestSliceFourGoldenVectors();
    TestSliceFourTruncation();
+   TestSliceFiveGoldenVectors();
+   TestGameRejections();
    return ScorbitTest::Summary("wire_codec_test");
 }

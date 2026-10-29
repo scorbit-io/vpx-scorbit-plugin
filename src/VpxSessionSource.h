@@ -20,6 +20,7 @@
 #include "AuthoredTable.h"
 #include "DmdOverlay.h"
 #include "DmdTap.h"
+#include "GameQueue.h"
 #include "MemoryBridge.h"
 #include "SocketWorker.h"
 #include "StatusNotice.h"
@@ -53,10 +54,18 @@ public:
    void SetRomId(const std::string& romId);
 
    // API thread only: the table script's Scorbit.Declare (SB-5990). The script runs before
-   // OnGameStart, so the id is kept until the game ends; a later call replaces it. Held
-   // host-side until the authored Declare has a wire layout (SB-5984).
+   // OnGameStart, so the id is kept until the game ends and goes out with the paths captured
+   // there; a later call goes out at once. While a ROM runs, the ROM wins and this is ignored.
    void DeclareMachine(const std::string& machineId);
    const AuthoredTable& Authored() const { return m_authored; }
+
+   // API thread only: the table script's game calls, buffered until ScriptCommit. Dropped,
+   // with one line per table, until an authored Declare can go out.
+   void ScriptGameOp(const Wire::GameOp& op);
+   // Queues the buffered ops for the worker as one or more Game batches.
+   void ScriptCommit();
+   // A script call refused for its arguments; logged once per table, never raised.
+   void ScriptCallIgnored(const std::string& why);
 
    // API thread only. Builds the declaration and posts it to the worker when it
    // changed. Called per rendered frame and from the plugin's timer, so it stays
@@ -81,6 +90,7 @@ public:
    std::unique_ptr<DeclareSnapshot> TakeDeclare() override { return m_declares.Take(); }
    void GetFrame(FrameSnapshot& out) override;
    void GetSession(SessionSnapshot& out) override;
+   void TakeGames(std::deque<GamePost>& out) override;
 
    // IOverlayTarget, worker thread.
    bool OverlaySurface() override { return m_overlay.HasSurface(); }
@@ -112,6 +122,8 @@ private:
    void PostStatusNotice();
    // API thread, once per rendered frame until PinMAME answers: the machine's address space.
    void QueryAddressSpace();
+   // Machine id declared, paths captured, and no ROM running.
+   bool AuthoredReady() const;
 
    const MsgPluginAPI* const m_msgApi;
    const uint32_t m_endpointId;
@@ -141,6 +153,15 @@ private:
    bool m_havePosted = false;
    bool m_addressSpaceKnown = false;
    AuthoredTable m_authored;
+   std::vector<Wire::GameOp> m_ops; // the script's calls since its last Commit
+   // Once per table each, reset when the game ends.
+   bool m_loggedRomWins = false;
+   bool m_loggedDroppedOps = false;
+   bool m_loggedIgnoredCall = false;
+
+   // Committed batches, API thread to worker; when full it keeps the newest games.
+   GameQueue m_games { MAX_QUEUED_GAME_OPS };
+   bool m_loggedQueueDrop = false;
 
    Latch<DeclareSnapshot> m_declares;
    TapView m_workerTap; // worker only

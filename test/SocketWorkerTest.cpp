@@ -9,10 +9,13 @@
 #include "TestPeer.h"
 #include "WireVectors.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,8 +64,24 @@ public:
       m_session = session;
    }
 
+   void TakeGames(std::deque<GamePost>& out) override
+   {
+      std::lock_guard lock(m_mutex);
+      for (GamePost& post : m_games)
+         out.push_back(std::move(post));
+      m_games.clear();
+   }
+
+   // Commits a batch as the API thread would.
+   void Commit(uint64_t epoch, const Wire::GameBatch& batch)
+   {
+      std::lock_guard lock(m_mutex);
+      m_games.push_back({ epoch, batch });
+   }
+
 private:
    std::mutex m_mutex;
+   std::deque<GamePost> m_games;
    Latch<DeclareSnapshot> m_declares;
    FrameSnapshot m_frame;
    SessionSnapshot m_session;
@@ -682,7 +701,7 @@ void TestCapturedWireBytes()
    CHECK(OpenVector("DECLARE_NO_SOURCE", Vectors::DECLARE_NO_SOURCE, msg));
    Wire::Declare opening { };
    CHECK(Wire::Decode(msg.payload, opening));
-   CHECK_MSG(Wire::Encode(opening) == msg.payload, "Declare re encode is byte identical");
+   CHECK_MSG(Wire::Encode(opening, 0) == msg.payload, "Declare re encode is byte identical");
    CHECK_MSG(opening.romId.empty() && opening.width == 0 && opening.sourceGeneration == 0,
              "the opening declare precedes any ROM");
 
@@ -690,14 +709,14 @@ void TestCapturedWireBytes()
    Wire::HelloAck ack { };
    CHECK(Wire::Decode(msg.payload, ack));
    CHECK_MSG(Wire::Encode(ack) == msg.payload, "HelloAck re encode is byte identical");
-   CHECK(ack.protoMajor == Wire::PROTO_MAJOR && ack.protoMinor == Wire::PROTO_MINOR);
+   CHECK_MSG(ack.protoMajor == Wire::PROTO_MAJOR && ack.protoMinor == 0, "captured from a 1.0 daemon");
 
    CHECK(OpenVector("HELLO", Vectors::HELLO, msg));
    CHECK(msg.header.type == Wire::TYPE_HELLO && msg.header.seq == 1);
    Wire::Hello hello { };
    CHECK(Wire::Decode(msg.payload, hello));
    CHECK_MSG(Wire::Encode(hello) == msg.payload, "Hello re encode is byte identical");
-   CHECK(hello.protoMajor == Wire::PROTO_MAJOR && hello.protoMinor == Wire::PROTO_MINOR);
+   CHECK_MSG(hello.protoMajor == Wire::PROTO_MAJOR && hello.protoMinor == 0, "captured from a 1.0 plugin");
    CHECK(hello.vpxRevision == "5589");
    CHECK(hello.token == std::string(64, '0'));
    CHECK_MSG(hello.capabilities == (Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_MEMORY_READ
@@ -708,7 +727,7 @@ void TestCapturedWireBytes()
    CHECK(msg.header.type == Wire::TYPE_DECLARE);
    Wire::Declare meteor { };
    CHECK(Wire::Decode(msg.payload, meteor));
-   CHECK_MSG(Wire::Encode(meteor) == msg.payload, "Meteor Declare re encode is byte identical");
+   CHECK_MSG(Wire::Encode(meteor, 0) == msg.payload, "Meteor Declare re encode is byte identical");
    CHECK(meteor.romId == "meteor");
    CHECK_MSG(meteor.tablePath == "Meteor (Stern 1979).vpx", "the table by file name, never a path");
    CHECK_MSG(meteor.width == 0 && meteor.height == 0 && meteor.shades == 0
@@ -727,7 +746,7 @@ void TestCapturedWireBytes()
    CHECK(OpenVector("DECLARE", declareHex, msg));
    Wire::Declare declare { };
    CHECK(Wire::Decode(msg.payload, declare));
-   CHECK_MSG(Wire::Encode(declare) == msg.payload, "Declare re encode is byte identical");
+   CHECK_MSG(Wire::Encode(declare, 0) == msg.payload, "Declare re encode is byte identical");
    CHECK(declare.romId == "tom_13");
    CHECK(declare.width == 128 && declare.height == 32 && declare.shades == 4);
    CHECK_MSG(declare.identifyFormat == "BITPLANE2",
@@ -1482,6 +1501,332 @@ void TestRefusedHelloReason()
    worker.Stop();
 }
 
+// A GameOp with the fields its kind does not use left at zero.
+Wire::GameOp Op(uint8_t kind, uint8_t value = 0, int64_t score = 0, int32_t feature = 0, uint32_t seconds = 0,
+   const std::string& mode = { })
+{
+   return Wire::GameOp { kind, value, score, feature, seconds, mode };
+}
+
+// Slice 5 (protocol 1.1): an authored table is declared, and its games sent, only to a
+// daemon whose HelloAck offers authored_tables at minor 1.
+DeclareSnapshot MakeAuthoredDeclare(uint64_t epoch)
+{
+   DeclareSnapshot d = MakeDeclare("", 0, 0, 0, 0);
+   d.declare.tablePath = "Orbit.vpx";
+   d.declare.tableKind = Wire::TABLE_AUTHORED;
+   d.declare.machineUuid = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
+   d.declare.tableFullPath = "/T/Orbit.vpx";
+   d.declare.vpxAppPath = "/A/VPinballX";
+   d.declare.prefsPath = "/P/VPinballX.ini";
+   d.epoch = epoch;
+   return d;
+}
+
+// Reads Hello and answers a HelloAck with the given minor and capabilities.
+bool AckHello(ScorbitTest::TestPeer& peer, uint16_t minor, uint32_t capabilities, Wire::Hello& hello)
+{
+   Wire::Message msg;
+   if (!peer.ReadOfType(Wire::TYPE_HELLO, msg, WAIT_MS) || !Wire::Decode(msg.payload, hello))
+      return false;
+   Wire::HelloAck ack;
+   ack.protoMajor = Wire::PROTO_MAJOR;
+   ack.protoMinor = minor;
+   ack.daemonVersion = "scorbitd-test";
+   ack.capabilities = capabilities;
+   ack.sessionId = 5;
+   return peer.Send(Wire::TYPE_HELLO_ACK, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(ack));
+}
+
+// The first frame of the given type the plugin sent, from a wire dump.
+std::vector<uint8_t> DumpedFrame(const std::string& path, uint16_t type)
+{
+   std::ifstream in(path, std::ios::binary);
+   const std::vector<uint8_t> dump { std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>() };
+   for (size_t at = 13; at + 13 <= dump.size();)
+   {
+      const size_t length = dump[at + 9] | (dump[at + 10] << 8) | (dump[at + 11] << 16)
+         | (static_cast<size_t>(dump[at + 12]) << 24);
+      const size_t frame = at + 13;
+      if (frame + length > dump.size())
+         break;
+      if (dump[at] == '>' && length >= 6 && (dump[frame + 4] | (dump[frame + 5] << 8)) == type)
+         return std::vector<uint8_t>(dump.begin() + static_cast<long>(frame), dump.begin() + static_cast<long>(frame + length));
+      at = frame + length;
+   }
+   return { };
+}
+
+bool Contains(const std::vector<uint8_t>& bytes, const std::string& text)
+{
+   return std::search(bytes.begin(), bytes.end(), text.begin(), text.end()) != bytes.end();
+}
+
+void TestAuthoredTableWithAuthoredDaemon()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+   const std::string dumpPath = dir + "/wire.dump";
+   setenv("SCORBIT_WIRE_DUMP", dumpPath.c_str(), 1);
+
+   FakeSource source;
+   const DeclareSnapshot authored = MakeAuthoredDeclare(1);
+   source.Set(authored, { });
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_BALL, 1) } };
+   source.Commit(1, start);
+
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   CHECK_MSG((hello.capabilities & Wire::CAP_AUTHORED_TABLES) != 0, "the bindings exist, so Hello offers bit 7");
+   CHECK(hello.protoMinor == 1);
+
+   // --- The authored Declare, 1.1 layout, ahead of any Game ---------------------
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK_MSG(msg.payload == Wire::Encode(authored.declare, 1), "the 1.1 layout, byte for byte");
+   Wire::Declare declare;
+   CHECK(Wire::Decode(msg.payload, declare));
+   CHECK(declare.tableKind == Wire::TABLE_AUTHORED && declare.romId.empty());
+   CHECK(declare.machineUuid == authored.declare.machineUuid);
+   CHECK(declare.tableFullPath == "/T/Orbit.vpx" && declare.vpxAppPath == "/A/VPinballX"
+      && declare.prefsPath == "/P/VPinballX.ini");
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   // --- The Game committed before it, then one refused, which is logged and survived
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   Wire::GameBatch batch;
+   CHECK(Wire::Decode(msg.payload, batch) && batch.ops == start.ops);
+   CHECK_MSG(batch.batchId == 1, "batch ids count from 1 per plugin load");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   const Wire::GameBatch score { { Op(Wire::GAME_SCORE, 1, 12340, 0) } };
+   source.Commit(1, score);
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, batch) && batch.ops == score.ops && batch.batchId == 2);
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, msg.header.seq,
+      Wire::Encode(Wire::ErrorPayload { Wire::ERR_TOO_LARGE, "queue full" })));
+
+   // --- A table change: the old table's last batch goes out before the Declare ending it
+   const Wire::GameBatch end { { Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball"), Op(Wire::GAME_END) } };
+   source.Commit(1, end);
+   source.Set(MakeDeclare("", 0, 0, 0, 0), { });
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == end.ops, "the session continues past an error");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, declare));
+   CHECK(declare.tableKind == Wire::TABLE_ROM && declare.machineUuid.empty() && declare.tableFullPath.empty());
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   // A batch from the table that has gone is dropped, not sent.
+   source.Commit(1, score);
+   CHECK_MSG(peer.Silent(300), "a stale batch is dropped");
+
+   worker.Stop();
+   unsetenv("SCORBIT_WIRE_DUMP");
+
+   // The dump holds the authored Declare with its paths blanked and everything else intact.
+   const std::vector<uint8_t> dumped = DumpedFrame(dumpPath, Wire::TYPE_DECLARE);
+   CHECK(!dumped.empty());
+   CHECK(Contains(dumped, authored.declare.machineUuid) && Contains(dumped, "Orbit.vpx"));
+   CHECK(!Contains(dumped, "/T/") && !Contains(dumped, "/A/") && !Contains(dumped, "/P/"));
+   Wire::Message redacted;
+   CHECK(dumped.size() > Wire::LENGTH_BYTES
+      && Wire::DecodeBody(dumped.data() + Wire::LENGTH_BYTES, dumped.size() - Wire::LENGTH_BYTES, redacted));
+   CHECK_MSG(Wire::Decode(redacted.payload, declare) && declare.tableFullPath == std::string(12, '*')
+      && declare.vpxAppPath == std::string(12, '*') && declare.prefsPath == std::string(16, '*')
+      && declare.machineUuid == authored.declare.machineUuid,
+      "a redacted Declare still decodes, with only its paths blanked");
+   unlink(dumpPath.c_str());
+}
+
+// Committed while no daemon listened: a new session gets the latest game from its start,
+// never the earlier batches, which have no game_start before them in that session.
+void TestGamesCommittedBeforeConnecting()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   const Wire::GameBatch stale { { Op(Wire::GAME_SCORE, 1, 500, 0) } };
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0) } };
+   const Wire::GameBatch score { { Op(Wire::GAME_SCORE, 1, 12340, 0) } };
+   source.Commit(1, stale);
+   source.Commit(1, start);
+   source.Commit(1, score);
+
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   Wire::GameBatch batch;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == start.ops, "the game's start, not the batch before it");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, batch) && batch.ops == score.ops);
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(peer.Silent(300), "nothing else follows");
+   worker.Stop();
+}
+
+// The daemon acknowledged the game's start, then the session dropped: the batches committed
+// meanwhile go on as is after the reconnect, and nothing acknowledged is sent again.
+void TestGameContinuesAcrossReconnect()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball") } };
+   source.Commit(1, start);
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Silent(200));
+
+   peer.CloseClient();
+   const Wire::GameBatch tail { { Op(Wire::GAME_SCORE, 1, 12340, 0) } };
+   source.Commit(1, tail);
+
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   Wire::GameBatch batch;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == tail.ops,
+      "the tail of a game whose start was acknowledged, not the acknowledged start again");
+   CHECK_MSG(batch.batchId == 2, "the id runs on across the reconnect");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(peer.Silent(300), "nothing acknowledged is replayed");
+   worker.Stop();
+}
+
+// A batch in flight when the session dropped, never acknowledged, is replayed after the
+// reconnect with its original batch_id, so the daemon can skip it if it had applied it.
+void TestInFlightGameKeepsItsId()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball") } };
+   source.Commit(1, start);
+   Wire::GameBatch first;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, first));
+   peer.CloseClient(); // before any acknowledgement
+
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   Wire::GameBatch again;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK_MSG(Wire::Decode(msg.payload, again) && again == first, "the same batch, batch_id included");
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(peer.Silent(300), "sent once more, not again");
+   worker.Stop();
+}
+
+void TestAuthoredTableWithoutAuthoredDaemon()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   Wire::Declare declare;
+   CHECK(Wire::Decode(msg.payload, declare));
+   CHECK_MSG(declare.tableKind == Wire::TABLE_ROM && declare.machineUuid.empty(), "declared as kind 0");
+   CHECK_MSG(declare.tableFullPath.empty() && declare.vpxAppPath.empty() && declare.prefsPath.empty(),
+      "no paths to a daemon that does not serve authored tables");
+   CHECK(declare.tablePath == "Orbit.vpx");
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(peer.Silent(300), "and no Game");
+   worker.Stop();
+}
+
 int main()
 {
    TestSession();
@@ -1499,5 +1844,10 @@ int main()
    TestMemoryReadWithoutAnApiThread();
    TestOverlayAndStatusOverTheSocket();
    TestRefusedHelloReason();
+   TestAuthoredTableWithAuthoredDaemon();
+   TestGamesCommittedBeforeConnecting();
+   TestGameContinuesAcrossReconnect();
+   TestInFlightGameKeepsItsId();
+   TestAuthoredTableWithoutAuthoredDaemon();
    return ScorbitTest::Summary("socket_worker_test");
 }

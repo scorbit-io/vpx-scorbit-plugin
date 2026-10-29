@@ -187,9 +187,10 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    // a daemon is running and retries once a second until one is.
    vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get);
    // Before the table script runs, which is when its CreateObject is resolved.
-   RegisterScriptBinding(msgApi, endpointId, vpxSession);
+   const bool scriptBinding = RegisterScriptBinding(msgApi, endpointId, vpxSession);
    {
       SocketWorkerConfig cfg;
+      cfg.authoredTables = scriptBinding;
       cfg.socketPath = setSocketPath_Get();
       cfg.pluginVersion = SCORBIT_PLUGIN_VERSION;
       cfg.pluginApiCommit = SCORBIT_VPX_PLUGIN_API_COMMIT;
