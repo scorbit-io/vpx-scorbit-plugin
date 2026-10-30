@@ -17,6 +17,8 @@
 
 #ifndef _WIN32
    #include <sys/stat.h>
+   #include <sys/wait.h>
+   #include <unistd.h>
 #endif
 
 using namespace Scorbit;
@@ -432,6 +434,83 @@ void TestNewIdentityRule()
    CHECK(Wire::NewIdentity(rom, romB));
 }
 
+#ifndef _WIN32
+// The first preparation of the directory deletes the copies a process that has ended left behind,
+// and nothing else: not a live process's, not this one's, not other files, links or directories.
+void TestSweepLeftovers()
+{
+   std::error_code ec;
+   const fs::path root = fs::temp_directory_path(ec) / "scorbit-read-back-sweep";
+   fs::remove_all(root, ec);
+   const fs::path dir = root / "scorbit-vpx" / "pictures";
+   fs::create_directories(dir, ec);
+   fs::permissions(root / "scorbit-vpx", fs::perms::owner_all, fs::perm_options::replace, ec);
+   fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
+
+   // A pid that has certainly ended: a child, reaped.
+   const pid_t child = fork();
+   if (child == 0)
+      _exit(0);
+   waitpid(child, nullptr, 0);
+   const std::string dead = std::to_string(child);
+   const std::string live = std::to_string(getppid());
+   const std::string self = std::to_string(getpid());
+
+   const fs::path stale = dir / (dead + "-000000000000002a-1-1.jpg");
+   const fs::path liveCopy = dir / (live + "-000000000000002b-1-1.jpg");
+   const fs::path ownCopy = dir / (self + "-000000000000002c-2-1.jpg");
+   const fs::path other = dir / "notes.txt";
+   const fs::path outside = root / "outside.jpg";
+   const fs::path link = dir / (dead + "-000000000000002d-3-1.jpg");
+   const fs::path subdir = dir / (dead + "-000000000000002e-4-1.jpg");
+   for (const fs::path& p : { stale, liveCopy, ownCopy, other, outside })
+      Write(p, "x");
+   fs::create_symlink(outside, link, ec);
+   fs::create_directory(subdir, ec);
+   const fs::path source = root / "a.jpg";
+   Write(source, "picture a");
+
+   {
+      PlayerTable table;
+      table.SetDirectory(dir, 1);
+      table.Apply(Wire::Players { { { 1, "p-1", "", "", "", "" } } });
+      std::string error;
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(source) }, error) == PlayerTable::Picture::Stored);
+      CHECK(table.SweepError().empty());
+      CHECK_MSG(!fs::exists(stale), "an ended process's copy is deleted");
+      CHECK_MSG(fs::exists(liveCopy) && fs::exists(ownCopy), "a live process's copies stay");
+      CHECK_MSG(fs::exists(other), "a file not named as a copy stays");
+      CHECK_MSG(fs::is_symlink(fs::symlink_status(link, ec)) && fs::exists(outside), "a link is never followed or removed");
+      CHECK_MSG(fs::is_directory(subdir), "a directory stays");
+
+      // Once per load: a later leftover is not swept.
+      const fs::path later = dir / (dead + "-000000000000002f-1-9.jpg");
+      Write(later, "x");
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", "" }, error) == PlayerTable::Picture::Removed);
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(source) }, error) == PlayerTable::Picture::Stored);
+      CHECK(fs::exists(later));
+      PlayersPost post;
+      table.Fill(post);
+      CHECK_MSG(fs::path(post.slots[0].picture).filename().string().rfind(self + "-", 0) == 0, "copies are named with this pid");
+   }
+   {
+      // A refused directory is never swept.
+      const fs::path shared = root / "shared" / "scorbit-vpx" / "pictures";
+      fs::create_directories(shared, ec);
+      fs::permissions(shared, fs::perms::owner_all | fs::perms::others_all, fs::perm_options::replace, ec);
+      const fs::path left = shared / (dead + "-0000000000000030-1-1.jpg");
+      Write(left, "x");
+      PlayerTable table;
+      table.SetDirectory(shared, 1);
+      table.Apply(Wire::Players { { { 1, "p-1", "", "", "", "" } } });
+      std::string error;
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(source) }, error) == PlayerTable::Picture::Failed);
+      CHECK(fs::exists(left));
+   }
+   fs::remove_all(root, ec);
+}
+#endif
+
 void TestDisplayName()
 {
    PlayerView v;
@@ -458,6 +537,7 @@ int main()
 #ifndef _WIN32
    TestPictureDirectoryOwnership();
    TestDefaultPictureDirectory();
+   TestSweepLeftovers();
 #endif
    return ScorbitTest::Summary("read_back_test");
 }

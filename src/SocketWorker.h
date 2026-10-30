@@ -205,6 +205,8 @@ private:
    uint32_t OwnCapabilities() const;
    // A Declare naming a table that plays, not the chooser's empty one.
    bool TableActive() const;
+   // The daemon can resolve the declared table: a ROM, or an authored machine it serves.
+   bool TableIdentified() const;
    // A 1.2 read-back both sides offer; player_pictures also needs players.
    bool ReadBackAllowed(uint32_t capability) const;
    // Sends the script's queued TopScoresRequests. False closes the session.
@@ -313,6 +315,7 @@ private:
    uint32_t m_scoresLogged = 0;          // TopScoresRequest refusals logged, by code bit, per connection
    bool m_loggedPictureCopy = false;     // once per connection
    bool m_loggedPictureDir = false;      // once per plugin load: a refused directory stays refused
+   bool m_loggedPictureSweep = false;    // once per plugin load
    PlayerTable m_players;
 };
 

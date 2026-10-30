@@ -1154,7 +1154,7 @@ void SocketWorker::Serve()
    while (m_running)
    {
       if (m_readBack != nullptr)
-         m_readBack->SetLeaderboards(TableActive() && ReadBackAllowed(Wire::CAP_LEADERBOARDS));
+         m_readBack->SetLeaderboards(TableIdentified() && ReadBackAllowed(Wire::CAP_LEADERBOARDS));
       if (!MaybeDeclare() || !SendGames() || !SendTopScoresRequests())
       {
          alive = !m_running;
@@ -1529,6 +1529,14 @@ bool SocketWorker::TableActive() const
    return m_haveDeclared && (!m_declared.declare.tablePath.empty() || !m_declared.declare.romId.empty());
 }
 
+bool SocketWorker::TableIdentified() const
+{
+   // An authored table to a daemon without authored_tables is declared without its uuid, so
+   // nothing names it: scope would resolve against no machine.
+   const Wire::Declare& d = m_declared.declare;
+   return TableActive() && (!d.romId.empty() || (d.tableKind == Wire::TABLE_AUTHORED && !d.machineUuid.empty() && AuthoredAllowed()));
+}
+
 void SocketWorker::PostPlayers()
 {
    PlayersPost post;
@@ -1597,7 +1605,7 @@ bool SocketWorker::SendTopScoresRequests()
          PostScores(ask.epoch, id, SCORES_UNSUPPORTED);
          continue;
       }
-      if (!TableActive())
+      if (!TableIdentified())
       {
          PostScores(ask.epoch, id, SCORES_NOT_DECLARED);
          continue;
@@ -1707,7 +1715,13 @@ bool SocketWorker::AnswerPlayerPicture(const Wire::Message& msg)
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "a short payload, or a player not 1 to 9");
    }
    std::string error;
-   switch (m_players.Apply(picture, error))
+   const PlayerTable::Picture outcome = m_players.Apply(picture, error);
+   if (!m_players.SweepError().empty() && !m_loggedPictureSweep)
+   {
+      Log(LOG_LEVEL_WARN, "Socket: " + m_players.SweepError() + "; continuing");
+      m_loggedPictureSweep = true;
+   }
+   switch (outcome)
    {
    case PlayerTable::Picture::Ignored:
       Log(LOG_LEVEL_DEBUG, "Socket: ignored a picture for player " + std::to_string(picture.player) + ", not its current claim");

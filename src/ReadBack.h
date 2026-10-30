@@ -141,6 +141,8 @@ public:
    Picture Apply(const Wire::PlayerPicture& picture, std::string& error);
    // The directory was found shared with other users, so no picture is kept for this load.
    bool DirectoryRefused() const { return m_refused; }
+   // Why the first preparation could not remove an earlier run's copies; empty when it could.
+   const std::string& SweepError() const { return m_sweepError; }
    // Empties every slot and deletes every copy. True when anything was held.
    bool Clear();
 
@@ -156,12 +158,17 @@ private:
    static void DropPicture(Slot& slot);
    // Creates the directory 0700, or accepts an existing one only when it is this user's alone.
    bool PrepareDirectory(std::string& error);
+   // Once per load, after the directory passes its checks: deletes the regular files named as
+   // copies whose process has ended. Never follows a link; a failure is noted, never fatal.
+   void SweepOnce();
 
    std::array<Slot, Wire::MAX_PLAYERS> m_slots;
    std::filesystem::path m_dir;
    uint64_t m_tag = 0;
    uint64_t m_copies = 0;
    bool m_refused = false;
+   bool m_swept = false;
+   std::string m_sweepError;
 };
 
 // The leaderboard results the script can read, by request id. API thread only.

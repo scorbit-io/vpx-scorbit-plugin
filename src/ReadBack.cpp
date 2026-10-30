@@ -7,8 +7,13 @@
 #include <cstdlib>
 #include <system_error>
 
-#ifndef _WIN32
+#ifdef _WIN32
+   #define WIN32_LEAN_AND_MEAN
+   #define NOMINMAX
+   #include <windows.h>
+#else
    #include <cerrno>
+   #include <csignal>
    #include <pwd.h>
    #include <sys/stat.h>
    #include <unistd.h>
@@ -32,6 +37,41 @@ std::string ToUtf8(const fs::path& p)
 {
    const std::u8string u = p.u8string();
    return std::string(u.begin(), u.end());
+}
+
+unsigned long ThisProcess()
+{
+#ifdef _WIN32
+   return GetCurrentProcessId();
+#else
+   return static_cast<unsigned long>(getpid());
+#endif
+}
+
+// Errs towards alive: a copy kept by mistake costs a file, one deleted by mistake a picture.
+bool ProcessAlive(unsigned long pid)
+{
+#ifdef _WIN32
+   const HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+   if (h == nullptr)
+      return GetLastError() != ERROR_INVALID_PARAMETER;
+   DWORD code = 0;
+   const bool alive = !GetExitCodeProcess(h, &code) || code == STILL_ACTIVE;
+   CloseHandle(h);
+   return alive;
+#else
+   return pid == 0 || pid > 0x7FFFFFFFul || kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH;
+#endif
+}
+
+// A copy's name: "<pid>-<tag>-<player>-<n>.jpg", the pid being the process that made it.
+bool ParseCopyName(const std::string& name, unsigned long& pid)
+{
+   unsigned long long tag = 0, n = 0;
+   unsigned player = 0;
+   int used = 0;
+   return std::sscanf(name.c_str(), "%lu-%16llx-%u-%llu.jpg%n", &pid, &tag, &player, &n, &used) == 4
+      && used == static_cast<int>(name.size());
 }
 
 }
@@ -156,6 +196,7 @@ bool PlayerTable::PrepareDirectory(std::string& error)
       error = "cannot create the picture directory (" + ec.message() + ')';
       return false;
    }
+   SweepOnce();
    return true;
 #else
    // The leaf and the scorbit-vpx above it are made 0700 here; whatever already exists must be a
@@ -177,8 +218,32 @@ bool PlayerTable::PrepareDirectory(std::string& error)
          return false;
       }
    }
+   SweepOnce();
    return true;
 #endif
+}
+
+void PlayerTable::SweepOnce()
+{
+   if (m_swept)
+      return;
+   m_swept = true;
+   // Copies a process left behind when it ended without unloading; a live process's are its own.
+   std::error_code ec;
+   bool failed = false;
+   for (fs::directory_iterator it(m_dir, ec), end; !ec && it != end; it.increment(ec))
+   {
+      std::error_code fe;
+      const fs::file_status status = it->symlink_status(fe);
+      unsigned long pid = 0;
+      if (fe || !fs::is_regular_file(status) || !ParseCopyName(ToUtf8(it->path().filename()), pid)
+         || pid == ThisProcess() || ProcessAlive(pid))
+         continue;
+      if (!fs::remove(it->path(), fe) && fe)
+         failed = true;
+   }
+   if (ec || failed)
+      m_sweepError = "cannot remove pictures left by an earlier run (" + (ec ? ec : std::make_error_code(std::errc::io_error)).message() + ')';
 }
 
 void PlayerTable::SetDirectory(fs::path dir, uint64_t tag)
@@ -264,7 +329,7 @@ PlayerTable::Picture PlayerTable::Apply(const Wire::PlayerPicture& picture, std:
       return Picture::Failed;
    }
    char name[64];
-   std::snprintf(name, sizeof(name), "%016llx-%u-%llu.jpg", static_cast<unsigned long long>(m_tag),
+   std::snprintf(name, sizeof(name), "%lu-%016llx-%u-%llu.jpg", ThisProcess(), static_cast<unsigned long long>(m_tag),
       static_cast<unsigned>(picture.player), static_cast<unsigned long long>(++m_copies));
    const fs::path copy = m_dir / name;
    if (!fs::copy_file(source, copy, fs::copy_options::overwrite_existing, ec) || ec)

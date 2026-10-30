@@ -2229,9 +2229,18 @@ void TestLeaderboardsNeedATable()
    CHECK_MSG(!channel.Leaderboards(), "the chooser's Declare names no table");
    CHECK_MSG(channel.Request(2, { }) == 0, "no id at the table chooser");
 
-   DeclareSnapshot table = MakeDeclare("", 0, 0, 0, 0);
-   table.declare.tablePath = "Orbit.vpx";
-   table.epoch = 3;
+   // A table that plays but names neither a ROM nor a machine cannot be resolved either.
+   DeclareSnapshot anonymous = MakeDeclare("", 0, 0, 0, 0);
+   anonymous.declare.tablePath = "Orbit.vpx";
+   anonymous.epoch = 3;
+   source.Set(anonymous, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 69, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+   std::this_thread::sleep_for(std::chrono::milliseconds(250));
+   CHECK_MSG(!channel.Leaderboards() && channel.Request(3, { }) == 0, "an unnamed table gets no id");
+
+   DeclareSnapshot table = MakeAuthoredDeclare(3);
    source.Set(table, { });
    CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
    CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
@@ -2379,6 +2388,52 @@ void TestNewIdentityWithinAnEpoch()
    std::filesystem::remove_all(files, ec);
 }
 
+// An authored table to a daemon without authored_tables is declared without its uuid, so the
+// daemon cannot resolve it: no leaderboards. A ROM table needs only its ROM.
+void TestLeaderboardsNeedAnIdentifiableTable()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   ReadBackChannel channel;
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | READ_BACK_CAPS, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   Wire::Declare declared;
+   CHECK(Wire::Decode(msg.payload, declared) && declared.machineUuid.empty() && declared.romId.empty());
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 90, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+   std::this_thread::sleep_for(std::chrono::milliseconds(250));
+   CHECK_MSG(!channel.Leaderboards(), "a downgraded authored Declare names nothing the daemon can resolve");
+   CHECK_MSG(channel.Request(1, { }) == 0, "so RequestTopScores answers 0");
+
+   DeclareSnapshot rom = MakeDeclare("tom_13", 128, 32, 4, 1);
+   rom.epoch = 2;
+   source.Set(rom, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(AwaitLeaderboards(channel, true), "a ROM table is identified by its ROM alone");
+   CHECK(channel.Request(2, { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 1, "" }) != 0);
+   CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   worker.Stop();
+}
+
 // Per user, under the platform temp or runtime directory.
 void TestPictureDirectoryDefault()
 {
@@ -2413,6 +2468,7 @@ int main()
    TestReadBacksWithOlderDaemons();
    TestLeaderboardsNeedATable();
    TestNewIdentityWithinAnEpoch();
+   TestLeaderboardsNeedAnIdentifiableTable();
    TestPictureDirectoryDefault();
    return ScorbitTest::Summary("socket_worker_test");
 }
