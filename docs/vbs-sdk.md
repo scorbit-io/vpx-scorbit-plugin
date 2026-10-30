@@ -62,8 +62,10 @@ They are in the binding, **commented out**, each with a comment saying what it d
 plugin does not serve it. Their names and signatures are reserved now, so they cannot clash with
 anything added later.
 
-Starting from the app also needs the table's cooperation: nothing outside VPX can press start on a
-table, so a table that enables it starts its own game when it sees the request.
+On an authored table, starting from the app also needs the table's cooperation: its game logic is
+in the script, so nothing outside it can press start, and a table that enables the call starts its
+own game when it sees the request. (A ROM table is started through the emulated machine and needs
+none of this.)
 
 ## Delivery and versions
 
