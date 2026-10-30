@@ -1,7 +1,7 @@
 # A plugin-owned status window (design, SB-6004)
 
-Status: design. Nothing here is implemented yet. A macOS prototype comes next, and then one
-implementation ticket per platform.
+Status: design, with a macOS prototype measured (see "Prototype results"). One implementation
+ticket per platform comes next.
 
 ## Why
 
@@ -64,10 +64,15 @@ The same on every platform:
 
 ### macOS
 
-- An `NSPanel` with `NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless`.
-  `canBecomeKeyWindow` and `canBecomeMainWindow` return `NO`, `ignoresMouseEvents = YES`,
-  `hidesOnDeactivate = YES`, so it goes when VPX stops being the active application and comes back
-  when it returns; `opaque = NO`, with a clear background.
+- A plain `NSPanel` with `NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless`,
+  never a subclass: a borderless panel already refuses key and main. `ignoresMouseEvents = YES`,
+  `opaque = NO`, with a clear background.
+- It follows `NSApplicationDidBecomeActive` / `DidResignActive` itself, so it goes when VPX stops
+  being the active application and comes back when it returns. Not `hidesOnDeactivate`: see the
+  prototype results.
+- Nothing Core Animation or AppKit can still hold after unload may live in the plugin: no class of
+  ours, no string or number literal as an animation key or value, and the last transaction flushed
+  (`[CATransaction flush]`) before the plugin returns from unload.
 - `collectionBehavior` includes `.canJoinAllSpaces`, `.fullScreenAuxiliary` and `.stationary`.
   VPX's fullscreen is SDL's, which on macOS puts the window in its own Space by default; only a
   full-screen-auxiliary window may show there.
@@ -115,6 +120,35 @@ The same on every platform:
 | Hidden under the playfield | X11 | windowed and fullscreen, with and without a compositor; the window stays above after the playfield is raised |
 | Multi-screen cabinets | all | the window follows the playfield's display, not the backglass's; check on a two-display setup |
 | Cost on the render path | all | none by design: frame times with and without the window, from VPX's own performance overlay |
+
+## Prototype results, macOS (SB-6106, 2026-10-30)
+
+VPX rev 6461 (`9a8f24cb6`) on Apple silicon, Theatre of Magic, a 5-minute session per mode with
+`StatusCorner = 2` and a fake status cycling every 4 s (steady green, then amber, red and blue
+pulsing), at `NSStatusWindowLevel`.
+
+| Mode | Focus | Visible |
+|---|---|---|
+| Windowed (`PlayfieldFullScreen = 0`, 1280x720) | no `Playfield window lost focus` | yes, top right, above the menu bar |
+| Fullscreen (`PlayfieldFullScreen = 1`, VPX's own Space) | none caused by the window (one 0.1 s loss traced to the operator) | yes, over the playfield, at 30 s and at the end |
+
+Three findings changed the design above:
+
+- **`hidesOnDeactivate` loses the window.** The game starts (`New game`) about 40 ms before VPX
+  becomes the active application. A panel first ordered front while its application is inactive
+  is never brought back by AppKit on activation, so nothing showed. Following the activation
+  notifications fixes it.
+- **A window class defined in the plugin crashes VPX at quit.** VPX unloads the plugin and then
+  hides its own windows; AppKit's window cache reached the panel, whose class was in the unloaded
+  image (`objc_loadWeakRetained` ← `isWindowObjectInCache`, SIGSEGV).
+- **A literal handed to Core Animation crashes VPX at quit.** Removing the pulse queued a change
+  keyed by `@"pulse"`, a constant in the plugin's image; the run loop committed it after unload
+  (`CFGetTypeID` ← `CA::Render::encode_remove_animation`, SIGSEGV). Heap strings and an explicit
+  `[CATransaction flush]` fix it. VPX quits cleanly with both fixes.
+
+Not yet measured, left to the macOS implementation: exclusive fullscreen, switching to another
+application and back mid-game, a second display, frame times with and without the window, and the
+quit path from VPX's own menu rather than an Apple event.
 
 ## Order
 

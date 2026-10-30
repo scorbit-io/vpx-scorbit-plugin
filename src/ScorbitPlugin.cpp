@@ -6,6 +6,7 @@
 #include "QuitHook.h"
 #include "ScriptBinding.h"
 #include "SocketWorker.h"
+#include "StatusWindow.h"
 #include "VpxSessionSource.h"
 
 #include "plugins/ControllerPlugin.h"
@@ -64,6 +65,9 @@ MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
    "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
 MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
    "Show Scorbit status notifications, in a session or out of one", true, true);
+// Off by default: no corner of a full-bleed table is guaranteed free (docs/status-window.md).
+MSGPI_INT_VAL_SETTING(setStatusCorner, "StatusCorner", "Status light corner",
+   "Prototype: show the status light in this screen corner, 0 off, 1 top left, 2 top right, 3 bottom left, 4 bottom right", true, 0, 4, 0);
 
 static void FilterControllers(std::vector<ControllerDef>& items)
 {
@@ -119,6 +123,13 @@ static void OnControllersChanged()
       vpxSession->SetRomId(romId);
 
    LOGI(romId.empty() ? "Game ended"s : "New game: romId="s + romId);
+   if (romId.empty() || !setShowStatus_Get())
+      HideStatusWindow();
+   else
+   {
+      ShowStatusWindow(setStatusCorner_Get());
+      LOGI("Status light: corner "s + std::to_string(setStatusCorner_Get()) + " (prototype, fake status)");
+   }
 }
 
 }
@@ -155,6 +166,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);
    msgApi->RegisterSetting(endpointId, &setSocketPath);
    msgApi->RegisterSetting(endpointId, &setShowStatus);
+   msgApi->RegisterSetting(endpointId, &setStatusCorner);
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
@@ -216,6 +228,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
       return;
    LOGI("Scorbit plugin unloading"s);
    RemoveQuitHook();
+   HideStatusWindow();
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
    // Detach first: unsubscribing the controllers below would otherwise withdraw it
