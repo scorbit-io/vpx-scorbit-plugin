@@ -89,7 +89,7 @@ void TestHello()
       tokenHex += "30313233343536373839616263646566";
    const std::string expected =
       "0100"              // proto_major
-      "0100"              // proto_minor, 1.1
+      "0200"              // proto_minor, 1.2
       "0500" "302e312e30" // plugin_version "0.1.0"
       "0400" "35353839"   // vpx_revision "5589"
       "0300" "616263"     // plugin_api_commit "abc"
@@ -621,8 +621,11 @@ void TestSliceFourTruncation()
    Wire::Status status;
    CHECK(!Wire::Decode(ScorbitTest::Unhex("0200"), status));
    CHECK(!Wire::Decode(ScorbitTest::Unhex("0200" "0500" "6e6f"), status));
-   CHECK(Wire::Decode(ScorbitTest::Unhex("0103" "0000" "ff"), status));
+   // A 1.1 reader ignores trailing bytes; from 1.2 they are auth_status, and 0xff is unknown.
+   CHECK(Wire::Decode(ScorbitTest::Unhex("0103" "0000" "ff"), status, 1));
    CHECK(status == (Wire::Status { Wire::SESSION_TRACKING, Wire::SYSTEM_DEGRADED, "" }));
+   CHECK_MSG(!Wire::Decode(ScorbitTest::Unhex("0103" "0000" "ff"), status), "an unknown auth_status at 1.2");
+   CHECK_MSG(!Wire::Decode(ScorbitTest::Unhex("0103" "0000" "06"), status), "auth_status 6");
 
    // support_text is bounded at 256 bytes: 256 decodes, 257 does not.
    const Wire::Status atLimit { 0, 0, std::string(Wire::MAX_SUPPORT_TEXT_BYTES, 'x') };
@@ -774,6 +777,210 @@ void TestGameRejections()
    CHECK(Wire::Decode(Wire::Encode(negative), back) && back == negative);
 }
 
+// A whole frame, split into its message; false unless it is the type and seq given, as a request.
+bool DecodeFrame(const std::string& hex, uint16_t type, uint32_t seq, Wire::Message& msg)
+{
+   const std::vector<uint8_t> bytes = ScorbitTest::Unhex(hex);
+   return bytes.size() > Wire::LENGTH_BYTES
+      && Wire::DecodeBody(bytes.data() + Wire::LENGTH_BYTES, bytes.size() - Wire::LENGTH_BYTES, msg)
+      && msg.header.type == type && msg.header.seq == seq && !msg.header.IsResponse();
+}
+
+std::string Frame(uint16_t type, uint16_t flags, uint32_t seq, const std::vector<uint8_t>& payload)
+{
+   return ScorbitTest::Hex(Wire::EncodeMessage(type, flags, seq, payload));
+}
+
+// Whole wire frames from the slice 6 contract (protocol 1.2), §9, verbatim.
+const std::string TOP_SCORES_REQUEST_HEX = "12000000" "4000" "0000" "14000000" "01000000" "00" "00" "00" "0a" "0000";
+const std::string TOP_SCORES_HEX = "6d000000" "4100" "0000" "05000000" "01000000" "00" "00000000" "02"
+   "0100" "15cd5b0700000000" "0a00" "41636520506c61796572" "0300" "414345" "03"
+   "1400" "323032362d31302d32395431383a30343a31315a"
+   "0200" "780ae30500000000" "0200" "426f" "0200" "424f" "00"
+   "1400" "323032362d31302d33305430393a31353a30305a";
+const std::string PLAYERS_HEX = "51000000" "4200" "0000" "06000000" "02"
+   "01" "0500" "702d313233" "0300" "414345" "0a00" "41636520506c61796572" "0300" "414345" "0000"
+   "02" "0000" "0000" "0000" "0000" "1d00" "68747470733a2f2f73636f726269742e6c696e6b2f632f416243313233";
+const std::string PLAYERS_EMPTY_HEX = "09000000" "4200" "0000" "07000000" "00";
+const std::string PICTURE_HEX = "32000000" "4300" "0000" "08000000" "01" "0500" "702d313233"
+   "2000" "2f542f7670782d70696374757265732f30303030303032612d312d312e6a7067";
+const std::string PICTURE_REMOVED_HEX = "12000000" "4300" "0000" "09000000" "01" "0500" "702d313233" "0000";
+const std::string STATUS_UNPAIRED_HEX = "0d000000" "2100" "0000" "04000000" "00" "01" "0000" "03";
+const std::string STATUS_HIDDEN_HEX = "0d000000" "2100" "0000" "05000000" "04" "00" "0000" "04";
+
+void TestSliceSixGoldenVectors()
+{
+   CHECK(Wire::PROTO_MINOR == 2);
+   Wire::Message msg;
+
+   // --- TopScoresRequest and its empty response ---------------------------------
+   const Wire::TopScoresRequest request { 1, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 10, "" };
+   CHECK_MSG(Frame(Wire::TYPE_TOP_SCORES_REQUEST, 0, 20, Wire::Encode(request)) == TOP_SCORES_REQUEST_HEX,
+      Frame(Wire::TYPE_TOP_SCORES_REQUEST, 0, 20, Wire::Encode(request)));
+   Wire::TopScoresRequest requestBack;
+   CHECK(DecodeFrame(TOP_SCORES_REQUEST_HEX, Wire::TYPE_TOP_SCORES_REQUEST, 20, msg) && Wire::Decode(msg.payload, requestBack)
+      && requestBack == request);
+   CHECK(Frame(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, 20, { }) == "08000000" "4000" "0100" "14000000");
+
+   // --- TopScores ----------------------------------------------------------------
+   Wire::TopScores scores;
+   CHECK(DecodeFrame(TOP_SCORES_HEX, Wire::TYPE_TOP_SCORES, 5, msg) && Wire::Decode(msg.payload, scores));
+   CHECK(scores.requestId == 1 && scores.result == Wire::TOP_SCORES_OK && scores.ageS == 0 && scores.entries.size() == 2);
+   if (scores.entries.size() == 2)
+   {
+      const Wire::TopScoreEntry& a = scores.entries[0];
+      CHECK(a.rank == 1 && a.highScore == 123456789 && a.displayName == "Ace Player" && a.initials == "ACE");
+      CHECK(a.flags == (Wire::SCORE_IS_VPIN | Wire::SCORE_VERIFIED) && a.created == "2026-10-29T18:04:11Z");
+      const Wire::TopScoreEntry& b = scores.entries[1];
+      CHECK(b.rank == 2 && b.highScore == 98765432 && b.displayName == "Bo" && b.initials == "BO");
+      CHECK(b.flags == 0 && b.created == "2026-10-30T09:15:00Z");
+   }
+   CHECK_MSG(Frame(Wire::TYPE_TOP_SCORES, 0, 5, Wire::Encode(scores)) == TOP_SCORES_HEX, "TopScores re-encodes byte for byte");
+
+   // --- Players --------------------------------------------------------------------
+   Wire::Players players;
+   std::vector<Wire::SensitiveSpan> spans;
+   CHECK(DecodeFrame(PLAYERS_HEX, Wire::TYPE_PLAYERS, 6, msg) && Wire::Decode(msg.payload, players, &spans));
+   CHECK(players.slots.size() == 2);
+   if (players.slots.size() == 2)
+   {
+      const Wire::PlayerSlot& one = players.slots[0];
+      CHECK(one.player == 1 && one.playerId == "p-123" && one.preferredName == "ACE" && one.name == "Ace Player"
+         && one.initials == "ACE" && one.claimDeeplink.empty());
+      const Wire::PlayerSlot& two = players.slots[1];
+      CHECK(two.player == 2 && two.playerId.empty() && two.preferredName.empty() && two.name.empty() && two.initials.empty()
+         && two.claimDeeplink == "https://scorbit.link/c/AbC123");
+   }
+   const std::string deeplink = "https://scorbit.link/c/AbC123";
+   CHECK_MSG(spans.size() == 1 && spans[0].length == deeplink.size() && spans[0].offset + spans[0].length == msg.payload.size(),
+      "the one deeplink, its bytes only");
+   std::vector<Wire::SensitiveSpan> encodedSpans;
+   CHECK_MSG(Frame(Wire::TYPE_PLAYERS, 0, 6, Wire::Encode(players, &encodedSpans)) == PLAYERS_HEX, "Players re-encodes");
+   CHECK(encodedSpans.size() == 1 && spans.size() == 1 && encodedSpans[0].offset == spans[0].offset);
+
+   Wire::Players none;
+   CHECK(DecodeFrame(PLAYERS_EMPTY_HEX, Wire::TYPE_PLAYERS, 7, msg) && Wire::Decode(msg.payload, none) && none.slots.empty());
+   CHECK(Frame(Wire::TYPE_PLAYERS, 0, 7, Wire::Encode(none)) == PLAYERS_EMPTY_HEX);
+
+   // --- PlayerPicture ----------------------------------------------------------------
+   Wire::PlayerPicture picture;
+   CHECK(DecodeFrame(PICTURE_HEX, Wire::TYPE_PLAYER_PICTURE, 8, msg) && Wire::Decode(msg.payload, picture, &spans));
+   CHECK(picture.player == 1 && picture.playerId == "p-123" && picture.path == "/T/vpx-pictures/0000002a-1-1.jpg");
+   CHECK(spans.size() == 1 && spans.size() == 1 && spans[0].offset == 1 + 2 + 5 + 2 && spans[0].length == picture.path.size());
+   CHECK_MSG(Frame(Wire::TYPE_PLAYER_PICTURE, 0, 8, Wire::Encode(picture)) == PICTURE_HEX, "PlayerPicture re-encodes");
+   Wire::PlayerPicture removed;
+   CHECK(DecodeFrame(PICTURE_REMOVED_HEX, Wire::TYPE_PLAYER_PICTURE, 9, msg) && Wire::Decode(msg.payload, removed, &spans));
+   CHECK(removed.player == 1 && removed.playerId == "p-123" && removed.path.empty() && spans.empty());
+   CHECK(Frame(Wire::TYPE_PLAYER_PICTURE, 0, 9, Wire::Encode(removed)) == PICTURE_REMOVED_HEX);
+
+   // --- Status with the auth_status tail -----------------------------------------------
+   Wire::Status status;
+   CHECK(DecodeFrame(STATUS_UNPAIRED_HEX, Wire::TYPE_STATUS, 4, msg) && Wire::Decode(msg.payload, status, 2));
+   CHECK(status.sessionState == Wire::SESSION_NONE && status.systemState == Wire::SYSTEM_UNPAIRED && status.supportText.empty());
+   CHECK(status.hasAuthStatus && status.authStatus == Wire::AUTH_UNPAIRED);
+   CHECK(Frame(Wire::TYPE_STATUS, 0, 4, Wire::Encode(status)) == STATUS_UNPAIRED_HEX);
+   CHECK(DecodeFrame(STATUS_HIDDEN_HEX, Wire::TYPE_STATUS, 5, msg) && Wire::Decode(msg.payload, status, 2));
+   CHECK(status.sessionState == Wire::SESSION_HIDDEN && status.systemState == Wire::SYSTEM_OK);
+   CHECK(status.hasAuthStatus && status.authStatus == Wire::AUTH_PAIRED);
+   CHECK(Frame(Wire::TYPE_STATUS, 0, 5, Wire::Encode(status)) == STATUS_HIDDEN_HEX);
+   // A 1.1 session reads the same frame without the tail; a 1.2 one accepts a Status without it.
+   CHECK(Wire::Decode(msg.payload, status, 1) && !status.hasAuthStatus && status.sessionState == Wire::SESSION_HIDDEN);
+   CHECK(Wire::Decode(ScorbitTest::Unhex("0400" "0000"), status, 2) && !status.hasAuthStatus);
+   for (uint8_t v = 0; v <= Wire::AUTH_FAILED; v++)
+   {
+      const Wire::Status s { 1, 0, "", true, v };
+      Wire::Status back;
+      CHECK_MSG(Wire::Decode(Wire::Encode(s), back, 2) && back == s, "auth_status " + std::to_string(v));
+   }
+
+   CHECK(std::string(Wire::TypeName(Wire::TYPE_TOP_SCORES_REQUEST)) == "TopScoresRequest");
+   CHECK(std::string(Wire::TypeName(Wire::TYPE_TOP_SCORES)) == "TopScores");
+   CHECK(std::string(Wire::TypeName(Wire::TYPE_PLAYERS)) == "Players");
+   CHECK(std::string(Wire::TypeName(Wire::TYPE_PLAYER_PICTURE)) == "PlayerPicture");
+   CHECK(Wire::CAP_LEADERBOARDS == 0x100 && Wire::CAP_PLAYERS == 0x200 && Wire::CAP_PLAYER_PICTURES == 0x400);
+   CHECK(Wire::TYPE_GAME_START_REQUESTED == 49 && Wire::TYPE_CREDITS_ADD_REQUESTED == 68 && Wire::TYPE_PRICING == 72);
+}
+
+void TestSliceSixRejections()
+{
+   const auto request = [](const std::string& hex) { Wire::TopScoresRequest out; return Wire::Decode(ScorbitTest::Unhex(hex), out); };
+   const std::string id = "01000000";
+   CHECK(request(id + "02" "05" "02" "14" "0000"));
+   CHECK_MSG(!request(id + "03" "00" "00" "0a" "0000"), "scope 3");
+   CHECK_MSG(!request(id + "00" "06" "00" "0a" "0000"), "period 6");
+   CHECK_MSG(!request(id + "00" "00" "03" "0a" "0000"), "vpin_filter 3");
+   CHECK_MSG(!request(id + "00" "00" "00" "00" "0000"), "limit 0");
+   CHECK_MSG(!request(id + "00" "00" "00" "15" "0000"), "limit 21");
+   CHECK_MSG(request(id + "00" "00" "00" "01" "2000" + Repeat("31", 32)), "since of 32 bytes");
+   CHECK_MSG(!request(id + "00" "00" "00" "01" "2100" + Repeat("31", 33)), "since of 33 bytes");
+   CHECK_MSG(!request(id + "00" "00" "00" "0a"), "no since");
+   // Encode refuses the same.
+   CHECK(Wire::Encode(Wire::TopScoresRequest { 1, 0, 0, 0, 0, "" }).empty());
+   CHECK(Wire::Encode(Wire::TopScoresRequest { 1, 3, 0, 0, 1, "" }).empty());
+   CHECK(Wire::Encode(Wire::TopScoresRequest { 1, 0, 0, 0, 1, std::string(33, 'x') }).empty());
+
+   const auto scores = [](const std::string& hex) { Wire::TopScores out; return Wire::Decode(ScorbitTest::Unhex(hex), out); };
+   const std::string entry = "0100" "0100000000000000" "0100" "41" "0100" "41" "00" "0000";
+   CHECK(scores(id + "00" "00000000" "01" + entry));
+   CHECK_MSG(scores(id + "04" "00000000" "00"), "superseded, no entries");
+   CHECK_MSG(!scores(id + "05" "00000000" "00"), "result 5");
+   CHECK_MSG(!scores(id + "03" "00000000" "01" + entry), "entries with a failure");
+   CHECK_MSG(!scores(id + "00" "00000000" "15" + Repeat(entry.c_str(), 21)), "21 entries");
+   CHECK_MSG(scores(id + "00" "00000000" "14" + Repeat(entry.c_str(), 20)), "20 entries");
+   CHECK_MSG(!scores(id + "00" "00000000" "02" + entry), "fewer entries than the count");
+   CHECK_MSG(!scores(id + "00" "00000000" "01" "0100" "0100000000000000" "4100" + Repeat("41", 65) + "0100" "41" "00" "0000"),
+      "display_name of 65 bytes");
+   CHECK_MSG(!scores(id + "00" "00000000" "01" "0100" "0100000000000000" "0100" "41" "0900" + Repeat("41", 9) + "00" "0000"),
+      "initials of 9 bytes");
+   CHECK_MSG(!scores(id + "00" "00000000" "01" "0100" "0100000000000000" "0100" "41" "0100" "41" "00" "2100" + Repeat("31", 33)),
+      "created of 33 bytes");
+   // A score past 2^32 and a negative one survive as i64.
+   Wire::TopScores big { 2, 0, 7, { { 1, 0x123456789ALL, "x", "", 0, "" }, { 2, -1, "y", "", 0, "" } } };
+   Wire::TopScores back;
+   CHECK(Wire::Decode(Wire::Encode(big), back) && back == big);
+
+   const auto players = [](const std::string& hex) { Wire::Players out; return Wire::Decode(ScorbitTest::Unhex(hex), out); };
+   const auto slot = [](const char* player) { return std::string(player) + "0000" "0000" "0000" "0000" "0000"; };
+   CHECK(players("09" + slot("01") + slot("02") + slot("03") + slot("04") + slot("05") + slot("06") + slot("07") + slot("08") + slot("09")));
+   CHECK_MSG(!players("0a" + Repeat(slot("01").c_str(), 10)), "count 10");
+   CHECK_MSG(!players("01" + slot("00")), "player 0");
+   CHECK_MSG(!players("01" + slot("0a")), "player 10");
+   CHECK_MSG(!players("02" + slot("02") + slot("01")), "descending");
+   CHECK_MSG(!players("02" + slot("01") + slot("01")), "a player twice");
+   CHECK_MSG(!players("02" + slot("01")), "fewer slots than the count");
+   CHECK_MSG(!players("01" "01" "0000" "4100" + Repeat("41", 65) + "0000" "0000" "0000"), "preferred_name of 65 bytes");
+   CHECK_MSG(!players("01" "01" "0000" "0000" "4100" + Repeat("41", 65) + "0000" "0000"), "name of 65 bytes");
+   CHECK_MSG(!players("01" "01" "0000" "0000" "0000" "0900" + Repeat("41", 9) + "0000"), "initials of 9 bytes");
+   CHECK_MSG(players("01" "01" "0000" "0000" "0000" "0000" "0002" + Repeat("41", 512)), "deeplink of 512 bytes");
+   CHECK_MSG(!players("01" "01" "0000" "0000" "0000" "0000" "0102" + Repeat("41", 513)), "deeplink of 513 bytes");
+   Wire::PlayerSlot second, first;
+   second.player = 2;
+   first.player = 1;
+   CHECK_MSG(Wire::Encode(Wire::Players { { second, first } }).empty(), "Encode refuses slots out of order");
+
+   const auto picture = [](const std::string& hex) { Wire::PlayerPicture out; return Wire::Decode(ScorbitTest::Unhex(hex), out); };
+   CHECK(picture("09" "0100" "70" "0000"));
+   CHECK_MSG(!picture("00" "0100" "70" "0000"), "player 0");
+   CHECK_MSG(!picture("0a" "0100" "70" "0000"), "player 10");
+   CHECK_MSG(!picture("01" "0100" "70"), "no path");
+   CHECK(Wire::Encode(Wire::PlayerPicture { 0, "p", "" }).empty());
+
+   // What a wire dump blanks of a received request: deeplinks and paths, and all of one that does not decode.
+   Wire::Message msg;
+   msg.header.type = Wire::TYPE_PLAYER_PICTURE;
+   msg.payload = ScorbitTest::Unhex("01" "0100" "70" "0300" "2f612f");
+   std::vector<Wire::SensitiveSpan> spans = Wire::ReceivedSensitive(msg);
+   CHECK(spans.size() == 1 && spans[0].offset == 6 && spans[0].length == 3);
+   msg.payload = ScorbitTest::Unhex("01" "0100" "70" "0300" "2f61");
+   spans = Wire::ReceivedSensitive(msg);
+   CHECK_MSG(spans.size() == 1 && spans[0].offset == 0 && spans[0].length == msg.payload.size(), "undecodable, blanked whole");
+   msg.header.type = Wire::TYPE_STATUS;
+   CHECK(Wire::ReceivedSensitive(msg).empty());
+   msg.header.type = Wire::TYPE_PLAYERS;
+   msg.header.flags = Wire::FLAG_RESPONSE;
+   CHECK_MSG(Wire::ReceivedSensitive(msg).empty(), "responses carry none");
+}
+
 int main()
 {
    TestFraming();
@@ -794,5 +1001,7 @@ int main()
    TestSliceFourTruncation();
    TestSliceFiveGoldenVectors();
    TestGameRejections();
+   TestSliceSixGoldenVectors();
+   TestSliceSixRejections();
    return ScorbitTest::Summary("wire_codec_test");
 }

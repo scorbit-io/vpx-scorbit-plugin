@@ -22,6 +22,7 @@
 #include "DmdTap.h"
 #include "GameQueue.h"
 #include "MemoryBridge.h"
+#include "ReadBack.h"
 #include "SocketWorker.h"
 #include "StatusNotice.h"
 
@@ -88,6 +89,15 @@ public:
 
    // The socket worker's half of the Status latch. Owned here for the same reason.
    StatusLatch& Status() { return m_statusLatch; }
+   // The worker's half of the script's read-backs, likewise.
+   ReadBackChannel& ReadBack() { return m_readBackChannel; }
+
+   // API thread only: what Scorbit.Table reads, current as of the call. The status has
+   // haveStatus false before the session's first Status.
+   const StatusRecord& ScriptStatus();
+   ReadBackState& ScriptReadBack();
+   // The request's id, or 0 when no daemon can answer it now.
+   uint32_t ScriptRequestTopScores(const Wire::TopScoresRequest& request) { return m_readBackChannel.Request(m_epoch, request); }
 
    // ISessionSource, worker thread.
    std::unique_ptr<DeclareSnapshot> TakeDeclare() override { return m_declares.Take(); }
@@ -123,6 +133,10 @@ private:
    // API thread, once per rendered frame: notifications are drawn inside rendered
    // frames and timed from their push, so one pushed while none render expires unseen.
    void PostStatusNotice();
+   // Moves a newly posted status into what the script reads and what the notifier has yet to see.
+   void TakeStatus();
+   // Every epoch bump: the table's read-backs belong to the table.
+   void NewEpoch() { m_readBack.NewEpoch(m_epoch); }
    // API thread, once per rendered frame until PinMAME answers: the machine's address space.
    void QueryAddressSpace();
    // Machine id declared, paths captured, and no ROM running.
@@ -172,6 +186,11 @@ private:
    StatusLatch m_statusLatch;
    StatusNotifier m_notifier; // API thread only, as is the handle
    unsigned int m_noticeHandle = 0;
+   StatusRecord m_scriptStatus;                    // API thread only
+   std::unique_ptr<StatusRecord> m_statusPending;  // taken for the script, not yet shown to the notifier
+
+   ReadBackChannel m_readBackChannel;
+   ReadBackState m_readBack; // API thread only
 
    std::mutex m_logMutex;
    std::deque<std::pair<int, std::string>> m_logQueue;

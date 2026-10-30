@@ -55,6 +55,8 @@ add_library(scorbit-transport STATIC
    src/OverlayState.h
    src/OverlayCache.h
    src/OverrideChain.h
+   src/ReadBack.h
+   src/ReadBack.cpp
    src/SeqLock.h
    src/Latch.h
    src/StatusNotice.h

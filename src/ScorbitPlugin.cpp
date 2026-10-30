@@ -212,7 +212,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
       cfg.pluginApiCommit = SCORBIT_VPX_PLUGIN_API_COMMIT;
       socketWorker = new SocketWorker(*vpxSession, cfg,
          [](int level, const std::string& message) { vpxSession->PushLog(level, message); },
-         &vpxSession->Memory(), vpxSession, &vpxSession->Status());
+         &vpxSession->Memory(), vpxSession, &vpxSession->Status(), &vpxSession->ReadBack());
       socketWorker->Start();
    }
    logDrainActive = true;

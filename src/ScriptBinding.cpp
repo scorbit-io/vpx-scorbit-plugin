@@ -15,6 +15,7 @@
 #include "plugins/ScriptablePlugin.h"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -39,6 +40,15 @@ VpxSessionSource* s_session = nullptr; // null once the plugin unloads, whatever
 constexpr size_t MAX_MODE_BYTES = 128;
 // Scores reach the plugin as Double; past 2^53 a Double no longer holds every integer.
 constexpr double MAX_EXACT_SCORE = 9007199254740992.0;
+
+// 1 is the game calls; 2 adds the read-backs. Raised as features land, never lowered.
+constexpr int API_LEVEL = 2;
+
+#ifndef SCORBIT_PLUGIN_VERSION
+#define SCORBIT_PLUGIN_VERSION "0.0.0"
+#endif
+
+const std::string EMPTY;
 
 // One per CreateObject; every instance speaks for the same table. Every call is logged
 // and ignored when its arguments do not fit, never raised: a script error stops the table.
@@ -97,7 +107,91 @@ public:
          s_session->ScriptCommit();
    }
 
+   // --- Read-backs (ApiLevel 2). Read-only; anything out of range reads as empty or 0. ---
+
+   std::string GetVersion() const { return SCORBIT_PLUGIN_VERSION; }
+   int GetApiLevel() const { return API_LEVEL; }
+
+   // -1 before the session's first Status.
+   int GetSystemState() const
+   {
+      const StatusRecord* r = Status();
+      return r != nullptr ? r->status.systemState : -1;
+   }
+   int GetSessionState() const
+   {
+      const StatusRecord* r = Status();
+      return r != nullptr ? r->status.sessionState : -1;
+   }
+   // -1 until a Status carries it, which a daemon before protocol 1.2 never does.
+   int GetAuthStatus() const
+   {
+      const StatusRecord* r = Status();
+      return r != nullptr && r->status.hasAuthStatus ? r->status.authStatus : -1;
+   }
+   std::string GetStatusText() const
+   {
+      const StatusRecord* r = Status();
+      return r != nullptr ? r->status.supportText : std::string();
+   }
+   std::string GetMachineUuid() const { return s_session != nullptr ? s_session->Authored().machineId : std::string(); }
+
+   int RequestTopScores(double scope, double period, double vpinFilter, double limit, const char* since)
+   {
+      if (s_session == nullptr)
+         return 0;
+      Wire::TopScoresRequest req;
+      uint32_t v[4] = { };
+      req.since = since != nullptr ? since : "";
+      if (!ScriptIndex(scope, Wire::SCOPE_MACHINE, Wire::SCOPE_GAME, v[0]) || !ScriptIndex(period, Wire::PERIOD_ALL_TIME, Wire::PERIOD_DAYS_365, v[1])
+         || !ScriptIndex(vpinFilter, Wire::VPIN_ANY, Wire::VPIN_REAL_ONLY, v[2]) || !ScriptIndex(limit, 1, Wire::MAX_TOP_SCORES, v[3])
+         || req.since.size() > Wire::MAX_SINCE_BYTES)
+      {
+         s_session->ScriptCallIgnored("Scorbit.RequestTopScores ignored, scope 0-2, period 0-5, filter 0-2, limit 1-20 and since up to 32 bytes");
+         return 0;
+      }
+      req.scope = static_cast<uint8_t>(v[0]);
+      req.period = static_cast<uint8_t>(v[1]);
+      req.vpinFilter = static_cast<uint8_t>(v[2]);
+      req.limit = static_cast<uint8_t>(v[3]);
+      return static_cast<int>(s_session->ScriptRequestTopScores(req));
+   }
+
+   int TopScoresResult(double id) { return ReadBack() != nullptr ? ReadBack()->Result(id) : SCORES_NONE; }
+   int TopScoresAge(double id) { return ReadBack() != nullptr ? ReadBack()->Age(id, std::chrono::steady_clock::now()) : 0; }
+   int TopScoresCount(double id) { return ReadBack() != nullptr ? ReadBack()->Count(id) : 0; }
+   int TopScoresRank(double id, double i) { const Wire::TopScoreEntry* e = Score(id, i); return e != nullptr ? e->rank : 0; }
+   double TopScoresScore(double id, double i) { const Wire::TopScoreEntry* e = Score(id, i); return e != nullptr ? static_cast<double>(e->highScore) : 0; }
+   std::string TopScoresName(double id, double i) { const Wire::TopScoreEntry* e = Score(id, i); return e != nullptr ? e->displayName : EMPTY; }
+   std::string TopScoresInitials(double id, double i) { const Wire::TopScoreEntry* e = Score(id, i); return e != nullptr ? e->initials : EMPTY; }
+   int TopScoresFlags(double id, double i) { const Wire::TopScoreEntry* e = Score(id, i); return e != nullptr ? e->flags : 0; }
+   std::string TopScoresCreated(double id, double i) { const Wire::TopScoreEntry* e = Score(id, i); return e != nullptr ? e->created : EMPTY; }
+   void ReleaseTopScores(double id)
+   {
+      if (ReadBack() != nullptr)
+         ReadBack()->Release(id);
+   }
+
+   bool PlayerClaimed(double slot) { const PlayerView* p = Player(slot); return p != nullptr && p->Claimed(); }
+   std::string PlayerId(double slot) { const PlayerView* p = Player(slot); return p != nullptr ? p->playerId : EMPTY; }
+   std::string PlayerName(double slot) { const PlayerView* p = Player(slot); return p != nullptr ? p->DisplayName() : EMPTY; }
+   std::string PlayerInitials(double slot) { const PlayerView* p = Player(slot); return p != nullptr ? p->initials : EMPTY; }
+   std::string PlayerClaimLink(double slot) { const PlayerView* p = Player(slot); return p != nullptr ? p->claimDeeplink : EMPTY; }
+   std::string PlayerPicture(double slot) { const PlayerView* p = Player(slot); return p != nullptr ? p->picture : EMPTY; }
+
 private:
+   static const StatusRecord* Status()
+   {
+      if (s_session == nullptr)
+         return nullptr;
+      const StatusRecord& r = s_session->ScriptStatus();
+      return r.inSession && r.haveStatus ? &r : nullptr;
+   }
+
+   static ReadBackState* ReadBack() { return s_session != nullptr ? &s_session->ScriptReadBack() : nullptr; }
+   static const Wire::TopScoreEntry* Score(double id, double i) { return ReadBack() != nullptr ? ReadBack()->Score(id, i) : nullptr; }
+   static const PlayerView* Player(double slot) { return ReadBack() != nullptr ? ReadBack()->Slot(slot) : nullptr; }
+
    static Wire::GameOp Of(uint8_t kind)
    {
       Wire::GameOp op;
@@ -179,6 +273,33 @@ PSC_CLASS_START(Scorbit_Table, ScorbitTable)
       [](void* me, int, ScriptVariant* pArgs, ScriptVariant*) { static_cast<ScorbitTable*>(me)->RemoveMode(pArgs[0].vString.string); } });
    PSC_FUNCTION0(void, ClearModes)
    PSC_FUNCTION0(void, Commit)
+   // ApiLevel 2: read-backs. Indexed members are functions, as the header has no two-index property.
+   PSC_PROP_R(string, Version)
+   PSC_PROP_R(int, ApiLevel)
+   PSC_PROP_R(int, SystemState)
+   PSC_PROP_R(int, SessionState)
+   PSC_PROP_R(int, AuthStatus)
+   PSC_PROP_R(string, StatusText)
+   PSC_PROP_R(string, MachineUuid)
+   members.push_back({ { "RequestTopScores", 0 }, { "int", 0 }, 5, { { "double", 0 }, { "double", 0 }, { "double", 0 }, { "double", 0 }, { "string", 0 } },
+      [](void* me, int, ScriptVariant* pArgs, ScriptVariant* pRet) { const int id = static_cast<ScorbitTable*>(me)->RequestTopScores(
+         pArgs[0].vDouble, pArgs[1].vDouble, pArgs[2].vDouble, pArgs[3].vDouble, pArgs[4].vString.string); if (pRet != nullptr) pRet->vInt = id; } });
+   PSC_FUNCTION1(int, TopScoresResult, double)
+   PSC_FUNCTION1(int, TopScoresAge, double)
+   PSC_FUNCTION1(int, TopScoresCount, double)
+   PSC_FUNCTION2(int, TopScoresRank, double, double)
+   PSC_FUNCTION2(double, TopScoresScore, double, double)
+   PSC_FUNCTION2(string, TopScoresName, double, double)
+   PSC_FUNCTION2(string, TopScoresInitials, double, double)
+   PSC_FUNCTION2(int, TopScoresFlags, double, double)
+   PSC_FUNCTION2(string, TopScoresCreated, double, double)
+   PSC_FUNCTION1(void, ReleaseTopScores, double)
+   PSC_FUNCTION1(bool, PlayerClaimed, double)
+   PSC_FUNCTION1(string, PlayerId, double)
+   PSC_FUNCTION1(string, PlayerName, double)
+   PSC_FUNCTION1(string, PlayerInitials, double)
+   PSC_FUNCTION1(string, PlayerClaimLink, double)
+   PSC_FUNCTION1(string, PlayerPicture, double)
 PSC_CLASS_END()
 
 #if defined(__GNUC__) || defined(__clang__)

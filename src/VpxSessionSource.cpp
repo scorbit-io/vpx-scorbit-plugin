@@ -87,6 +87,7 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
    // A table restart with the same ROM and the same display changes nothing
    // on the wire, so the epoch is what makes Declare go out again anyway.
    self->m_epoch++;
+   self->NewEpoch();
    // Restored from the ROM: a restart with the same ROM sends no SetRomId to
    // undo the OnGameEnd that cleared it.
    self->m_gameRunning = !self->m_romId.empty();
@@ -117,6 +118,7 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    self->m_loggedIgnoredCall = false;
    self->m_loggedQueueDrop = false;
    self->m_epoch++;
+   self->NewEpoch();
    self->UpdateDeclare();
 }
 
@@ -172,11 +174,33 @@ void VpxSessionSource::QueryAddressSpace()
    m_memory.SetAddressSpace(MainCpuAddressSpace(state.hardwareGen));
 }
 
+void VpxSessionSource::TakeStatus()
+{
+   if (std::unique_ptr<StatusRecord> taken = m_statusLatch.Take())
+   {
+      m_scriptStatus = *taken;
+      m_statusPending = std::move(taken);
+   }
+}
+
+const StatusRecord& VpxSessionSource::ScriptStatus()
+{
+   TakeStatus();
+   return m_scriptStatus;
+}
+
+ReadBackState& VpxSessionSource::ScriptReadBack()
+{
+   m_readBack.Drain(m_readBackChannel, std::chrono::steady_clock::now());
+   return m_readBack;
+}
+
 void VpxSessionSource::PostStatusNotice()
 {
    const auto now = std::chrono::steady_clock::now();
    const bool show = m_showStatus == nullptr || m_showStatus() != 0;
-   const std::string text = m_notifier.Frame(m_statusLatch.Take(), show, now);
+   TakeStatus();
+   const std::string text = m_notifier.Frame(std::move(m_statusPending), show, now);
    if (text.empty() || m_vpxApi == nullptr)
       return;
    LOGI("Status notice: "s + text);
@@ -210,6 +234,7 @@ void VpxSessionSource::DeclareMachine(const std::string& machineId)
       // A new epoch: what the old machine committed goes out under its own Declare first, and
       // what it called but never committed is dropped, never sent as the new machine's.
       m_epoch++;
+      NewEpoch();
       m_ops.clear();
    }
    m_authored.machineId = std::move(canonical);

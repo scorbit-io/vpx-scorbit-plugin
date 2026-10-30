@@ -33,7 +33,8 @@ using SensitiveSpan = Wire::SensitiveSpan;
 //   u32  length      bytes of wire frame that follow
 //   u8[length]       the wire frame, length prefix + header + payload
 //
-// Bytes the sender marks sensitive, such as an authored Declare's host paths (SB-5990), are
+// Bytes marked sensitive, such as an authored Declare's host paths (SB-5990) or a received
+// claim deeplink or picture path, are
 // written as '*' at their full length, so a redacted frame still decodes and a dump stays
 // shareable.
 //
@@ -61,15 +62,19 @@ public:
    void Sent(const uint8_t* data, size_t size, const std::vector<SensitiveSpan>& sensitive = { });
 
    // A received frame is held in two pieces: the length prefix that was read first and
-   // the body that followed. They are recorded as one frame, as they arrived on the wire.
-   void Received(const uint8_t* prefix, size_t prefixSize, const uint8_t* body, size_t bodySize);
+   // the body that followed. They are recorded as one frame, as they arrived on the wire,
+   // with the spans the decoder marks sensitive (a claim deeplink, a picture path) blanked.
+   void Received(const uint8_t* prefix, size_t prefixSize, const uint8_t* body, size_t bodySize,
+      const std::vector<SensitiveSpan>& sensitive = { });
 
 private:
    void Record(uint8_t direction, const uint8_t* prefix, size_t prefixSize, const uint8_t* body, size_t bodySize);
+   // Copies the frame into m_redacted with the spans blanked.
+   void Redact(const std::vector<SensitiveSpan>& sensitive);
 
    std::FILE* m_file = nullptr;
    uint64_t m_openMicros = 0;
-   std::vector<uint8_t> m_redacted; // a sent frame with its sensitive spans blanked
+   std::vector<uint8_t> m_redacted; // a frame with its sensitive spans blanked
 };
 
 }
