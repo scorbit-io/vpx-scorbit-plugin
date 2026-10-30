@@ -2,9 +2,12 @@
 
 #include "ReadBack.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <system_error>
 
 #ifdef _WIN32
@@ -72,6 +75,16 @@ bool ParseCopyName(const std::string& name, unsigned long& pid)
    int used = 0;
    return std::sscanf(name.c_str(), "%lu-%16llx-%u-%llu.jpg%n", &pid, &tag, &player, &n, &used) == 4
       && used == static_cast<int>(name.size());
+}
+
+// Both sides are small enough to read whole; a read failure counts as different.
+bool SameBytes(const fs::path& a, const fs::path& b)
+{
+   std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
+   if (!fa || !fb)
+      return false;
+   return std::equal(std::istreambuf_iterator<char>(fa), std::istreambuf_iterator<char>(),
+      std::istreambuf_iterator<char>(fb), std::istreambuf_iterator<char>());
 }
 
 }
@@ -308,8 +321,14 @@ PlayerTable::Picture PlayerTable::Apply(const Wire::PlayerPicture& picture, std:
       DropPicture(slot);
       return Picture::Removed;
    }
+   // The daemon may delete its file after the first ack and later write a new picture at the same path.
    if (!slot.copy.empty() && picture.path == slot.source)
-      return Picture::Unchanged;
+   {
+      std::error_code ec;
+      const fs::path source = FromUtf8(picture.path);
+      if (!fs::exists(source, ec) || SameBytes(source, slot.copy))
+         return Picture::Unchanged;
+   }
 
    // A failure leaves the slot with no picture rather than the one this superseded.
    DropPicture(slot);

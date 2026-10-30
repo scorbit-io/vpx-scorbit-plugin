@@ -188,6 +188,18 @@ void TestPlayerTable()
       CHECK(copy.parent_path() == dir && Read(copy) == "picture a" && copy != a);
       CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Unchanged);
 
+      // The same path with new bytes is a new picture; the same path gone is the old one, already copied.
+      Write(a, "picture a, again");
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Stored);
+      table.Fill(post);
+      const fs::path again = post.slots[0].picture;
+      CHECK(Read(again) == "picture a, again" && !fs::exists(copy));
+      fs::remove(a, ec);
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Unchanged);
+      table.Fill(post);
+      CHECK(post.slots[0].picture == again && Read(again) == "picture a, again");
+      Write(a, "picture a");
+
       CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(big) }, error) == PlayerTable::Picture::Failed);
       CHECK(!error.empty() && error.find(root.string()) == std::string::npos);
       table.Fill(post);
