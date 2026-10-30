@@ -37,6 +37,7 @@ The binding covers the SDK's game-facing API:
 |---|---|---|
 | `setGameStarted`, `setGameFinished`, `setCurrentBall`, `setActivePlayer`, `setScore` (with feature), `addMode`, `addModeExpiring`, `removeMode`, `clearModes`, `commit` | yes, 1:1 | yes |
 | Achievements: `setModeCompleted` (completed modes are matched against achievement conditions) | yes | yes |
+| The SDK's fuller achievements API, when released (events, player progress, frames, refresh) | no | joins the parity set on release; each call gets the same verdict, implemented, present but disabled, or out of scope |
 | `getStatus`, `PairingStatusChanged` | no | yes, as properties: the plugin already receives the daemon's status, which carries unpaired, offline and degraded (`WireProtocol.h:471-474`) |
 | Game status indication (in session, tracking, the reason when not) | no | yes, from the same status: session state and support text |
 | `getMachineUuid` | no | yes: the uuid the table declared |
