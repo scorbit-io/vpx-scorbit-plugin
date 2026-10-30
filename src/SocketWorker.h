@@ -207,6 +207,7 @@ private:
    bool TableActive() const;
    // The daemon can resolve the declared table: a ROM, or an authored machine it serves.
    bool TableIdentified() const;
+   bool Identifies(const Wire::Declare& d) const;
    // A 1.2 read-back both sides offer; player_pictures also needs players.
    bool ReadBackAllowed(uint32_t capability) const;
    // Sends the script's queued TopScoresRequests. False closes the session.

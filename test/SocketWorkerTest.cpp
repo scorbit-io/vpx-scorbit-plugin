@@ -2262,10 +2262,11 @@ void TestLeaderboardsNeedATable()
       "a result overtaking the acknowledgement is kept");
    CHECK(post.received != std::chrono::steady_clock::time_point { });
 
-   // Back at the chooser, leaderboards are unavailable again.
+   // Back at the chooser, leaderboards are unavailable again, already while its Declare awaits an answer.
    chooser.epoch = 4;
    source.Set(chooser, { });
    CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK_MSG(!channel.Leaderboards() && channel.Request(4, ask) == 0, "no id while the chooser's Declare is unanswered");
    CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
    CHECK(AwaitLeaderboards(channel, false));
    worker.Stop();

@@ -1016,6 +1016,10 @@ bool SocketWorker::MaybeDeclare()
    if (m_haveDeclared && m_current == m_declared)
       return true;
    const DeclareSnapshot now = m_current;
+   // Closed before the Declare goes out, so a request made while it awaits its answer gets no id.
+   // Opening waits for the answer, in Serve.
+   if (m_readBack != nullptr && !Identifies(now.declare))
+      m_readBack->SetLeaderboards(false);
 
    Wire::Declare sent = now.declare;
    if (sent.tableKind == Wire::TABLE_AUTHORED && !AuthoredAllowed())
@@ -1531,10 +1535,14 @@ bool SocketWorker::TableActive() const
 
 bool SocketWorker::TableIdentified() const
 {
+   return m_haveDeclared && Identifies(m_declared.declare);
+}
+
+bool SocketWorker::Identifies(const Wire::Declare& d) const
+{
    // An authored table to a daemon without authored_tables is declared without its uuid, so
    // nothing names it: scope would resolve against no machine.
-   const Wire::Declare& d = m_declared.declare;
-   return TableActive() && (!d.romId.empty() || (d.tableKind == Wire::TABLE_AUTHORED && !d.machineUuid.empty() && AuthoredAllowed()));
+   return !d.romId.empty() || (!d.tablePath.empty() && d.tableKind == Wire::TABLE_AUTHORED && !d.machineUuid.empty() && AuthoredAllowed());
 }
 
 void SocketWorker::PostPlayers()
