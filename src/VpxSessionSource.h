@@ -53,6 +53,9 @@ public:
    // API thread only. Empty means no game.
    void SetRomId(const std::string& romId);
 
+   // Between VPX's OnGameStart and OnGameEnd, for every table, with or without PinMAME.
+   bool PlayerRunning() const { return m_playerRunning; }
+
    // API thread only: the table script's Scorbit.Declare (SB-5990). The script runs before
    // OnGameStart, so the id is kept until the game ends and goes out with the paths captured
    // there; a later call goes out at once. While a ROM runs, the ROM wins and this is ignored.

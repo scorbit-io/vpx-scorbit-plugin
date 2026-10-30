@@ -95,12 +95,13 @@ add_library(plugin-scorbit MODULE
    src/ScriptBinding.cpp
    src/ScorbitPluginAPI.h
    src/QuitHook.h
+   src/StatusWindow.h
 )
 if(APPLE)
    enable_language(OBJCXX)
-   target_sources(plugin-scorbit PRIVATE src/QuitHook_mac.mm)
-   set_source_files_properties(src/QuitHook_mac.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-   target_link_libraries(plugin-scorbit PRIVATE "-framework AppKit")
+   target_sources(plugin-scorbit PRIVATE src/QuitHook_mac.mm src/StatusWindow_mac.mm)
+   set_source_files_properties(src/QuitHook_mac.mm src/StatusWindow_mac.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+   target_link_libraries(plugin-scorbit PRIVATE "-framework AppKit" "-framework QuartzCore")
 endif()
 
 target_include_directories(plugin-scorbit PRIVATE src "${VPX_HEADERS_DIR}")

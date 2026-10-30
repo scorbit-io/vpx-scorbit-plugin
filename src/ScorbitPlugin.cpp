@@ -6,6 +6,7 @@
 #include "QuitHook.h"
 #include "ScriptBinding.h"
 #include "SocketWorker.h"
+#include "StatusWindow.h"
 #include "VpxSessionSource.h"
 
 #include "plugins/ControllerPlugin.h"
@@ -64,11 +65,24 @@ MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
    "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
 MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
    "Show Scorbit status notifications, in a session or out of one", true, true);
+// Off by default: no corner of a full-bleed table is guaranteed free (docs/status-window.md).
+MSGPI_INT_VAL_SETTING(setStatusCorner, "StatusCorner", "Status light corner",
+   "Prototype: show the status light in this screen corner, 0 off, 1 top left, 2 top right, 3 bottom left, 4 bottom right", true, 0, 4, 0);
 
 static void FilterControllers(std::vector<ControllerDef>& items)
 {
    std::erase_if(items, [](const ControllerDef& def)
       { return def.gameId == nullptr || !std::string_view(def.gameId).starts_with(PMPI_GAMEID_PREFIX); });
+}
+
+// API thread. The status light shows while any table plays, PinMAME or not, and follows its
+// settings mid-game; called every tick, so a change applies within one.
+static void ApplyStatusWindow()
+{
+   const bool playing = vpxSession != nullptr && vpxSession->PlayerRunning();
+   const int corner = (playing && setShowStatus_Get()) ? setStatusCorner_Get() : 0;
+   if (UpdateStatusWindow(corner))
+      LOGI("Status light: corner "s + std::to_string(corner) + " (prototype, fake status)");
 }
 
 // API thread. Reschedules itself for the plugin's lifetime, so a line the
@@ -83,6 +97,7 @@ static void DrainSocketLog(void*)
       // Display changes while no frame renders (table chooser, a paused game) still re-declare.
       vpxSession->UpdateDeclare();
    }
+   ApplyStatusWindow();
    if (dmdOverlay != nullptr)
       dmdOverlay->DrainPending();
    msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
@@ -155,6 +170,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);
    msgApi->RegisterSetting(endpointId, &setSocketPath);
    msgApi->RegisterSetting(endpointId, &setShowStatus);
+   msgApi->RegisterSetting(endpointId, &setStatusCorner);
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
@@ -216,6 +232,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
       return;
    LOGI("Scorbit plugin unloading"s);
    RemoveQuitHook();
+   UpdateStatusWindow(0);
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
    // Detach first: unsubscribing the controllers below would otherwise withdraw it
