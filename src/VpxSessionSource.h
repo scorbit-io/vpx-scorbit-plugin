@@ -62,6 +62,8 @@ public:
    // there; a later call goes out at once. While a ROM runs, the ROM wins and this is ignored.
    void DeclareMachine(const std::string& machineId);
    const AuthoredTable& Authored() const { return m_authored; }
+   // The uuid the script declared, or "" while a ROM runs: the ROM wins and the uuid is never sent.
+   std::string DeclaredMachineUuid() const { return m_romId.empty() ? m_authored.machineId : std::string(); }
 
    // API thread only: the table script's game calls, buffered until ScriptCommit. Dropped,
    // with one line per table, until an authored Declare can go out.

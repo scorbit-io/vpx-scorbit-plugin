@@ -256,7 +256,7 @@ raises a script error: an index out of range, or a call while no daemon can answ
 | `SessionState` | Integer | 0 no game, 1 tracking, 2 no data, 4 indicator hidden; -1 before the first status |
 | `AuthStatus` | Integer | 0 not authenticated, 1 authenticating, 2 checking pairing, 3 unpaired, 4 paired, 5 authentication failed; -1 until the daemon reports it |
 | `StatusText` | String | the daemon's support text, often empty |
-| `MachineUuid` | String | the uuid the table declared, or `""` |
+| `MachineUuid` | String | the uuid the table declared; `""` before `Declare` and while a ROM runs, since the ROM then identifies the table and the uuid is not sent |
 
 **Leaderboards.** A request returns an id, and the result arrives later under that id:
 

@@ -134,7 +134,7 @@ public:
       const StatusRecord* r = Status();
       return r != nullptr ? r->status.supportText : std::string();
    }
-   std::string GetMachineUuid() const { return s_session != nullptr ? s_session->Authored().machineId : std::string(); }
+   std::string GetMachineUuid() const { return s_session != nullptr ? s_session->DeclaredMachineUuid() : std::string(); }
 
    int RequestTopScores(double scope, double period, double vpinFilter, double limit, const char* since)
    {
