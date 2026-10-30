@@ -1,6 +1,5 @@
 build/
 build-*/
-.omc/
 *.dmddump
 .DS_Store
 .env

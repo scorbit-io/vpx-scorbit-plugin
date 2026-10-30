@@ -20,7 +20,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# The plugin holds no Scorbit identity and no secrets: scorbitd is the Scorbitron,
+# The plugin holds no Scorbit identity and no secrets: the Scorbit daemon is the Scorbitron,
 # and the plugin only talks to it over a local socket (SB-5991).
 #
 # The transport carries no Visual Pinball dependency, so it builds and tests on its
@@ -70,7 +70,7 @@ if(MSVC)
    # getenv and fopen in WireDump draw C4996, MSVC's deprecation nag for the CRT.
    # Both calls are checked before use, and the _s replacements it suggests are
    # Microsoft-only, so taking them would put platform branching into a file that
-   # has none. scorbitd sets the same definition for every MSVC target.
+   # has none. The daemon sets the same definition for every MSVC target.
    target_compile_definitions(scorbit-transport PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 find_package(Threads REQUIRED)

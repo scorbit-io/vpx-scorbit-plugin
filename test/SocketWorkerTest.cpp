@@ -156,7 +156,7 @@ bool Handshake(ScorbitTest::TestPeer& peer, Wire::Hello& hello, Wire::Declare& d
    Wire::HelloAck ack;
    ack.protoMajor = Wire::PROTO_MAJOR;
    ack.protoMinor = Wire::PROTO_MINOR;
-   ack.daemonVersion = "scorbitd-test";
+   ack.daemonVersion = "daemon-test";
    ack.capabilities = Wire::CAP_IDENTIFY_FRAMES;
    ack.sessionId = 77;
    if (!peer.Send(Wire::TYPE_HELLO_ACK, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(ack)))
@@ -587,7 +587,7 @@ void TestErrorWithOnlyTheErrorBit()
 // SB-4600 deliverable 4: bytes that actually crossed, not bytes we encoded ourselves.
 //
 // Every other test in this file has the peer build its replies with Wire::Encode — the
-// plugin's own encoder — so a shared misreading of design.md would satisfy both sides
+// plugin's own encoder — so a shared misreading of the wire protocol definition would satisfy both sides
 // and pass. The vectors in WireVectors.h came off the wire between this plugin and the
 // real daemon, so agreeing with them is interoperability rather than self consistency.
 uint32_t LengthPrefix(const std::vector<uint8_t>& raw)
@@ -688,7 +688,7 @@ void TestCapturedWireBytes()
    CHECK(Wire::Decode(msg.payload, noSource));
    CHECK(noSource.hasPixels == 0);
    CHECK_MSG(noSource.width == 0 && noSource.height == 0 && noSource.shades == 0,
-             "no source is zero geometry with shades 0, which design.md defines as "
+             "no source is zero geometry with shades 0, which the protocol defines as "
              "nothing available yet");
 
    // --- Re encoding a decoded capture must reproduce it byte for byte ---------
@@ -942,7 +942,7 @@ void TestMemoryReadsOverTheSocket()
    CHECK(peer.Send(Wire::TYPE_NVRAM, 0, 55, ScorbitTest::Unhex("00180000" "00080000" "fd3f0000" "b4" "b4")));
    CHECK(Reply(peer, Wire::TYPE_NVRAM, 55, msg, code) && code == 0 && msg.payload.empty());
 
-   // Write, scorbitd's golden request: the unlock and a two-byte payload, both applied, and the
+   // Write, the daemon's golden request: the unlock and a two-byte payload, both applied, and the
    // payload is in the next Poll of the subscribed range.
    CHECK(peer.Send(Wire::TYPE_WRITE, 0, 57, ScorbitTest::Unhex("0200" "fd3f0000" "0100" "b4" "931c0000" "0200" "0801")));
    CHECK(Reply(peer, Wire::TYPE_WRITE, 57, msg, code) && code == 0);
@@ -1532,7 +1532,7 @@ bool AckHello(ScorbitTest::TestPeer& peer, uint16_t minor, uint32_t capabilities
    Wire::HelloAck ack;
    ack.protoMajor = Wire::PROTO_MAJOR;
    ack.protoMinor = minor;
-   ack.daemonVersion = "scorbitd-test";
+   ack.daemonVersion = "daemon-test";
    ack.capabilities = capabilities;
    ack.sessionId = 5;
    return peer.Send(Wire::TYPE_HELLO_ACK, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(ack));

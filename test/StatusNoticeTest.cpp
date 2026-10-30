@@ -1,7 +1,7 @@
 // license:GPLv3+
 
-// The Status latch and the transition-only notifier (scorbitd SPEC-0002 REQ-6.3, 6.7,
-// 6.11): what the API thread posts, frame by frame, for a given run of session states.
+// The Status latch and the transition-only notifier: what the API thread posts,
+// frame by frame, for a given run of session states.
 
 #include "StatusNotice.h"
 
@@ -144,7 +144,7 @@ void TestDescribe()
    CHECK(StatusNotifier::Describe({ Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE, "" }) == "Scorbit: hidden");
 }
 
-// REQ-6.5: working and not working differ in shape, not only in words.
+// Working and not working differ in shape, not only in words.
 void TestMarker()
 {
    CHECK(StatusNotifier::Marker({ Wire::SESSION_NONE, Wire::SYSTEM_OK, "" }) == "[OK]");
@@ -157,7 +157,7 @@ void TestMarker()
    CHECK(StatusNotifier::Marker({ Wire::SESSION_TRACKING, 4, "" }) == "[?]");
 }
 
-// REQ-6.3's "periodically": a [!] state that holds is posted again on the interval, and
+// A [!] state that holds is posted again on the interval, and
 // nothing else is. The API thread reuses its handle, so it stays one notification.
 void TestWarningRefreshesOnTheInterval()
 {
