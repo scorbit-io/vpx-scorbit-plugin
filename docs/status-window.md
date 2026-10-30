@@ -5,11 +5,11 @@ ticket per platform comes next.
 
 ## Why
 
-The Scorbit status indicator (SPEC-0002 REQ-6.6) is a small colour light in the Scorbitron's
+The Scorbit status indicator is a small colour light in the Scorbitron's
 vocabulary. It must never cover game content and must work on tables with no DMD.
 
-Inside VPX's renderer a plugin cannot draw one without owning a whole ancillary window
-(REQ-6.8). VPX notifications are text only; they are the interim surface, with `[OK]`/`[!]`/`[?]`
+Inside VPX's renderer a plugin cannot draw one without owning a whole ancillary window.
+VPX notifications are text only; they are the interim surface, with `[OK]`/`[!]`/`[?]`
 markers and periodic refresh (SB-6003, SB-6006). So the plugin draws the indicator in a small
 window of its own, outside VPX's renderer. VPX needs no change for it.
 
@@ -56,7 +56,7 @@ The same on every platform:
   cannot report a connection that never started, or one that dropped after being healthy, so the
   light also shows the plugin's own no-session state, after the same 5 s grace the
   notifications use (`StatusRecord`, `StatusNotifier::NO_SESSION_AFTER`). No wire change.
-- Drawing: the Scorbitron's colours and pulses (REQ-6.2) plus the REQ-6.5 glyph, so no state is
+- Drawing: the Scorbitron's colours and pulses plus a glyph, so no state is
   told by colour alone. The support text stays in the notification, which keeps posting
   `[!]` states (SB-6006).
 - If the window cannot be created (for example on Wayland), the notifications remain the
@@ -159,7 +159,7 @@ quit path from VPX's own menu rather than an Apple event.
 ## Order
 
 1. This note.
-2. macOS prototype on the rig: the window as above driven by a fake status, then the focus and
+2. macOS prototype in a live VPX: the window as above driven by a fake status, then the focus and
    fullscreen rows of the risk table, each a live VPX session with the screen unlocked.
-3. One implementation ticket per platform: macOS, Windows, then X11.
-4. REQ-6.6 already names this surface as plugin-owned rather than an upstream VPX event.
+3. An implementation per platform: macOS, Windows, then X11.
+4. The status indication is already specified as plugin-owned rather than an upstream VPX event.

@@ -1,7 +1,7 @@
 // license:GPLv3+
 
 // "Never a sibling" (docs/slice4-internals.md): which sources the overlay overrides, on the
-// display lists seen on the rig. D is PinMAME's display, S32 and S64 Serum v2's two outputs,
+// display lists seen in a live VPX. D is PinMAME's display, S32 and S64 Serum v2's two outputs,
 // and ours are the plugin's own overrides, listed first because it subscribed first.
 
 #include "OverrideChain.h"

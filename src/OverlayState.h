@@ -3,9 +3,9 @@
 #pragma once
 
 // The DMD probe's overlay as plain state: one bitmap, an enable bit and a hide timer,
-// with the probe firmware's rule for each (spb-firmwares RP2040 main.cpp and dmd.cpp),
-// and the shade each overlay value shows at on each platform. The normative statement
-// is scorbitd design.md, "Message layouts (protocol 1.0, slice 4)". Free of any Visual
+// with the probe firmware's rule for each,
+// and the shade each overlay value shows at on each platform. The wire layouts are in
+// WireProtocol.h. Free of any Visual
 // Pinball dependency so both are tested on their own; the socket path and the
 // in-process Overlay message share it.
 

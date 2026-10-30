@@ -136,7 +136,7 @@ jobs:
 
   # The only job with a write token: tags only, no checkout, and it runs no repository code, only
   # uploads the set the jobs above built. Draft only. Nothing reaches releases/latest until someone
-  # publishes it, which waits for the daemon release that replaces the plugin's old login.
+  # publishes it.
   publish:
     needs: manifest
     if: github.ref_type == 'tag'

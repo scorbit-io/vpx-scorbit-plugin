@@ -1,7 +1,7 @@
 // license:GPLv3+
 
-// Overlay placement and size rules against the DMD probe firmware (spb-firmwares RP2040,
-// Dmd::FrameToSamples and WriteDmdOverlay). Expected values are worked from the firmware's
+// Overlay placement and size rules against the DMD probe firmware (its overlay
+// write and frame-to-samples code). Expected values are worked from the firmware's
 // own arithmetic, not from the helper, on the three hardware displays: 128x32, 128x16
 // and 192x64.
 

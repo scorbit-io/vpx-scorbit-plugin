@@ -58,7 +58,7 @@ struct DeclareSnapshot
    Wire::Declare declare;
    uint64_t epoch = 0;
    // Not on the wire either: bumped whenever the overlay surface appears, goes or
-   // moves to another source, which must re-Declare (design.md, slice 4) even when
+   // moves to another source, which must re-Declare (wire protocol definition, slice 4) even when
    // nothing declared changes.
    uint64_t surfaceGeneration = 0;
 

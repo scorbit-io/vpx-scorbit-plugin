@@ -4,8 +4,8 @@
 
 // Where an overlay lands on the display, and which sizes are accepted, exactly as the
 // DMD probe firmware does it, so overlay code written against the probe behaves the
-// same on VPX (SB-5699). Reference: spb-firmwares RP2040 main.cpp (WriteDmdOverlay) and
-// dmd.cpp (Dmd::FrameToSamples).
+// same on VPX (SB-5699). Reference: the probe firmware's overlay write and
+// frame-to-samples code.
 //
 // Overlays are normally full display-size frames shaped by transparency, which places
 // them at the origin. These rules decide only the mismatched cases: a smaller overlay

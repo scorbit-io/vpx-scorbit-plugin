@@ -581,7 +581,7 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
 }
 
 // Composite the bitmap over the target's frame into the spare buffer, mirroring what the
-// probe firmware does (spb-firmwares/RP2040/dmd.cpp, Dmd::FrameToSamples): the bitmap is
+// probe firmware does: the bitmap is
 // placed on the controller's display, centred and cropped as the probe places it, pixels
 // outside it and pixels with bit 7 set are transparent, and an opaque pixel replaces the
 // dot at the luminance the probe on this platform shows its value at. A colouriser output

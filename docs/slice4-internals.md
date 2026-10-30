@@ -1,13 +1,11 @@
 # Slice 4: plugin internals
 
 How the plugin delivers the daemon's DMD overlay to every consumer, and how its threads
-hand data to each other without waiting. The wire contract lives in scorbitd's SPEC-0002
-design, "Message layouts (protocol 1.0, slice 4)". Section references such as REQ-x.y are to
-scorbitd SPEC-0002.
+hand data to each other without waiting. The wire layouts are in `src/WireProtocol.h`.
 
 ## Delivery downstream
 
-**Delivery downstream** (REQ-4.3). Cabinets drive real DMDs from VPX, so the overlay MUST reach
+**Delivery downstream.** Cabinets drive real DMDs from VPX, so the overlay MUST reach
 everything that shows the DMD as if it were original data: VPX's own DMD, the PUP and B2S DMD
 overlays, ScoreView, and DMDUtil (ZeDMD, Pin2DMD, Pixelcade).
 
@@ -53,7 +51,7 @@ The override therefore follows these rules (`src/DmdOverlay.*`, `src/OverrideCha
   - **Early order** (the normal case): Serum takes the last match, so it binds to PinMAME's own
     source directly. The plugin withdraws its PinMAME override and overrides each colouriser
     output. Serum is not disturbed, because its input was never ours.
-  - **Late order** (seen on the rig before early subscription existed): Serum chains onto our
+  - **Late order** (seen in a live VPX before early subscription existed): Serum chains onto our
     PinMAME override. The plugin keeps that override and also overrides each colouriser output.
   - To withdraw, the plugin answers without the entry and keeps its subscription, so it keeps its
     place in the list.
@@ -82,7 +80,7 @@ with its maintainer.
 
 ## Handoffs between threads
 
-None of these makes the API or render thread wait on the socket worker (REQ-8.3).
+None of these makes the API or render thread wait on the socket worker.
 
 - *Declare latch*, API thread → worker (`src/Latch.h`): the *Status latch*'s mechanism in the
   other direction.
@@ -137,20 +135,20 @@ None of these makes the API or render thread wait on the socket worker (REQ-8.3)
 - *DMD frames*, tap worker → readers (`DmdTap`): each captured identify frame is published through
   the same seqlock.
 - *Status latch*, worker → API thread (`src/StatusNotice.h`): `PushNotification` and
-  `UpdateNotification` are plugin API calls and run only on the API thread (REQ-8.1), so the
+  `UpdateNotification` are plugin API calls and run only on the API thread, so the
   worker answers `Status` and stores the decoded record in a single slot, overwriting whatever is
   there. The slot is an atomic pointer to an immutable, heap-allocated record. The worker builds
   a new record, `exchange`s it in and deletes the one it displaced; the API thread `exchange`s in
   null and owns what it took. Neither side ever reads a record the other can still write. A
   seqlock would not do here: the record holds `support_text`, and overlapping a copy with a
   rewrite that frees its storage is undefined behaviour before any sequence check can run.
-  It is bounded by construction. Losing an older state is correct because REQ-6.3 asks for the
+  It is bounded by construction. Losing an older state is correct because the status indication must show the
   latest state, observed at most one frame after it changes: a state overwritten before the next
-  drain lasted less than a frame, which REQ-6.3 does not require to be shown, and the log still
+  drain lasted less than a frame, which need not be shown, and the log still
   has it because the worker logs each `Status` as it decodes it. A queue would only replay toasts
   nobody could read. The API thread exchanges the slot once per frame in `OnPrepareFrame` and, if
   it took a record, posts or updates the notification there. The plugin's own no-session notice
-  (REQ-6.11) is posted from the same drain. `PushNotification` returns 0 and does nothing outside
+  is posted from the same drain. `PushNotification` returns 0 and does nothing outside
   a running game; that is acceptable, because `OnPrepareFrame` runs only in a game.
 
   The per-frame drain is deliberate, and a drain that keeps running while frames do not render
