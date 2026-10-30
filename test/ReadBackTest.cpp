@@ -8,11 +8,16 @@
 #include "Check.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <system_error>
+
+#ifndef _WIN32
+   #include <sys/stat.h>
+#endif
 
 using namespace Scorbit;
 namespace fs = std::filesystem;
@@ -226,6 +231,138 @@ void TestPlayerTable()
    fs::remove_all(root, ec);
 }
 
+size_t FilesIn(const fs::path& dir)
+{
+   std::error_code ec;
+   size_t n = 0;
+   for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+      n++;
+   return n;
+}
+
+// Closing admits nothing more and returns everything admitted, so no id is left unanswered.
+void TestChannelClose()
+{
+   ReadBackChannel channel;
+   channel.SetLeaderboards(true);
+   const uint32_t a = channel.Request(1, { });
+   const uint32_t b = channel.Request(1, { });
+   std::deque<TopScoresAsk> closed;
+   channel.Close(closed);
+   CHECK(!channel.Leaderboards());
+   CHECK(closed.size() == 2 && closed.size() == 2 && closed[0].request.requestId == a && closed[1].request.requestId == b);
+   CHECK_MSG(channel.Request(1, { }) == 0, "nothing is admitted after Close");
+   std::deque<TopScoresAsk> left;
+   channel.TakeRequests(left);
+   CHECK(left.empty());
+}
+
+// The age counts from the worker's receipt, not from when the script first read it.
+void TestAgeCountsFromReceipt()
+{
+   ReadBackChannel channel;
+   ReadBackState state;
+   state.NewEpoch(1);
+   const Clock::time_point t0 = Clock::now();
+   TopScoresPost post = Result(1, 5, Wire::TOP_SCORES_OK, 1, 3);
+   post.received = t0 - std::chrono::seconds(20);
+   channel.PostResult(std::move(post));
+   state.Drain(channel, t0);
+   CHECK_MSG(state.Age(5, t0) == 23, "age " + std::to_string(state.Age(5, t0)));
+}
+
+#ifndef _WIN32
+mode_t Mode(const fs::path& p)
+{
+   struct stat st { };
+   return ::lstat(p.c_str(), &st) == 0 ? st.st_mode : 0;
+}
+
+// The picture directory is created 0700, and an existing one is used only when it is this user's alone.
+void TestPictureDirectoryOwnership()
+{
+   std::error_code ec;
+   const fs::path root = fs::temp_directory_path(ec) / "scorbit-read-back-dirs";
+   fs::remove_all(root, ec);
+   fs::create_directories(root, ec);
+   const fs::path a = root / "a.jpg";
+   Write(a, "picture a");
+   const Wire::Players claimed { { { 1, "p-1", "", "", "", "" } } };
+   std::string error;
+
+   {
+      const fs::path dir = root / "fresh" / "scorbit-vpx" / "pictures";
+      PlayerTable table;
+      table.SetDirectory(dir, 1);
+      table.Apply(claimed);
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Stored);
+      CHECK_MSG((Mode(dir) & 0777) == 0700 && (Mode(dir.parent_path()) & 0777) == 0700, "created owner-only");
+   }
+   {
+      const fs::path dir = root / "shared" / "scorbit-vpx" / "pictures";
+      fs::create_directories(dir, ec);
+      fs::permissions(dir, fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all, fs::perm_options::replace, ec);
+      PlayerTable table;
+      table.SetDirectory(dir, 1);
+      table.Apply(claimed);
+      CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Failed);
+      CHECK_MSG(table.DirectoryRefused() && !error.empty() && error.find(root.string()) == std::string::npos, error);
+      CHECK_MSG(FilesIn(dir) == 0, "nothing is copied into a writable-by-others directory");
+      fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
+      CHECK_MSG(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Failed,
+         "a refusal holds for the load");
+   }
+   {
+      const fs::path real = root / "elsewhere";
+      fs::create_directories(real, ec);
+      fs::permissions(real, fs::perms::owner_all, fs::perm_options::replace, ec);
+      const fs::path parent = root / "linked" / "scorbit-vpx";
+      fs::create_directories(parent, ec);
+      fs::create_directory_symlink(real, parent / "pictures", ec);
+      PlayerTable table;
+      table.SetDirectory(parent / "pictures", 1);
+      table.Apply(claimed);
+      CHECK_MSG(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Failed
+         && table.DirectoryRefused() && FilesIn(real) == 0, "a symlink is not taken for the directory");
+   }
+   fs::remove_all(root, ec);
+}
+
+// Never the shared temp directory.
+void TestDefaultPictureDirectory()
+{
+   const auto restore = [](const char* name, const char* value)
+   {
+      if (value != nullptr)
+         setenv(name, value, 1);
+      else
+         unsetenv(name);
+   };
+#if defined(__APPLE__)
+   const std::string tmp = getenv("TMPDIR") != nullptr ? getenv("TMPDIR") : "";
+   setenv("TMPDIR", "/Users/someone/T", 1);
+   CHECK(DefaultPictureDirectory() == fs::path("/Users/someone/T/scorbit-vpx/pictures"));
+   restore("TMPDIR", tmp.empty() ? nullptr : tmp.c_str());
+#else
+   const std::string run = getenv("XDG_RUNTIME_DIR") != nullptr ? getenv("XDG_RUNTIME_DIR") : "";
+   const std::string cache = getenv("XDG_CACHE_HOME") != nullptr ? getenv("XDG_CACHE_HOME") : "";
+   const std::string home = getenv("HOME") != nullptr ? getenv("HOME") : "";
+   setenv("XDG_RUNTIME_DIR", "/run/user/1000", 1);
+   CHECK(DefaultPictureDirectory() == fs::path("/run/user/1000/scorbit-vpx/pictures"));
+   unsetenv("XDG_RUNTIME_DIR");
+   setenv("XDG_CACHE_HOME", "/home/someone/.cachex", 1);
+   CHECK(DefaultPictureDirectory() == fs::path("/home/someone/.cachex/scorbit-vpx/pictures"));
+   unsetenv("XDG_CACHE_HOME");
+   setenv("HOME", "/home/someone", 1);
+   CHECK(DefaultPictureDirectory() == fs::path("/home/someone/.cache/scorbit-vpx/pictures"));
+   restore("XDG_RUNTIME_DIR", run.empty() ? nullptr : run.c_str());
+   restore("XDG_CACHE_HOME", cache.empty() ? nullptr : cache.c_str());
+   restore("HOME", home.empty() ? nullptr : home.c_str());
+#endif
+   CHECK(DefaultPictureDirectory().string().rfind("/tmp/", 0) != 0);
+}
+#endif
+
 void TestDisplayName()
 {
    PlayerView v;
@@ -245,5 +382,11 @@ int main()
    TestStatePlayers();
    TestPlayerTable();
    TestDisplayName();
+   TestChannelClose();
+   TestAgeCountsFromReceipt();
+#ifndef _WIN32
+   TestPictureDirectoryOwnership();
+   TestDefaultPictureDirectory();
+#endif
    return ScorbitTest::Summary("read_back_test");
 }

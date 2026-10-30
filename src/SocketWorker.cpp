@@ -597,8 +597,6 @@ void SocketWorker::Disconnect()
       NoSession(std::string());
    }
    EndReadBacks(true);
-   if (m_readBack != nullptr)
-      m_readBack->SetLeaderboards(false);
 }
 
 void SocketWorker::PostStatus()
@@ -1148,7 +1146,7 @@ void SocketWorker::Serve()
    while (m_running)
    {
       if (m_readBack != nullptr)
-         m_readBack->SetLeaderboards(m_haveDeclared && ReadBackAllowed(Wire::CAP_LEADERBOARDS));
+         m_readBack->SetLeaderboards(TableActive() && ReadBackAllowed(Wire::CAP_LEADERBOARDS));
       if (!MaybeDeclare() || !SendGames() || !SendTopScoresRequests())
       {
          alive = !m_running;
@@ -1513,7 +1511,14 @@ void SocketWorker::PostScores(uint64_t epoch, uint32_t requestId, int result)
    post.epoch = epoch;
    post.requestId = requestId;
    post.result = result;
+   post.received = Clock::now();
    m_readBack->PostResult(std::move(post));
+}
+
+bool SocketWorker::TableActive() const
+{
+   // The chooser declares too, with neither; a table that plays names its file or its ROM.
+   return m_haveDeclared && (!m_declared.declare.tablePath.empty() || !m_declared.declare.romId.empty());
 }
 
 void SocketWorker::PostPlayers()
@@ -1530,7 +1535,8 @@ void SocketWorker::EndReadBacks(bool lost)
       return;
    if (lost)
    {
-      m_readBack->TakeRequests(m_asks);
+      // Closed and drained in one step, so no request is admitted after the drain and left unanswered.
+      m_readBack->Close(m_asks);
       for (const TopScoresAsk& ask : m_asks)
          PostScores(ask.epoch, ask.request.requestId, SCORES_LOST);
       m_asks.clear();
@@ -1556,10 +1562,18 @@ bool SocketWorker::SendTopScoresRequests()
       m_asks.pop_front();
       const uint32_t id = ask.request.requestId;
       if (ask.epoch < m_declared.epoch)
-         continue;     // its table has gone
+      {
+         PostScores(ask.epoch, id, SCORES_LOST);  // its table has gone; the API thread drops it
+         continue;
+      }
       if (!ReadBackAllowed(Wire::CAP_LEADERBOARDS))
       {
          PostScores(ask.epoch, id, SCORES_UNSUPPORTED);
+         continue;
+      }
+      if (!TableActive())
+      {
+         PostScores(ask.epoch, id, SCORES_NOT_DECLARED);
          continue;
       }
       const std::vector<uint8_t> payload = Wire::Encode(ask.request);
@@ -1569,22 +1583,22 @@ bool SocketWorker::SendTopScoresRequests()
          continue;
       }
 
+      // Registered before it goes out: Exchange serves requests that overtake its reply, and the
+      // result can be one of them. A failed exchange leaves it for the disconnect to answer lost.
+      if (m_pendingScores.size() >= MAX_PENDING_SCORES)
+      {
+         PostScores(m_pendingScores.begin()->second, m_pendingScores.begin()->first, SCORES_LOST);
+         m_pendingScores.erase(m_pendingScores.begin());
+      }
+      m_pendingScores[id] = ask.epoch;
       Wire::Message reply;
       if (!Exchange(Wire::TYPE_TOP_SCORES_REQUEST, payload, TOP_SCORES_TIMEOUT_MS, reply))
-      {
-         PostScores(ask.epoch, id, SCORES_LOST);
          return false;
-      }
       if (!reply.header.IsError())
-      {
-         if (m_pendingScores.size() >= MAX_PENDING_SCORES)
-         {
-            PostScores(m_pendingScores.begin()->second, m_pendingScores.begin()->first, SCORES_LOST);
-            m_pendingScores.erase(m_pendingScores.begin());
-         }
-         m_pendingScores[id] = ask.epoch;
          continue;
-      }
+      // Refused, so no result is coming; unless one already arrived, the refusal is the answer.
+      if (m_pendingScores.erase(id) == 0)
+         continue;
 
       Wire::ErrorPayload e;
       Wire::Decode(reply.payload, e);
@@ -1623,6 +1637,7 @@ bool SocketWorker::AnswerTopScores(const Wire::Message& msg)
       post.result = scores.result;
       post.ageS = scores.ageS;
       post.entries = std::move(scores.entries);
+      post.received = Clock::now();
       m_pendingScores.erase(pending);
       m_readBack->PostResult(std::move(post));
    }
@@ -1665,7 +1680,15 @@ bool SocketWorker::AnswerPlayerPicture(const Wire::Message& msg)
    case PlayerTable::Picture::Unchanged:
       break;
    case PlayerTable::Picture::Failed:
-      if (!m_loggedPictureCopy)
+      if (m_players.DirectoryRefused())
+      {
+         if (!m_loggedPictureDir)
+         {
+            Log(LOG_LEVEL_WARN, "Socket: player pictures are off, " + error + " (it must be owned by this user and writable by no one else)");
+            m_loggedPictureDir = true;
+         }
+      }
+      else if (!m_loggedPictureCopy)
       {
          Log(LOG_LEVEL_WARN, "Socket: a player picture was not kept, " + error + "; that player shows none (logged once per session)");
          m_loggedPictureCopy = true;

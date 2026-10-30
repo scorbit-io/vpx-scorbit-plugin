@@ -2195,6 +2195,74 @@ void TestReadBacksWithOlderDaemons()
    }
 }
 
+// Leaderboards need a table that plays, not the chooser's empty Declare; and a TopScores that
+// overtakes its request's acknowledgement is still delivered.
+void TestLeaderboardsNeedATable()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   DeclareSnapshot chooser = MakeDeclare("", 0, 0, 0, 0);
+   chooser.declare.tablePath.clear();
+   chooser.epoch = 2;
+   source.Set(chooser, { });
+   ReadBackChannel channel;
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 70, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+   std::this_thread::sleep_for(std::chrono::milliseconds(250));
+   CHECK_MSG(!channel.Leaderboards(), "the chooser's Declare names no table");
+   CHECK_MSG(channel.Request(2, { }) == 0, "no id at the table chooser");
+
+   DeclareSnapshot table = MakeDeclare("", 0, 0, 0, 0);
+   table.declare.tablePath = "Orbit.vpx";
+   table.epoch = 3;
+   source.Set(table, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(AwaitLeaderboards(channel, true));
+
+   const Wire::TopScoresRequest ask { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 3, "" };
+   const uint32_t id = channel.Request(3, ask);
+   CHECK(id != 0);
+   CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+   const uint32_t requestSeq = msg.header.seq;
+   // The result first, while the worker still waits on the request's acknowledgement.
+   const Wire::TopScores scores { id, Wire::TOP_SCORES_OK, 4, { { 1, 42, "Ace", "A", 0, "" } } };
+   CHECK(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 71, Wire::Encode(scores)));
+   CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, requestSeq, { }));
+   TopScoresPost post;
+   std::deque<TopScoresPost> others;
+   CHECK(AwaitScores(channel, id, post, others));
+   CHECK_MSG(post.result == Wire::TOP_SCORES_OK && post.entries == scores.entries && post.epoch == 3,
+      "a result overtaking the acknowledgement is kept");
+   CHECK(post.received != std::chrono::steady_clock::time_point { });
+
+   // Back at the chooser, leaderboards are unavailable again.
+   chooser.epoch = 4;
+   source.Set(chooser, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(AwaitLeaderboards(channel, false));
+   worker.Stop();
+}
+
 // Per user, under the platform temp or runtime directory.
 void TestPictureDirectoryDefault()
 {
@@ -2227,6 +2295,7 @@ int main()
    TestAuthoredTableWithoutAuthoredDaemon();
    TestReadBacksWithA12Daemon();
    TestReadBacksWithOlderDaemons();
+   TestLeaderboardsNeedATable();
    TestPictureDirectoryDefault();
    return ScorbitTest::Summary("socket_worker_test");
 }

@@ -7,7 +7,10 @@
 #include <cstdlib>
 #include <system_error>
 
-#if defined(__APPLE__)
+#ifndef _WIN32
+   #include <cerrno>
+   #include <pwd.h>
+   #include <sys/stat.h>
    #include <unistd.h>
 #endif
 
@@ -35,10 +38,8 @@ std::string ToUtf8(const fs::path& p)
 
 uint32_t ReadBackChannel::Request(uint64_t epoch, Wire::TopScoresRequest request)
 {
-   if (!m_leaderboards)
-      return 0;
    std::lock_guard lock(m_mutex);
-   if (m_requests.size() >= MAX_QUEUED)
+   if (!m_leaderboards || m_requests.size() >= MAX_QUEUED)
       return 0;
    request.requestId = m_nextId;
    m_nextId = m_nextId >= 0x7FFFFFFFu ? 1 : m_nextId + 1;
@@ -49,6 +50,27 @@ uint32_t ReadBackChannel::Request(uint64_t epoch, Wire::TopScoresRequest request
 void ReadBackChannel::TakeRequests(std::deque<TopScoresAsk>& out)
 {
    std::lock_guard lock(m_mutex);
+   for (TopScoresAsk& ask : m_requests)
+      out.push_back(std::move(ask));
+   m_requests.clear();
+}
+
+void ReadBackChannel::SetLeaderboards(bool available)
+{
+   std::lock_guard lock(m_mutex);
+   m_leaderboards = available;
+}
+
+bool ReadBackChannel::Leaderboards() const
+{
+   std::lock_guard lock(m_mutex);
+   return m_leaderboards;
+}
+
+void ReadBackChannel::Close(std::deque<TopScoresAsk>& out)
+{
+   std::lock_guard lock(m_mutex);
+   m_leaderboards = false;
    for (TopScoresAsk& ask : m_requests)
       out.push_back(std::move(ask));
    m_requests.clear();
@@ -72,16 +94,24 @@ void ReadBackChannel::TakeResults(std::deque<TopScoresPost>& out)
 
 fs::path DefaultPictureDirectory()
 {
-   std::error_code ec;
 #if defined(_WIN32)
+   // The temp directory is per user on Windows, so it is a safe second choice there.
    if (const wchar_t* base = _wgetenv(L"LOCALAPPDATA"); base != nullptr && base[0] != L'\0')
       return fs::path(base) / L"Scorbit" / L"vpx-pictures";
+   std::error_code ec;
+   const fs::path tmp = fs::temp_directory_path(ec);
+   return ec || tmp.empty() ? fs::path() : tmp / L"Scorbit" / L"vpx-pictures";
 #else
+   // Never the shared /tmp: another user could own the directory, or read what lands in it.
+   const auto env = [](const char* name) -> fs::path
+   {
+      const char* v = getenv(name);
+      return v != nullptr && v[0] != '\0' ? fs::path(v) : fs::path();
+   };
    fs::path base;
    #if defined(__APPLE__)
-   if (const char* tmp = getenv("TMPDIR"); tmp != nullptr && tmp[0] != '\0')
-      base = tmp;
-   else
+   base = env("TMPDIR");
+   if (base.empty())
    {
       char buf[1024] = { };
       const size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, buf, sizeof(buf));
@@ -89,16 +119,66 @@ fs::path DefaultPictureDirectory()
          base = buf;
    }
    #else
-   if (const char* xdg = getenv("XDG_RUNTIME_DIR"); xdg != nullptr && xdg[0] != '\0')
-      base = xdg;
+   base = env("XDG_RUNTIME_DIR");
+   if (base.empty())
+      base = env("XDG_CACHE_HOME");
+   if (base.empty())
+   {
+      fs::path home = env("HOME");
+      if (home.empty())
+         if (const passwd* pw = getpwuid(getuid()); pw != nullptr && pw->pw_dir != nullptr && pw->pw_dir[0] != '\0')
+            home = pw->pw_dir;
+      if (!home.empty())
+         base = home / ".cache";
+   }
    #endif
-   if (!base.empty())
-      return base / "scorbit-vpx" / "pictures";
+   return base.empty() ? fs::path() : base / "scorbit-vpx" / "pictures";
 #endif
-   const fs::path tmp = fs::temp_directory_path(ec);
-   if (ec || tmp.empty())
-      return { };
-   return tmp / "scorbit-vpx" / "pictures";
+}
+
+bool PlayerTable::PrepareDirectory(std::string& error)
+{
+   if (m_dir.empty())
+   {
+      error = "no directory for player pictures on this platform";
+      return false;
+   }
+   if (m_refused)
+   {
+      error = "the picture directory is not this user's alone";
+      return false;
+   }
+   std::error_code ec;
+#ifdef _WIN32
+   fs::create_directories(m_dir, ec);
+   if (ec)
+   {
+      error = "cannot create the picture directory (" + ec.message() + ')';
+      return false;
+   }
+   return true;
+#else
+   // The leaf and the scorbit-vpx above it are made 0700 here; whatever already exists must be a
+   // real directory of this uid that no one else can write, or a stranger could swap files in.
+   const fs::path parent = m_dir.parent_path();
+   fs::create_directories(parent.parent_path(), ec);
+   for (const fs::path& dir : { parent, m_dir })
+   {
+      if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST)
+      {
+         error = "cannot create the picture directory (" + std::error_code(errno, std::generic_category()).message() + ')';
+         return false;
+      }
+      struct stat st { };
+      if (::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
+      {
+         m_refused = true;
+         error = "the picture directory is not this user's alone";
+         return false;
+      }
+   }
+   return true;
+#endif
 }
 
 void PlayerTable::SetDirectory(fs::path dir, uint64_t tag)
@@ -168,11 +248,8 @@ PlayerTable::Picture PlayerTable::Apply(const Wire::PlayerPicture& picture, std:
 
    // A failure leaves the slot with no picture rather than the one this superseded.
    DropPicture(slot);
-   if (m_dir.empty())
-   {
-      error = "no directory for player pictures on this platform";
+   if (!PrepareDirectory(error))
       return Picture::Failed;
-   }
    std::error_code ec;
    const fs::path source = FromUtf8(picture.path);
    if (!fs::is_regular_file(source, ec) || ec)
@@ -186,15 +263,6 @@ PlayerTable::Picture PlayerTable::Apply(const Wire::PlayerPicture& picture, std:
       error = ec ? "the picture's size is unreadable" : "the picture is over 2 MiB";
       return Picture::Failed;
    }
-   fs::create_directories(m_dir, ec);
-   if (ec)
-   {
-      error = "cannot create the picture directory (" + ec.message() + ')';
-      return Picture::Failed;
-   }
-#ifndef _WIN32
-   fs::permissions(m_dir, fs::perms::owner_all, fs::perm_options::replace, ec);
-#endif
    char name[64];
    std::snprintf(name, sizeof(name), "%016llx-%u-%llu.jpg", static_cast<unsigned long long>(m_tag),
       static_cast<unsigned>(picture.player), static_cast<unsigned long long>(++m_copies));
@@ -234,7 +302,8 @@ void TopScoresStore::Add(TopScoresPost post, Clock::time_point now)
    Release(post.requestId);
    if (m_entries.size() >= CAPACITY)
       m_entries.pop_front();
-   m_entries.push_back({ std::move(post), now });
+   const Clock::time_point received = post.received == Clock::time_point { } ? now : post.received;
+   m_entries.push_back({ std::move(post), received });
 }
 
 const TopScoresStore::Entry* TopScoresStore::Find(uint32_t requestId) const

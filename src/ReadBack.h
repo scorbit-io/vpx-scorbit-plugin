@@ -54,6 +54,8 @@ struct TopScoresPost
    int result = SCORES_NONE;
    uint32_t ageS = 0;
    std::vector<Wire::TopScoreEntry> entries;
+   // When the worker had it, so the age the script reads counts the time it waited to be read.
+   std::chrono::steady_clock::time_point received { };
 };
 
 struct PlayerView
@@ -83,13 +85,17 @@ public:
    // Requests waiting for the worker, and results waiting for the API thread; past it the oldest go.
    static constexpr size_t MAX_QUEUED = 16;
 
-   // API thread. The request's id, or 0 when no daemon can answer it now or too many wait.
+   // API thread. The request's id, or 0 when no daemon can answer it now or too many wait. Admission
+   // is decided under the queue's lock, so every id handed out is either taken by TakeRequests
+   // or returned by Close, and the worker answers each one.
    uint32_t Request(uint64_t epoch, Wire::TopScoresRequest request);
    void TakeRequests(std::deque<TopScoresAsk>& out);
 
-   // Worker: a session serves leaderboards and has a table declared.
-   void SetLeaderboards(bool available) { m_leaderboards = available; }
-   bool Leaderboards() const { return m_leaderboards; }
+   // Worker: a session serves leaderboards and a table is playing.
+   void SetLeaderboards(bool available);
+   bool Leaderboards() const;
+   // Worker, at session end: admits nothing more and hands over what was admitted, in one step.
+   void Close(std::deque<TopScoresAsk>& out);
 
    void PostResult(TopScoresPost post);
    void TakeResults(std::deque<TopScoresPost>& out);
@@ -98,15 +104,16 @@ public:
    std::unique_ptr<PlayersPost> TakePlayers() { return m_players.Take(); }
 
 private:
-   std::atomic<bool> m_leaderboards { false };
-   std::mutex m_mutex;
+   mutable std::mutex m_mutex;
+   bool m_leaderboards = false;
    uint32_t m_nextId = 1;      // kept within a script's positive Long
    std::deque<TopScoresAsk> m_requests;
    std::deque<TopScoresPost> m_results;
    Latch<PlayersPost> m_players;
 };
 
-// Where the worker keeps its picture copies, per user; empty when the platform names none.
+// Where the worker keeps its picture copies, per user; empty when the platform names none. Linux
+// takes $XDG_RUNTIME_DIR, else $XDG_CACHE_HOME or ~/.cache; never a directory shared between users.
 std::filesystem::path DefaultPictureDirectory();
 
 // The worker's slot table and the picture files it owns. Worker thread only.
@@ -131,6 +138,8 @@ public:
    // Copies the file before returning, so the daemon may delete its own once this is acknowledged.
    // error is set on Failed, and never names a path.
    Picture Apply(const Wire::PlayerPicture& picture, std::string& error);
+   // The directory was found shared with other users, so no picture is kept for this load.
+   bool DirectoryRefused() const { return m_refused; }
    // Empties every slot and deletes every copy. True when anything was held.
    bool Clear();
 
@@ -144,11 +153,14 @@ private:
       std::filesystem::path copy;
    };
    static void DropPicture(Slot& slot);
+   // Creates the directory 0700, or accepts an existing one only when it is this user's alone.
+   bool PrepareDirectory(std::string& error);
 
    std::array<Slot, Wire::MAX_PLAYERS> m_slots;
    std::filesystem::path m_dir;
    uint64_t m_tag = 0;
    uint64_t m_copies = 0;
+   bool m_refused = false;
 };
 
 // The leaderboard results the script can read, by request id. API thread only.
@@ -166,6 +178,7 @@ public:
       Clock::time_point received { };
    };
 
+   // Stamped with the post's own receipt time, or now when it carries none.
    void Add(TopScoresPost post, Clock::time_point now);
    const Entry* Find(uint32_t requestId) const;
    void Release(uint32_t requestId);
