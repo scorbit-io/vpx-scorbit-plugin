@@ -53,6 +53,7 @@ The binding covers the SDK's game-facing API:
 | `getStatus`, `PairingStatusChanged` | no | yes, as a property carrying the SDK's six authentication states (not authenticated, authenticating, checking pairing, unpaired, paired, authentication failed). The daemon's status adds this field in protocol 1.2, separate from the indicator's system state, and sends it even while the indicator is hidden |
 | Game status indication (in session, tracking, the reason when not) | no | yes, from the daemon's status: session state, system state and support text |
 | `getMachineUuid` | no | yes: the uuid the table declared |
+| `getMachineSerial` | no | out: it is the Scorbit device's serial, which on a VPX install is the daemon's, shared by every table; a table's own identity is the uuid above |
 | `requestTopScores(scope, period, since, vpinFilter)` | no | yes, polled. Every argument as the SDK has it: scope machine, variant or game; period all time or 14 to 365 days; `vpinFilter` any (the SDK default, passed explicitly), virtual only or physical only. Replies are cached and capped (top N, names truncated) |
 | `PlayersUpdated`, `player_info.h` | no | yes, polled. Per slot: the claimed player's name and id, or, when unclaimed, the claim deeplink, so a table can show a claim QR as a machine does |
 | `PlayerPictureReady` | no | yes, polled, as a local file path valid for the session (usable through FlexDMD, for example) |
