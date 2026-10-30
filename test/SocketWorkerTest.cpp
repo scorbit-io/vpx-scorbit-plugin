@@ -2262,6 +2262,101 @@ void TestLeaderboardsNeedATable()
    worker.Stop();
 }
 
+// A hybrid table: its ROM replaces the authored uuid within one epoch. Nothing read for the
+// authored identity carries over; a display-only re-Declare of the same identity keeps it all.
+void TestNewIdentityWithinAnEpoch()
+{
+   const std::string dir = MakeTempDir();
+   const std::string files = MakeTempDir();
+   CHECK(!dir.empty() && !files.empty());
+   if (dir.empty() || files.empty())
+      return;
+   const std::filesystem::path pictures = std::filesystem::path(files) / "pictures";
+   const std::filesystem::path picture = std::filesystem::path(files) / "daemon-1-1.jpg";
+   WriteFile(picture, "\xff\xd8 picture");
+   {
+      ScorbitTest::TestPeer peer(dir);
+      CHECK(peer.Listening());
+      if (!peer.Listening())
+         return;
+
+      FakeSource source;
+      const DeclareSnapshot authored = MakeAuthoredDeclare(1);
+      source.Set(authored, { });
+      ReadBackChannel channel;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.authoredTables = true;
+      cfg.pictureDir = pictures.string();
+      SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+
+      Wire::Hello hello;
+      CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+      Wire::Message msg;
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(AwaitLeaderboards(channel, true));
+
+      // A claimed slot with its picture, and a request awaiting its result.
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 80, Wire::Encode(Wire::Players { { { 1, "p-1", "", "Ace", "A", "" } } })));
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 81, Wire::Encode(Wire::PlayerPicture { 1, "p-1", picture.string() })));
+      PlayersPost players;
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
+      const std::filesystem::path copy = players.slots[0].picture;
+      CHECK(std::filesystem::exists(copy));
+      const uint32_t pending = channel.Request(1, { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 5, "" });
+      CHECK(pending != 0);
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+      // --- Control: the same identity and epoch, re-declared for the display only ---------
+      DeclareSnapshot display = authored;
+      display.surfaceGeneration = 1;
+      source.Set(display, { });
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(peer.Send(Wire::TYPE_PING, 0, 82, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+      CHECK_MSG(!channel.TakePlayers(), "a display-only re-Declare posts no players");
+      CHECK_MSG(std::filesystem::exists(copy), "and keeps the picture");
+      std::deque<TopScoresPost> results;
+      channel.TakeResults(results);
+      CHECK_MSG(results.empty(), "and the request stays pending");
+
+      // --- The ROM replaces the authored uuid, same epoch ---------------------------------
+      DeclareSnapshot rom = MakeDeclare("tom_13", 128, 32, 4, 1);
+      rom.epoch = 1;
+      rom.surfaceGeneration = 1;
+      source.Set(rom, { });
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      Wire::Declare declared;
+      CHECK(Wire::Decode(msg.payload, declared) && declared.romId == "tom_13" && declared.machineUuid.empty());
+      // Queued while the worker waits on that Declare's answer, so asked of the authored identity.
+      const uint32_t queued = channel.Request(1, { 0, Wire::SCOPE_GAME, Wire::PERIOD_DAYS_14, Wire::VPIN_ANY, 3, "" });
+      CHECK(queued != 0 && queued != pending);
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].Claimed(); }, players));
+      CHECK(players.epoch == 1 && players.slots[0].picture.empty());
+      CHECK_MSG(!std::filesystem::exists(copy), "the authored identity's picture is deleted");
+      TopScoresPost post;
+      CHECK(AwaitScores(channel, pending, post, results));
+      CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the pending request is answered lost");
+      CHECK(AwaitScores(channel, queued, post, results));
+      CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the queued request is answered lost");
+      // Its late result is not delivered as the ROM's.
+      CHECK(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 83,
+         Wire::Encode(Wire::TopScores { pending, Wire::TOP_SCORES_SUPERSEDED, 0, { } })));
+      CHECK(peer.Send(Wire::TYPE_PING, 0, 84, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+      channel.TakeResults(results);
+      CHECK(results.empty());
+      // The ROM's Declare and these two exchanges are all that crossed: the queued request never went out.
+      CHECK_MSG(peer.Silent(300), "no TopScoresRequest for the new identity");
+      worker.Stop();
+   }
+   std::error_code ec;
+   std::filesystem::remove_all(files, ec);
+}
+
 // Per user, under the platform temp or runtime directory.
 void TestPictureDirectoryDefault()
 {
@@ -2295,6 +2390,7 @@ int main()
    TestReadBacksWithA12Daemon();
    TestReadBacksWithOlderDaemons();
    TestLeaderboardsNeedATable();
+   TestNewIdentityWithinAnEpoch();
    TestPictureDirectoryDefault();
    return ScorbitTest::Summary("socket_worker_test");
 }

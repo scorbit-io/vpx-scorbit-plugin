@@ -211,6 +211,8 @@ private:
    // Session end or table switch: pending requests answer lost when lost is set, and the
    // players and their pictures go.
    void EndReadBacks(bool lost);
+   // Answers lost every request queued and not yet sent, keeping admission open.
+   void LoseQueuedRequests();
    // Moves what the source committed into m_games, giving each batch the next id.
    void TakeSourceGames();
    // Takes a newly posted declaration into m_current, if there is one.

@@ -1051,13 +1051,23 @@ bool SocketWorker::MaybeDeclare()
       return false;
    }
 
-   const bool newTable = m_haveDeclared && now.epoch != m_declared.epoch;
+   // A new identity is a new table even within one epoch: a hybrid table's ROM replaces its
+   // authored uuid without a game restart, and nothing read for the old identity may carry over.
+   const Wire::Declare& was = m_declared.declare;
+   const bool newIdentity = was.romId != now.declare.romId || was.tableKind != now.declare.tableKind
+      || was.machineUuid != now.declare.machineUuid;
+   const bool sameEpoch = now.epoch == m_declared.epoch;
+   const bool newTable = m_haveDeclared && (!sameEpoch || newIdentity);
    m_declared = now;
    m_haveDeclared = true;
    m_gameLogged = 0;
    // The daemon empties its players for a different table; this side drops them, and their pictures.
    if (newTable)
       EndReadBacks(false);
+   // Queued under the same epoch, they were asked of the old identity. Across an epoch they sort
+   // themselves: the old one's are answered lost when taken, the new one's belong to this table.
+   if (newTable && sameEpoch)
+      LoseQueuedRequests();
    // The paths are never logged.
    const Wire::Declare& d = sent;
    Log(LOG_LEVEL_INFO, "Socket: declared romId=" + (d.romId.empty() ? "(none)" : d.romId)
@@ -1547,6 +1557,17 @@ void SocketWorker::EndReadBacks(bool lost)
    m_pendingScores.clear();
    if (m_players.Clear())
       PostPlayers();
+}
+
+void SocketWorker::LoseQueuedRequests()
+{
+   if (m_readBack == nullptr)
+      return;
+   // Admission stays open: a request made after this drain is for the identity just declared.
+   m_readBack->TakeRequests(m_asks);
+   for (const TopScoresAsk& ask : m_asks)
+      PostScores(ask.epoch, ask.request.requestId, SCORES_LOST);
+   m_asks.clear();
 }
 
 bool SocketWorker::SendTopScoresRequests()
