@@ -584,7 +584,7 @@ void TestErrorWithOnlyTheErrorBit()
 }
 
 
-// SB-4600 deliverable 4: bytes that actually crossed, not bytes we encoded ourselves.
+// Bytes that actually crossed, not bytes we encoded ourselves.
 //
 // Every other test in this file has the peer build its replies with Wire::Encode — the
 // plugin's own encoder — so a shared misreading of the wire protocol definition would satisfy both sides
@@ -609,9 +609,8 @@ bool OpenVector(const char* name, const std::string& hex, Wire::Message& out)
    return ok;
 }
 
-// The SB-4600 populated Declare is withheld from this public repo: its tablePath names a
-// home directory and an email address. It lives beside the corpus and is loaded only
-// when SCORBIT_WIRE_VECTORS points at that file. Absent, the checks that need it skip.
+// One recorded vector, a populated Declare, is not in this repository. It is loaded only
+// when SCORBIT_WIRE_VECTORS points at a file holding it; absent, the checks that need it skip.
 std::string PrivateVector(const char* name)
 {
    const char* path = getenv("SCORBIT_WIRE_VECTORS");
@@ -734,12 +733,12 @@ void TestCapturedWireBytes()
                 && meteor.identifyFormat.empty(),
              "segment displays declare no conforming source");
 
-   // --- The withheld DMD Declare, only when the corpus file is pointed at -----
+   // --- The recorded DMD Declare, only when SCORBIT_WIRE_VECTORS supplies it ---
    const std::string declareHex = PrivateVector("DECLARE");
    if (declareHex.empty())
    {
       fprintf(stderr, "skip: the populated DMD Declare needs SCORBIT_WIRE_VECTORS "
-                      "(it carries a personal path, so it is not in this repo)\n");
+                      "(it is not in this repository)\n");
       return;
    }
 

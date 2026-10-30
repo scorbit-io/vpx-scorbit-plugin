@@ -388,9 +388,9 @@ void TestCountersAreDistinct()
 }
 
 
-// Declare::tablePath must never carry the path VPX hands over. The real one from the
-// first live capture named a home directory, an email address and an internal shared
-// drive layout, and it reached the daemon's logs and every wire dump. Pinned here
+// Declare::tablePath must never carry the path VPX hands over: a full path can name a
+// home directory or other personal folders, and it would reach the daemon's logs and
+// every wire dump. Pinned here
 // rather than left to review, because the leak is invisible until someone opens a dump.
 void TestTableFileName()
 {

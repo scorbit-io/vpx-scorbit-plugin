@@ -226,9 +226,9 @@ struct HelloAck
    bool operator==(const HelloAck&) const = default;
 };
 
-// Declare::tablePath carries a file name, never the path VPX hands over. That path
-// named a home directory, an email address and an internal shared drive layout in the
-// first live capture, and it reaches the daemon's logs and every wire dump taken. The
+// Declare::tablePath carries a file name, never the path VPX hands over. A full path can
+// name a home directory or other personal folders, and it reaches the daemon's logs and
+// every wire dump taken. The
 // daemon identifies a table by its ROM, so the leading directories were never load
 // bearing. Both separators are cut: this plugin ships on Windows too.
 inline std::string TableFileName(const std::string& path)

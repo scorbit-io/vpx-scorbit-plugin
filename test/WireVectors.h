@@ -72,7 +72,7 @@ inline const std::string FRAME_REQUEST =
    "1000000004000000e70000000000000001000000";
 
 // Plugin to daemon. A full frame: 128x32, 4 shades, has_pixels = 1, then 4096 shade
-// indices, one byte per pixel, row major. Unpacked on the wire; the .scap corpus stores
+// indices, one byte per pixel, row major. Unpacked on the wire; the .scap capture stores
 // the same content packed 2 px/byte.
 // 4122 bytes on the wire.
 inline const std::string FRAME_REPLY_PIXELS =
