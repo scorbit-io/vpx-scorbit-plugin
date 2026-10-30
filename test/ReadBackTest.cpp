@@ -228,6 +228,9 @@ void TestPlayerTable()
       const fs::path last = post.slots[0].picture;
       CHECK(table.Clear() && !fs::exists(last));
       CHECK(!table.Clear());
+      // An unclaimed slot showing only a name still has something to clear.
+      CHECK(table.Apply(Wire::Players { { { 2, "", "", "Guest", "", "" } } }));
+      CHECK(table.Clear() && !table.Clear());
 
       CHECK(table.Apply(players));
       CHECK(table.Apply(Wire::PlayerPicture { 1, "p-1", Utf8(a) }, error) == PlayerTable::Picture::Stored);

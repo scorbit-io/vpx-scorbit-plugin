@@ -368,7 +368,7 @@ bool PlayerTable::Clear()
    bool held = false;
    for (Slot& slot : m_slots)
    {
-      held = held || slot.view.Claimed() || !slot.view.claimDeeplink.empty() || !slot.copy.empty();
+      held = held || !(slot.view == PlayerView { }) || !slot.copy.empty();
       DropPicture(slot);
       slot.view = { };
    }
