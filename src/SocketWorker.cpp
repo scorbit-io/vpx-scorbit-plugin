@@ -890,7 +890,7 @@ bool SocketWorker::Handshake()
       }
       // version_mismatch, bad_token and busy are all states an operator has to
       // fix, so they are reported once at error level and the session stops. The
-      // reason is the no-session notice's support text (REQ-6.11).
+      // reason is the no-session notice's support text.
       LogOnce(LOG_LEVEL_ERROR, "Socket: daemon refused Hello: "s + Wire::ErrorName(e.code) + " - " + e.reason);
       NoSession(Wire::ErrorName(e.code) + (e.reason.empty() ? std::string() : ": " + e.reason));
       return false;
@@ -951,7 +951,7 @@ bool SocketWorker::Handshake()
    m_statusRecord = { };
    m_statusRecord.inSession = true;
    PostStatus();
-   // Every session starts with no subscription (design.md, subscription lifetime).
+   // Every session starts with no subscription.
    if (m_memory != nullptr)
       m_memory->Clear();
    Log(LOG_LEVEL_INFO, "Socket: connected to daemon " + ack.daemonVersion + " (protocol "
@@ -1058,7 +1058,7 @@ bool SocketWorker::MaybeDeclare()
    // The daemon empties its players for a different table; this side drops them, and their pictures.
    if (newTable)
       EndReadBacks(false);
-   // The paths are never logged (REQ-12.6).
+   // The paths are never logged.
    const Wire::Declare& d = sent;
    Log(LOG_LEVEL_INFO, "Socket: declared romId=" + (d.romId.empty() ? "(none)" : d.romId)
       + (d.tableKind == Wire::TABLE_AUTHORED ? " authored machine=" + d.machineUuid : std::string())
@@ -1220,7 +1220,7 @@ bool SocketWorker::AnswerWrite(const Wire::Message& msg)
    return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(out));
 }
 
-// Informational (design.md): the daemon puts the unlock inside each Write, so nothing here
+// Informational (wire protocol definition): the daemon puts the unlock inside each Write, so nothing here
 // changes how a Write is applied. It is served rather than refused, because code 1 in answer
 // to any slice 2 type ends the session's memory traffic.
 bool SocketWorker::AnswerNvRam(const Wire::Message& msg)

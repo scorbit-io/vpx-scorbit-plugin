@@ -1,7 +1,6 @@
 // license:GPLv3+
 
-// The overlay's state rules and shade table against scorbitd design.md, "Message layouts
-// (protocol 1.0, slice 4)", which takes both from the probe firmware. Expected shades are
+// The overlay's state rules and shade table, both taken from the probe firmware. Expected shades are
 // worked by hand from that table, and the hardwareGen values are copied from PinMAME's
 // src/wpc/gen.h, not taken from the header under test.
 

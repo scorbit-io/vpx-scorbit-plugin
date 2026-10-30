@@ -1,11 +1,8 @@
 // license:GPLv3+
 
 // Round trips every slice 1 message and pins the byte layout of the ones most
-// easily misread, against scorbitd's
-// docs/openspec/specs/vpx-virtual-probe/design.md, subsection "Message layouts
-// (protocol 1.0, slice 1)", revision 3e8a9d5. The daemon's SocketCable is built
-// from that same subsection, so the golden vectors here are the thing the two
-// sides can be diffed against without running either of them.
+// easily misread (src/WireProtocol.h). The daemon pins the same golden vectors, so they
+// are the thing the two sides can be diffed against without running either of them.
 
 #include "WireProtocol.h"
 
@@ -300,7 +297,7 @@ void TestMalformed()
    CHECK(Wire::Encode(giant).empty());
 }
 
-// design.md's compatibility rule: appending a field is a minor bump, so a 1.0
+// The wire protocol definition's compatibility rule: appending a field is a minor bump, so a 1.0
 // reader must read what it knows and ignore the rest. Refusing trailing bytes
 // would make every future minor version look malformed.
 void TestForwardCompatibility()
@@ -372,7 +369,7 @@ void TestForwardCompatibility()
    CHECK(replyBack == reply);
 }
 
-// design.md is explicit that these are two different counters with two
+// The wire protocol definition is explicit that these are two different counters with two
 // different owners, and that neither may be compared against the other.
 void TestCountersAreDistinct()
 {
@@ -391,9 +388,9 @@ void TestCountersAreDistinct()
 }
 
 
-// Declare::tablePath must never carry the path VPX hands over. The real one from the
-// first live capture named a home directory, an email address and an internal shared
-// drive layout, and it reached the daemon's logs and every wire dump. Pinned here
+// Declare::tablePath must never carry the path VPX hands over: a full path can name a
+// home directory or other personal folders, and it would reach the daemon's logs and
+// every wire dump. Pinned here
 // rather than left to review, because the leak is invisible until someone opens a dump.
 void TestTableFileName()
 {
@@ -421,10 +418,9 @@ void TestTableFileName()
 
 }
 
-// The slice 2 byte strings are copied verbatim from scorbitd main (ffd58ca)
-// scorbitd/test/source/test_vpx_wire_layout.cpp, "The slice two reply encodings
-// match their golden vectors" and "The slice two requests the daemon sends match
-// their golden vectors". Replies are what this side encodes; requests are what the
+// The slice 2 byte strings are copied verbatim from the daemon's golden
+// encodings, for the slice two replies and for the slice two requests the daemon
+// sends. Replies are what this side encodes; requests are what the
 // daemon sends and this side must decode.
 void TestSliceTwoGoldenVectors()
 {
@@ -491,7 +487,7 @@ void TestSliceTwoRoundTripsAndTruncation()
    CHECK(!Wire::Decode(ScorbitTest::Unhex("0807060504030201" "931c0000" "00000000" "ffff"), shortRead));
 }
 
-// scorbitd test_vpx_wire_layout.cpp, verbatim: a WPC credit write, the daemon putting the
+// The daemon's golden encodings, verbatim: a WPC credit write, the daemon putting the
 // unlock in the batch, and the NvRam it sends just before.
 void TestWriteGoldenVectors()
 {
@@ -538,8 +534,7 @@ std::string Repeat(const char* hexByte, size_t count)
    return out;
 }
 
-// Whole wire frames from scorbitd design.md, "Message layouts (protocol 1.0, slice 4)",
-// golden vectors, verbatim. Requests are what the daemon sends and this side decodes;
+// Whole wire frames, the slice 4 golden vectors, verbatim. Requests are what the daemon sends and this side decodes;
 // acknowledgements and the refusal are what this side encodes.
 void TestSliceFourGoldenVectors()
 {
@@ -692,6 +687,7 @@ void TestSliceFiveGoldenVectors()
    CHECK(std::string(Wire::ErrorName(Wire::ERR_NOT_AUTHORED)) == "not_authored");
    CHECK(std::string(Wire::TypeName(Wire::TYPE_GAME)) == "Game");
 
+   // Synthetic, like the paths and versions below: no real machine has this uuid.
    const std::string uuid = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
    const std::string declareHex = "86000000" "0300" "0000" "03000000"
       "0000" "0900" "4f726269742e767078" "0600" "31302e382e31" "0700" "61316232633364"

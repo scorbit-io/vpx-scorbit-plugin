@@ -7,8 +7,7 @@
 // The plugin API is not thread safe, so the worker never reads memory itself.
 // It queues a request here and waits, bounded; the API thread calls Service
 // once per rendered frame, which answers the queue and refreshes the snapshot
-// of the subscribed ranges that Poll is served from (scorbitd design.md,
-// "Threading and the REQ-8.3 handoff").
+// of the subscribed ranges that Poll is served from.
 //
 // Service takes the queue with a try_lock, so a contended frame is skipped and
 // picked up on the next one, and reads with the lock released, so a worker at its

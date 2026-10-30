@@ -102,9 +102,7 @@ so a consumer never sees a torn frame.
 
 With `dmdDumpFile` set, frames are written as text: one line per display row,
 one hexadecimal digit per pixel (`0` off, up to `3` or `f` depending on the
-machine's shade depth), and a blank line after each frame. That is the format
-Scorbit's `vpin2bin` tool consumes, so a dump from VPX can be compared directly
-against captures from physical machines. Verified on WPC (128x32, 4 shades),
+machine's shade depth), and a blank line after each frame. Verified on WPC (128x32, 4 shades),
 SAM (128x32, 16 shades) and Sega 192x64 displays.
 
 ## Scorbit daemon transport

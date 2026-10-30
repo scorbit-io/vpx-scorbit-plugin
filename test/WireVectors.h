@@ -9,27 +9,10 @@
 // hand, and every label was read back out of the decoded fields rather than assumed
 // from the order the messages were captured in.
 //
-// Provenance: SB-4600, a two-player Theatre of Magic game on tom_13 under VPX 5589,
-// plugin build 2cdb1a5, daemon at main 4ac8b71. Recorded by SCORBIT_WIRE_DUMP as
-//   shared/corpora/SB-4600/wire/wire.1789158304.bin
-//   md5 2893f502d4b35f1710eb1d9129ec100e, 200761 records, 33602119 bytes
-// beside the seam capture session.1789158304.37066.scap, which replays to scores
-// [168428290, 134078260].
-//
-// HELLO and DECLARE_METEOR come from a later session (SB-5555): Meteor under VPX 5589
-// with memory read and write, daemon scorbitd 0.7.4-10-g5fdeedb, recorded as
-//   shared/vpx-runs/meteor-2026-10-11/wire.bin
-//   md5 87d26aeaf74becb53d6f82c69bbedc89, 301373 records
-// The Hello's token is replaced by a synthetic one; the Declare is untouched and names
-// the table by file name only, as every Declare has since the plugin stopped sending
-// the full path.
-//
-// THIS REPOSITORY IS PUBLIC, so two vectors from the SB-4600 session are deliberately
-// absent: its Hello carries a session token, and its populated Declare a tablePath
-// naming a home directory, an email address and an internal shared-drive layout. They
-// live beside that corpus, in wire/private-vectors.hex. The Declare is still worth
-// running, as the only populated Declare with DMD geometry; point SCORBIT_WIRE_VECTORS
-// at that file to enable it. Never paste either into this repo.
+// Provenance: the vectors were recorded from live sessions with the plugin's wire dump
+// (SCORBIT_WIRE_DUMP). Tokens are replaced with synthetic ones. One vector from a
+// recorded session is withheld from this public repository; it can be supplied through
+// the SCORBIT_WIRE_VECTORS environment variable.
 //
 // Each vector is a complete wire frame: the u32 length prefix, then type, flags and
 // seq, then the payload — the bytes as they crossed, so a vector can be written to a
@@ -89,7 +72,7 @@ inline const std::string FRAME_REQUEST =
    "1000000004000000e70000000000000001000000";
 
 // Plugin to daemon. A full frame: 128x32, 4 shades, has_pixels = 1, then 4096 shade
-// indices, one byte per pixel, row major. Unpacked on the wire; the .scap corpus stores
+// indices, one byte per pixel, row major. Unpacked on the wire; the .scap capture stores
 // the same content packed 2 px/byte.
 // 4122 bytes on the wire.
 inline const std::string FRAME_REPLY_PIXELS =
@@ -186,7 +169,7 @@ inline const std::string FRAME_REPLY_UNCHANGED =
    "1600000004000100e70000000000000001000000800020000400";
 
 // Plugin to daemon. No source selected yet: zero geometry and shades = 0, which
-// design.md defines as 'nothing available yet'. Distinct from unchanged above.
+// the wire protocol definition defines as 'nothing available yet'. Distinct from unchanged above.
 // 26 bytes on the wire.
 inline const std::string FRAME_REPLY_NO_SOURCE =
    "1600000004000100010000000000000000000000000000000000";

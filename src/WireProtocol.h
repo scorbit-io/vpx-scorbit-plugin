@@ -14,13 +14,10 @@
 //    u32 seq      a response echoes the sequence of its request
 //    payload
 //
-// The normative layout is scorbitd's
-// docs/openspec/specs/vpx-virtual-probe/design.md, subsection "Message layouts
-// (protocol 1.0, slice 1)", at revision 3e8a9d5. This file implements that
-// subsection and nothing else. It is deliberately free of any Visual Pinball or
-// Scorbit SDK dependency so the codec can be unit tested on its own, and so the
-// daemon's SocketCable and this plugin can each be diffed against the spec
-// rather than against each other.
+// This file is the plugin's definition of the wire protocol; the daemon implements the
+// same layouts, and the golden vectors in test/WireCodecTest.cpp pin both. It is
+// deliberately free of any Visual Pinball or Scorbit SDK dependency so the codec can be
+// unit tested on its own.
 
 #include <cstddef>
 #include <cstdint>
@@ -83,7 +80,7 @@ enum MsgFlags : uint16_t
    FLAG_ERROR = 1u << 1,
 };
 
-// The numbered table in design.md is the single definition, names and numbers
+// The numbered table in the wire protocol definition is the single definition, names and numbers
 // together. Codes 8 to 12 name conditions only the slice 2 messages can raise;
 // they are carried here anyway so the two lists cannot drift apart.
 enum ErrorCode : uint16_t
@@ -251,9 +248,9 @@ struct HelloAck
    bool operator==(const HelloAck&) const = default;
 };
 
-// Declare::tablePath carries a file name, never the path VPX hands over. That path
-// named a home directory, an email address and an internal shared drive layout in the
-// first live capture, and it reaches the daemon's logs and every wire dump taken. The
+// Declare::tablePath carries a file name, never the path VPX hands over. A full path can
+// name a home directory or other personal folders, and it reaches the daemon's logs and
+// every wire dump taken. The
 // daemon identifies a table by its ROM, so the leading directories were never load
 // bearing. Both separators are cut: this plugin ships on Windows too.
 inline std::string TableFileName(const std::string& path)
@@ -348,7 +345,7 @@ struct ErrorPayload
    bool operator==(const ErrorPayload&) const = default;
 };
 
-// --- Slice 2 memory reads (scorbitd design.md "Message layouts, slice 2") -------
+// --- Slice 2 memory reads -------
 
 // Limits the daemon and the plugin both enforce. A subscription replaces the
 // previous one wholesale; ReadDirect is one range per message.
@@ -452,7 +449,7 @@ struct NvRamParameters
    bool operator==(const NvRamParameters&) const = default;
 };
 
-// --- Slice 4 overlay and status (scorbitd design.md "Message layouts, slice 4") ---
+// --- Slice 4 overlay and status ---
 
 inline constexpr uint8_t OVERLAY_OP_UPLOAD = 1;   // payload is the probe's 0x23 WriteDmdOverlay
 inline constexpr uint8_t OVERLAY_OP_CONTROL = 2;  // payload is the probe's 0x27 control register
