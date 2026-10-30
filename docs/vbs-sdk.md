@@ -29,10 +29,17 @@ flat global namespace, shared with `core.vbs`, the table's own names and any oth
 so unprefixed or shortened names would collide. Every routine has its own error guard, so nothing
 in the binding can raise into a table.
 
-Arguments follow the SDK's order and defaults, and the binding translates where the native object
-differs: `ScorbitAddModeExpiring mode, seconds` (seconds defaulting as the SDK's do) calls
-`AddModeExpiring seconds, mode`. Scores are VBScript numbers, so they are exact up to 2^53; the
-native object refuses a larger magnitude rather than round it, and the binding documents the range.
+Arguments follow the SDK's order, and the binding translates where the native object differs:
+`ScorbitAddModeExpiring mode, seconds` calls `AddModeExpiring seconds, mode`.
+
+**Every argument is required.** A VBScript `Sub` or `Function` has a fixed number of parameters,
+with no optional ones, so the binding cannot reproduce an SDK default by omission. Where the SDK
+has a default (the expiry's seconds, `setScore`'s feature, `vpinFilter`), the binding's docs give
+the value, and the table passes it, for example `ScorbitSetScore 1, 12340, 0`. The parity test
+checks each routine's parameter count against the SDK's full signature.
+
+Scores are VBScript numbers, so they are exact up to 2^53; the native object refuses a larger
+magnitude rather than round it, and the binding documents the range.
 
 ## Feature parity
 
@@ -46,7 +53,7 @@ The binding covers the SDK's game-facing API:
 | `getStatus`, `PairingStatusChanged` | no | yes, as a property carrying the SDK's six authentication states (not authenticated, authenticating, checking pairing, unpaired, paired, authentication failed). The daemon's status adds this field in protocol 1.2, separate from the indicator's system state, and sends it even while the indicator is hidden |
 | Game status indication (in session, tracking, the reason when not) | no | yes, from the daemon's status: session state, system state and support text |
 | `getMachineUuid` | no | yes: the uuid the table declared |
-| `requestTopScores(scope, period, since, vpinFilter)` | no | yes, polled. Every argument as the SDK has it: scope machine, variant or game; period all time or 14 to 365 days; `vpinFilter` any (the documented default), virtual only or physical only. Replies are cached and capped (top N, names truncated) |
+| `requestTopScores(scope, period, since, vpinFilter)` | no | yes, polled. Every argument as the SDK has it: scope machine, variant or game; period all time or 14 to 365 days; `vpinFilter` any (the SDK default, passed explicitly), virtual only or physical only. Replies are cached and capped (top N, names truncated) |
 | `PlayersUpdated`, `player_info.h` | no | yes, polled. Per slot: the claimed player's name and id, or, when unclaimed, the claim deeplink, so a table can show a claim QR as a machine does |
 | `PlayerPictureReady` | no | yes, polled, as a local file path valid for the session (usable through FlexDMD, for example) |
 | `GameStartRequested` (start from the app) | no | **present, commented out** (below) |
