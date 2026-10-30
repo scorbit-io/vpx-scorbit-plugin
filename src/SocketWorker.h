@@ -64,6 +64,9 @@ struct DeclareSnapshot
    // moves to another source, which must re-Declare (wire protocol definition, slice 4) even when
    // nothing declared changes.
    uint64_t surfaceGeneration = 0;
+   // Not on the wire: bumped by the API thread when the identity changes within an epoch, and
+   // carried by each leaderboard request, so the worker loses only the old identity's.
+   uint64_t identity = 0;
 
    bool operator==(const DeclareSnapshot&) const = default;
 };

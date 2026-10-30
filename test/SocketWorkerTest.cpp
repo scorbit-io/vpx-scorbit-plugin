@@ -2327,6 +2327,7 @@ void TestNewIdentityWithinAnEpoch()
       DeclareSnapshot rom = MakeDeclare("tom_13", 128, 32, 4, 1);
       rom.epoch = 1;
       rom.surfaceGeneration = 1;
+      rom.identity = 1;  // as the API thread bumps it for the ROM taking over
       source.Set(rom, { });
       CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
       Wire::Declare declared;
@@ -2334,6 +2335,9 @@ void TestNewIdentityWithinAnEpoch()
       // Queued while the worker waits on that Declare's answer, so asked of the authored identity.
       const uint32_t queued = channel.Request(1, { 0, Wire::SCOPE_GAME, Wire::PERIOD_DAYS_14, Wire::VPIN_ANY, 3, "" });
       CHECK(queued != 0 && queued != pending);
+      // Made after the API thread saw the ROM, so the new identity's: it must go out, not be lost.
+      const uint32_t fresh = channel.Request(1, { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_DAYS_30, Wire::VPIN_ANY, 4, "" }, 1);
+      CHECK(fresh != 0 && fresh != queued);
       CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
       CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].Claimed(); }, players));
       CHECK(players.epoch == 1 && players.slots[0].picture.empty());
@@ -2343,6 +2347,24 @@ void TestNewIdentityWithinAnEpoch()
       CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the pending request is answered lost");
       CHECK(AwaitScores(channel, queued, post, results));
       CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the queued request is answered lost");
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      Wire::TopScoresRequest sentFresh;
+      CHECK_MSG(Wire::Decode(msg.payload, sentFresh) && sentFresh.requestId == fresh && sentFresh.limit == 4,
+         "the new identity's request goes out, and only it");
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      // A malformed answer whose id still reads ends that request as 7, not pending forever.
+      // The id, then result 9, which no TopScores carries.
+      const std::vector<uint8_t> badResult { static_cast<uint8_t>(fresh), static_cast<uint8_t>(fresh >> 8),
+         static_cast<uint8_t>(fresh >> 16), static_cast<uint8_t>(fresh >> 24), 0x09 };
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES, 0, 85, badResult));
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES, msg, WAIT_MS));
+      CHECK(ErrorCode(msg) == Wire::ERR_MALFORMED);
+      CHECK(AwaitScores(channel, fresh, post, results));
+      CHECK_MSG(post.result == SCORES_MALFORMED && post.entries.empty(), "a malformed answer is result 7");
+      // Too short for an id: refused, and nothing is answered.
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES, 0, 86, ScorbitTest::Unhex("0100")));
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES, msg, WAIT_MS));
+      CHECK(ErrorCode(msg) == Wire::ERR_MALFORMED);
       // Its late result is not delivered as the ROM's.
       CHECK(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 83,
          Wire::Encode(Wire::TopScores { pending, Wire::TOP_SCORES_SUPERSEDED, 0, { } })));
@@ -2350,7 +2372,7 @@ void TestNewIdentityWithinAnEpoch()
       channel.TakeResults(results);
       CHECK(results.empty());
       // The ROM's Declare and these two exchanges are all that crossed: the queued request never went out.
-      CHECK_MSG(peer.Silent(300), "no TopScoresRequest for the new identity");
+      CHECK_MSG(peer.Silent(300), "no TopScoresRequest for the old identity's queued request");
       worker.Stop();
    }
    std::error_code ec;

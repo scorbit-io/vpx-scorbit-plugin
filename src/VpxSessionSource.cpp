@@ -427,12 +427,16 @@ void VpxSessionSource::UpdateDeclare()
    }
    now.epoch = m_epoch;
    now.surfaceGeneration = m_overlay.SurfaceGeneration();
+   // A new identity in the same epoch (a hybrid table's ROM taking over): the worker drops the
+   // players and the old identity's requests; the results already read for it go here.
+   if (m_havePosted && now.epoch == m_posted.epoch && Wire::NewIdentity(m_posted.declare, now.declare))
+   {
+      m_identity++;
+      m_readBack.ClearScores();
+   }
+   now.identity = m_identity;
    if (m_havePosted && now == m_posted)
       return;
-   // A new identity in the same epoch (a hybrid table's ROM taking over): the worker drops the
-   // players and pending requests; the results already read for the old one go here.
-   if (m_havePosted && now.epoch == m_posted.epoch && Wire::NewIdentity(m_posted.declare, now.declare))
-      m_readBack.ClearScores();
    m_posted = now;
    m_havePosted = true;
    m_declares.Post(now);

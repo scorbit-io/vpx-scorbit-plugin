@@ -274,7 +274,7 @@ End If
 | Member | Type | Reads |
 |---|---|---|
 | `RequestTopScores(scope, period, vpinFilter, limit, since)` | Integer | a request id, or 0 when no daemon can serve leaderboards now (none connected, an older one, or the table not yet started) or an argument is out of range. scope 0 machine, 1 variant, 2 game; period 0 all time, 1 14 days, 2 30 days, 3 90 days, 4 180 days, 5 365 days; vpinFilter 0 any, 1 virtual only, 2 physical only; limit 1 to 20; since `""` or a UTC ISO-8601 time (up to 32 bytes) that replaces period |
-| `TopScoresResult(id)` | Integer | -1 no result yet, or an id not held; 0 ok, 1 not paired, 2 Scorbit error, 3 failed, 4 superseded by a table change; 5 no table declared, 6 not supported by the daemon, 7 request refused as malformed, 8 connection lost before the answer |
+| `TopScoresResult(id)` | Integer | -1 no result yet, or an id not held; 0 ok, 1 not paired, 2 Scorbit error, 3 failed, 4 superseded by a table change; 5 no table declared, 6 not supported by the daemon, 7 the request or its answer was malformed, 8 connection lost before the answer |
 | `TopScoresAge(id)` | Integer | seconds since Scorbit was asked for these scores |
 | `TopScoresCount(id)` | Integer | entries, 0 unless the result is 0 |
 | `TopScoresRank(id, i)`, `TopScoresScore(id, i)` | Integer, Double | entry `i`, from 0. Scores are exact up to 2^53 |

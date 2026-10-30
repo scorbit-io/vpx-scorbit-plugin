@@ -35,7 +35,7 @@ enum ScriptTopScoresResult : int
    SCORES_NONE = -1,           // no result yet, or an id this object does not hold
    SCORES_NOT_DECLARED = 5,    // the daemon had no table declared
    SCORES_UNSUPPORTED = 6,     // the daemon does not serve leaderboards
-   SCORES_MALFORMED = 7,       // the daemon refused the request's arguments
+   SCORES_MALFORMED = 7,       // the daemon refused the request's arguments, or its answer did not decode
    SCORES_LOST = 8,            // the connection ended before the answer
 };
 
@@ -43,6 +43,7 @@ enum ScriptTopScoresResult : int
 struct TopScoresAsk
 {
    uint64_t epoch = 0;
+   uint64_t identity = 0;      // the API thread's identity generation when it was asked
    Wire::TopScoresRequest request;
 };
 
@@ -88,7 +89,7 @@ public:
    // API thread. The request's id, or 0 when no daemon can answer it now or too many wait. Admission
    // is decided under the queue's lock, so every id handed out is either taken by TakeRequests
    // or returned by Close, and the worker answers each one.
-   uint32_t Request(uint64_t epoch, Wire::TopScoresRequest request);
+   uint32_t Request(uint64_t epoch, Wire::TopScoresRequest request, uint64_t identity = 0);
    void TakeRequests(std::deque<TopScoresAsk>& out);
 
    // Worker: a session serves leaderboards and a table is playing.

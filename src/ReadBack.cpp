@@ -36,14 +36,14 @@ std::string ToUtf8(const fs::path& p)
 
 }
 
-uint32_t ReadBackChannel::Request(uint64_t epoch, Wire::TopScoresRequest request)
+uint32_t ReadBackChannel::Request(uint64_t epoch, Wire::TopScoresRequest request, uint64_t identity)
 {
    std::lock_guard lock(m_mutex);
    if (!m_leaderboards || m_requests.size() >= MAX_QUEUED)
       return 0;
    request.requestId = m_nextId;
    m_nextId = m_nextId >= 0x7FFFFFFFu ? 1 : m_nextId + 1;
-   m_requests.push_back({ epoch, std::move(request) });
+   m_requests.push_back({ epoch, identity, std::move(request) });
    return m_requests.back().request.requestId;
 }
 

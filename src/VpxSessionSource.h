@@ -101,7 +101,7 @@ public:
    // The request's id, or 0 when no daemon can answer it now.
    uint32_t ScriptRequestTopScores(const Wire::TopScoresRequest& request)
    {
-      const uint32_t id = m_readBackChannel.Request(m_epoch, request);
+      const uint32_t id = m_readBackChannel.Request(m_epoch, request, m_identity);
       m_readBack.NoteRequest(id);
       return id;
    }
@@ -172,6 +172,7 @@ private:
    std::string m_romId;
    std::string m_tablePath;
    uint64_t m_epoch = 0;
+   uint64_t m_identity = 0; // bumped on an identity change within an epoch
    TapView m_apiTap;
    DeclareSnapshot m_posted;
    bool m_havePosted = false;

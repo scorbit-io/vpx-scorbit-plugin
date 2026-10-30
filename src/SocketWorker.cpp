@@ -1561,11 +1561,16 @@ void SocketWorker::LoseQueuedRequests()
 {
    if (m_readBack == nullptr)
       return;
-   // Admission stays open: a request made after this drain is for the identity just declared.
+   // Admission stays open, and a request the script made after the identity changed is the new
+   // identity's: only those asked of an older one are answered lost.
    m_readBack->TakeRequests(m_asks);
-   for (const TopScoresAsk& ask : m_asks)
+   std::erase_if(m_asks, [this](const TopScoresAsk& ask)
+   {
+      if (ask.epoch != m_declared.epoch || ask.identity >= m_declared.identity)
+         return false;
       PostScores(ask.epoch, ask.request.requestId, SCORES_LOST);
-   m_asks.clear();
+      return true;
+   });
 }
 
 bool SocketWorker::SendTopScoresRequests()
@@ -1575,12 +1580,14 @@ bool SocketWorker::SendTopScoresRequests()
    m_readBack->TakeRequests(m_asks);
    while (!m_asks.empty())
    {
-      if (!m_haveDeclared || m_asks.front().epoch > m_declared.epoch)
+      const TopScoresAsk& front = m_asks.front();
+      if (!m_haveDeclared || front.epoch > m_declared.epoch
+         || (front.epoch == m_declared.epoch && front.identity > m_declared.identity))
          return true;  // its table is not declared yet
       const TopScoresAsk ask = std::move(m_asks.front());
       m_asks.pop_front();
       const uint32_t id = ask.request.requestId;
-      if (ask.epoch < m_declared.epoch)
+      if (ask.epoch < m_declared.epoch || ask.identity < m_declared.identity)
       {
          PostScores(ask.epoch, id, SCORES_LOST);  // its table has gone; the API thread drops it
          continue;
@@ -1643,6 +1650,15 @@ bool SocketWorker::AnswerTopScores(const Wire::Message& msg)
    if (!Wire::Decode(msg.payload, scores))
    {
       Log(LOG_LEVEL_WARN, "Socket: malformed TopScores, " + std::to_string(msg.payload.size()) + " bytes");
+      // When the id at least is readable, its request is answered rather than left pending.
+      uint32_t id = 0;
+      Wire::Reader r(msg.payload.data(), msg.payload.size());
+      if (r.U32(id))
+         if (const auto pending = m_pendingScores.find(id); pending != m_pendingScores.end())
+         {
+            PostScores(pending->second, id, SCORES_MALFORMED);
+            m_pendingScores.erase(pending);
+         }
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "TopScores payload");
    }
    const auto pending = m_pendingScores.find(scores.requestId);
