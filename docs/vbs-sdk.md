@@ -11,6 +11,10 @@ Status: design, for review. Nothing here is implemented yet.
   reporting-only build may come first, for development; it is not released to authors.
 - Pairing actions are out of scope: Scorbit Desktop and the plugin manage pairing. Pairing *status* is in.
 - Delivery: the table loads the binding (the `core.vbs` pattern); no injection. See "Delivery".
+- Names: the SDK's own, with a `Scorbit` prefix (`ScorbitSetScore`, `ScorbitAddModeExpiring`,
+  `ScorbitSetModeCompleted`, `ScorbitGetStatus`), and constants as `SCORBIT_STATUS_…`. VBScript has
+  one flat global namespace, shared with `core.vbs` and the table's own names, so short forms would
+  collide; the prefixed SDK names keep "same API, same names" literally true.
 
 ## Why
 
@@ -41,10 +45,10 @@ local file the daemon already downloaded.
 | `getStatus`, `PairingStatusChanged` | no | properties only, no wire change: the daemon's `Status`, which the plugin already receives, carries `SYSTEM_UNPAIRED`, `SYSTEM_OFFLINE` and `SYSTEM_DEGRADED` (`WireProtocol.h:471-474`) |
 | Game status indication (in session, tracking, the reason when not) | no | the same record's session state (`SESSION_NONE`, `TRACKING`, `NO_DATA`) and support text, as properties |
 | `getMachineUuid` | no | the uuid the table declared, echoed; no wire change |
-| `requestTopScores` (`leaderboard.h`) | no | wire request and reply; polled from script |
-| `PlayersUpdated`, `player_info.h` (claimed players' names) | no | wire event; polled |
-| `PlayerPictureReady` | no | wire event carrying a picture the table can load (a file path); polled |
-| `GameStartRequested` (start from the app) | no | wire event; polled |
+| `requestTopScores(scope, period, since, vpinFilter)` (`leaderboard.h`) | no | wire request with an id, and its reply; polled. Every argument as the SDK has it: scope machine, variant or game; period all time or 14 to 365 days; `vpinFilter` any (the documented default), virtual only or physical only. The daemon throttles and caches per request, and caps the reply (top N, names truncated) |
+| `PlayersUpdated`, `player_info.h` | no | wire push on change, plus a snapshot on connect; polled. Per slot: the claimed player's preferred name and id, or, when unclaimed, the claim deeplink, so a table can show a claim QR as a machine does |
+| `PlayerPictureReady` | no | wire push with a local file path; polled. The daemon writes the picture into a directory it owns and deletes it when the session ends (it runs as the same user as VPX); a table uses it during the session, for example through FlexDMD |
+| `GameStartRequested` (start from the app, with the player count) | no | wire push; polled. Nothing can press start on a VPX table, so the table's script starts the game itself when it sees the request |
 | Credits and pricing (`setCredits…`, `PricingReceived`) | no | not applicable at home (free play); out unless asked |
 | Device plumbing (diagnostics, device state, probe firmware, downloads, `requestPairMachine`) | no | Scorbitron internals, not a game developer's API; out |
 | `requestPairCode`, `requestUnpair`, `getPairDeeplink` | no | out: pairing is managed by Scorbit Desktop and the plugin |
@@ -52,6 +56,14 @@ local file the daemon already downloaded.
 VBScript handles asynchronous callbacks poorly, so every answer and event is **polled**: the
 native object keeps the latest leaderboard, player list and events, and the binding exposes them
 as properties and a `ScorbitPollEvent` loop the table calls from a timer.
+
+Each new message has its own capability bit in `Hello`, so a newer daemon with an older plugin,
+or the reverse, degrades to the features both have. The daemon side defines the layouts, as for
+protocol 1.1.
+
+The local socket is not authenticated, so any process of the same user could read what crosses
+it, now including claimed players' names and leaderboards. Both are public in the Scorbit app
+already; nothing private is added.
 
 ## Delivery: the table loads it
 
@@ -93,17 +105,23 @@ stays deferred: it needs a wire message.
 
 ## Work, by repo
 
-1. **`scorbit_sdk`:** `wrappers/vbscript/scorbit.vbs`, its docs in the SDK's, and `cscript` tests on
-   Windows CI against a VBScript mock of `Scorbit.Table` (the binding accepts one through
-   `ScorbitInitWith obj`), including the no-plugin path.
-2. **`vpx-scorbit-plugin`:** `Version`, `ApiLevel` and `Status` properties; the polled stores for
-   leaderboards, players, pictures and events; the `<prefPath>/scripts` install; the Table Options
-   docs.
-3. **The daemon:** wire messages for leaderboards, players, pictures and start requests, and the
-   pairing state in `Status` if it is not there.
+1. **`scorbit_sdk`:**
+   - `wrappers/vbscript/scorbit.vbs.in`, with `SCORBIT_SDK_VERSION` stamped from the SDK's version
+     at configure time, deterministically. Every routine is wrapped in its own error guard.
+   - Each SDK release attaches `scorbit-<version>.vbs` and its sha256; the plugin pins the tag and
+     the hash, as it pins VPX's headers.
+   - Docs in the SDK's own, naming only the plugin's public `Scorbit.Table` contract and `ApiLevel`.
+   - `cscript` tests as a Windows-only CTest against a VBScript mock of `Scorbit.Table` (through
+     `ScorbitInitWith obj`), including the no-plugin path, and a **parity test**: it compares
+     `GameState`'s public game-facing methods with the binding's exports, against an explicit
+     out-of-scope list, so a new SDK call cannot quietly fall out of the launch gate.
+2. **`vpx-scorbit-plugin`:** `Version`, `ApiLevel` and the status properties; the polled stores for
+   leaderboards, players, pictures and events; bundling the pinned binding and installing it to
+   `<prefPath>/scripts`; the Table Options docs.
+3. **The daemon:** protocol 1.2 messages and capability bits for leaderboards, players, pictures
+   and start requests.
 
 ## Open for review
 
-1. Function names in the binding: the SDK's own, prefixed (`ScorbitSetScore`), or shorter forms.
-2. Whether the plugin should install to `<prefPath>/scripts` at all, or leave delivery to authors.
-3. Credits and pricing at home: confirm they stay out.
+1. Whether the plugin should install to `<prefPath>/scripts` at all, or leave delivery to authors.
+2. Credits and pricing at home: confirm they stay out.
