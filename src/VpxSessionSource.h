@@ -99,7 +99,12 @@ public:
    const StatusRecord& ScriptStatus();
    ReadBackState& ScriptReadBack();
    // The request's id, or 0 when no daemon can answer it now.
-   uint32_t ScriptRequestTopScores(const Wire::TopScoresRequest& request) { return m_readBackChannel.Request(m_epoch, request); }
+   uint32_t ScriptRequestTopScores(const Wire::TopScoresRequest& request)
+   {
+      const uint32_t id = m_readBackChannel.Request(m_epoch, request);
+      m_readBack.NoteRequest(id);
+      return id;
+   }
 
    // ISessionSource, worker thread.
    std::unique_ptr<DeclareSnapshot> TakeDeclare() override { return m_declares.Take(); }

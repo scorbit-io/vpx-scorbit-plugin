@@ -363,6 +363,75 @@ void TestDefaultPictureDirectory()
 }
 #endif
 
+// A hybrid table's ROM replacing its authored uuid: the authored machine's results go, and
+// answers arriving later for its requests, a lost one included, do not bring them back.
+void TestClearScoresOnNewIdentity()
+{
+   ReadBackChannel channel;
+   ReadBackState state;
+   state.NewEpoch(1);
+   const Clock::time_point now = Clock::now();
+   for (uint32_t id = 1; id <= 3; id++)
+      state.NoteRequest(id);
+   channel.PostResult(Result(1, 1, Wire::TOP_SCORES_OK, 2));
+   state.Drain(channel, now);
+   CHECK(state.Result(1) == Wire::TOP_SCORES_OK && state.Count(1) == 2);
+
+   state.ClearScores();
+   CHECK_MSG(state.Result(1) == SCORES_NONE && state.Count(1) == 0 && state.Score(1, 0) == nullptr,
+      "a delivered result reads as unknown");
+   channel.PostResult(Result(1, 2, SCORES_LOST));
+   channel.PostResult(Result(1, 3, Wire::TOP_SCORES_OK, 1));
+   state.Drain(channel, now);
+   CHECK_MSG(state.Result(2) == SCORES_NONE && state.Result(3) == SCORES_NONE, "late answers for the old identity are dropped");
+
+   // Requests made after the change are the new identity's, whatever they answer.
+   state.NoteRequest(4);
+   state.NoteRequest(5);
+   channel.PostResult(Result(1, 4, SCORES_LOST));
+   channel.PostResult(Result(1, 5, Wire::TOP_SCORES_OK, 1));
+   state.Drain(channel, now);
+   CHECK(state.Result(4) == SCORES_LOST && state.Result(5) == Wire::TOP_SCORES_OK && state.Count(5) == 1);
+
+   // A new epoch starts afresh: its ids are not held to the old floor.
+   state.NewEpoch(2);
+   channel.PostResult(Result(2, 2, Wire::TOP_SCORES_OK, 1));
+   state.Drain(channel, now);
+   CHECK(state.Result(2) == Wire::TOP_SCORES_OK);
+}
+
+// What counts as another table within one epoch: ROM, kind or machine, never the display.
+void TestNewIdentityRule()
+{
+   Wire::Declare authored;
+   authored.tablePath = "Orbit.vpx";
+   authored.tableKind = Wire::TABLE_AUTHORED;
+   authored.machineUuid = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
+   Wire::Declare display = authored;
+   display.width = 128;
+   display.height = 32;
+   display.shades = 4;
+   display.sourceGeneration = 7;
+   display.identifyFormat = "BITPLANE2";
+   CHECK_MSG(!Wire::NewIdentity(authored, display), "a display change is the same table");
+   CHECK(!Wire::NewIdentity(authored, authored));
+
+   Wire::Declare rom = display;
+   rom.tableKind = Wire::TABLE_ROM;
+   rom.machineUuid.clear();
+   rom.romId = "tom_13";
+   CHECK_MSG(Wire::NewIdentity(authored, rom), "the ROM taking over");
+   Wire::Declare other = authored;
+   other.machineUuid = "1b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
+   CHECK(Wire::NewIdentity(authored, other));
+   Wire::Declare kind = authored;
+   kind.tableKind = Wire::TABLE_ROM;
+   CHECK(Wire::NewIdentity(authored, kind));
+   Wire::Declare romB = rom;
+   romB.romId = "ij_l7";
+   CHECK(Wire::NewIdentity(rom, romB));
+}
+
 void TestDisplayName()
 {
    PlayerView v;
@@ -384,6 +453,8 @@ int main()
    TestDisplayName();
    TestChannelClose();
    TestAgeCountsFromReceipt();
+   TestClearScoresOnNewIdentity();
+   TestNewIdentityRule();
 #ifndef _WIN32
    TestPictureDirectoryOwnership();
    TestDefaultPictureDirectory();

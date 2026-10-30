@@ -327,9 +327,22 @@ bool ScriptIndex(double v, double lo, double hi, uint32_t& out)
    return true;
 }
 
+void ReadBackState::ClearScores()
+{
+   m_scores.Clear();
+   m_clearedThrough = m_lastRequest;
+}
+
+void ReadBackState::NoteRequest(uint32_t requestId)
+{
+   if (requestId != 0)
+      m_lastRequest = requestId;
+}
+
 void ReadBackState::NewEpoch(uint64_t epoch)
 {
    m_epoch = epoch;
+   m_clearedThrough = 0; // the epoch tag drops the old table's results from here
    m_scores.Clear();
    m_players = { };
    m_players.epoch = epoch;
@@ -342,7 +355,7 @@ void ReadBackState::Drain(ReadBackChannel& channel, Clock::time_point now)
    std::deque<TopScoresPost> results;
    channel.TakeResults(results);
    for (TopScoresPost& post : results)
-      if (post.epoch == m_epoch)
+      if (post.epoch == m_epoch && (m_clearedThrough == 0 || post.requestId > m_clearedThrough))
          m_scores.Add(std::move(post), now);
 }
 

@@ -287,6 +287,13 @@ struct Declare
    bool operator==(const Declare&) const = default;
 };
 
+// Two Declares name different tables: another ROM, kind or machine. A hybrid table's ROM
+// replaces its authored uuid within one table start, so this, not the epoch alone, is a switch.
+inline bool NewIdentity(const Declare& was, const Declare& now)
+{
+   return was.romId != now.romId || was.tableKind != now.tableKind || was.machineUuid != now.machineUuid;
+}
+
 // Reserved since_frame_id: the requester holds no frame at all, so the reply
 // must carry pixels whatever since_generation says.
 //

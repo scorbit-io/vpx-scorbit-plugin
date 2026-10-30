@@ -196,6 +196,11 @@ public:
 
    // A table switch: the players, pictures and results of the last one are gone.
    void NewEpoch(uint64_t epoch);
+   // A new identity within the epoch: every result so far goes, and so does anything arriving
+   // later for a request made before now, a lost answer included; those ids read as unknown.
+   void ClearScores();
+   // Each id the script was handed, so ClearScores knows where the old identity's requests end.
+   void NoteRequest(uint32_t requestId);
    uint64_t Epoch() const { return m_epoch; }
    // Takes what the worker posted for this epoch, dropping the rest.
    void Drain(ReadBackChannel& channel, Clock::time_point now);
@@ -214,6 +219,8 @@ private:
    const TopScoresStore::Entry* Find(double requestId) const;
 
    uint64_t m_epoch = 0;
+   uint32_t m_lastRequest = 0;
+   uint32_t m_clearedThrough = 0; // in this epoch, results for ids up to this are dropped
    TopScoresStore m_scores;
    PlayersPost m_players;
 };

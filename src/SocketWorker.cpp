@@ -1053,9 +1053,7 @@ bool SocketWorker::MaybeDeclare()
 
    // A new identity is a new table even within one epoch: a hybrid table's ROM replaces its
    // authored uuid without a game restart, and nothing read for the old identity may carry over.
-   const Wire::Declare& was = m_declared.declare;
-   const bool newIdentity = was.romId != now.declare.romId || was.tableKind != now.declare.tableKind
-      || was.machineUuid != now.declare.machineUuid;
+   const bool newIdentity = Wire::NewIdentity(m_declared.declare, now.declare);
    const bool sameEpoch = now.epoch == m_declared.epoch;
    const bool newTable = m_haveDeclared && (!sameEpoch || newIdentity);
    m_declared = now;
