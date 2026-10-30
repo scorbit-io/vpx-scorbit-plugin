@@ -75,6 +75,16 @@ static void FilterControllers(std::vector<ControllerDef>& items)
       { return def.gameId == nullptr || !std::string_view(def.gameId).starts_with(PMPI_GAMEID_PREFIX); });
 }
 
+// API thread. The status light shows while any table plays, PinMAME or not, and follows its
+// settings mid-game; called every tick, so a change applies within one.
+static void ApplyStatusWindow()
+{
+   const bool playing = vpxSession != nullptr && vpxSession->PlayerRunning();
+   const int corner = (playing && setShowStatus_Get()) ? setStatusCorner_Get() : 0;
+   if (UpdateStatusWindow(corner))
+      LOGI("Status light: corner "s + std::to_string(corner) + " (prototype, fake status)");
+}
+
 // API thread. Reschedules itself for the plugin's lifetime, so a line the
 // transport thread queued is written out whether or not a table is running.
 static void DrainSocketLog(void*)
@@ -87,6 +97,7 @@ static void DrainSocketLog(void*)
       // Display changes while no frame renders (table chooser, a paused game) still re-declare.
       vpxSession->UpdateDeclare();
    }
+   ApplyStatusWindow();
    if (dmdOverlay != nullptr)
       dmdOverlay->DrainPending();
    msgApi->RunOnMainThread(endpointId, LOG_DRAIN_INTERVAL, DrainSocketLog, nullptr);
@@ -123,13 +134,6 @@ static void OnControllersChanged()
       vpxSession->SetRomId(romId);
 
    LOGI(romId.empty() ? "Game ended"s : "New game: romId="s + romId);
-   if (romId.empty() || !setShowStatus_Get())
-      HideStatusWindow();
-   else
-   {
-      ShowStatusWindow(setStatusCorner_Get());
-      LOGI("Status light: corner "s + std::to_string(setStatusCorner_Get()) + " (prototype, fake status)");
-   }
 }
 
 }
@@ -228,7 +232,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
       return;
    LOGI("Scorbit plugin unloading"s);
    RemoveQuitHook();
-   HideStatusWindow();
+   UpdateStatusWindow(0);
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
    // Detach first: unsubscribing the controllers below would otherwise withdraw it

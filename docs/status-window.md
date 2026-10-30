@@ -67,6 +67,12 @@ The same on every platform:
 - A plain `NSPanel` with `NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless`,
   never a subclass: a borderless panel already refuses key and main. `ignoresMouseEvents = YES`,
   `opaque = NO`, with a clear background.
+- The playfield's screen is the key window's. VPX plays only while the playfield holds keyboard
+  focus and makes its other windows unfocusable on macOS, so, while VPX is active, the key window is
+  the playfield; window size says nothing (a backglass can be the larger window). The plugin API
+  has no window handle to ask instead.
+- It shows while VPX reports a game (`OnGameStart` to `OnGameEnd`), so EM and authored tables get
+  it too, and re-reads `ShowStatus` and `StatusCorner` on each main-thread tick.
 - It follows `NSApplicationDidBecomeActive` / `DidResignActive` itself, so it goes when VPX stops
   being the active application and comes back when it returns. Not `hidesOnDeactivate`: see the
   prototype results.
