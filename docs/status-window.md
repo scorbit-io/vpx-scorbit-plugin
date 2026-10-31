@@ -1,7 +1,7 @@
 # A plugin-owned status window (design, SB-6004)
 
-Status: design, with a macOS prototype measured (see "Prototype results"). One implementation
-ticket per platform comes next.
+Status: implemented on macOS (see "What the light shows"); Windows and X11 come next. The macOS
+prototype's measurements are under "Prototype results".
 
 ## Why
 
@@ -112,6 +112,40 @@ The same on every platform:
   protocol, which SDL and most compositors used for VPX don't offer. **Unsupported**: the
   notification stays the surface. The plugin detects the driver the way VPX does
   (`SDL_GetCurrentVideoDriver`, `Window.cpp:208-220`).
+
+## What the light shows
+
+One round panel, about 44 points: two dots side by side inside a ring of 30 segments, and a glyph
+between the dots. The mapping is `src/StatusLight.cpp`, tested on every platform by
+`test/StatusLightTest.cpp`; each window only draws it.
+
+The two dots are the Scorbitron's two status LEDs, in the device's own colours (at full scale; the
+device dims its LEDs) and its own blink, wherever the device has the state:
+
+| Dot | State | Colour | Blink |
+|---|---|---|---|
+| System (left) | ok | green 0,255,0 | 1200 ms on, 100 ms off |
+| | offline | orange 255,165,0 | |
+| | not paired | red 255,0,0 | |
+| | degraded | purple 255,0,255 | |
+| Session (right) | no game | blue 0,0,255 | 1189 ms on, 123 ms off |
+| | tracking | green 0,255,0 | |
+| | no data | amber 255,191,0 | |
+| | not authenticated | red 255,0,0, ahead of the game state (protocol 1.2 daemons) | |
+
+The device has no "not paired" or "degraded" light of its own; those two reuse its red and purple.
+
+The ring stands for the tap pad, in a Scorbit style of its own rather than the pad's animations: a
+pulsing rainbow while all is well and no game is scored, dark while a game is scored, solid red when
+the daemon is not paired or not authenticated, and solid blue with no daemon. It flashes white once
+when a player claims a slot.
+
+The glyph is `!` for any state that is expected to work and does not, `?` for a value this build
+does not know, and nothing when all is well, so no state is told by colour alone.
+
+With no daemon, after the notifications' 5 s grace, both dots are dark (nothing drives them) and the
+ring is blue with `!`. A session still waiting for its first Status, or a loss inside the grace,
+keeps the light as it was. When the daemon hides its indicator, there is no light at all.
 
 ## Risks, and how the prototype measures them
 

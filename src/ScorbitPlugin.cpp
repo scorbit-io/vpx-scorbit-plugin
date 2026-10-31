@@ -67,7 +67,9 @@ MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
    "Show Scorbit status notifications, in a session or out of one", true, true);
 // Off by default: no corner of a full-bleed table is guaranteed free (docs/status-window.md).
 MSGPI_INT_VAL_SETTING(setStatusCorner, "StatusCorner", "Status light corner",
-   "Prototype: show the status light in this screen corner, 0 off, 1 top left, 2 top right, 3 bottom left, 4 bottom right", true, 0, 4, 0);
+   "Show the status light in this screen corner, 0 off, 1 top left, 2 top right, 3 bottom left, 4 bottom right", true, 0, 4, 0);
+MSGPI_INT_VAL_SETTING(setStatusOpacity, "StatusOpacity", "Status light opacity",
+   "How strongly the status light draws, in percent", true, 10, 100, 100);
 
 static void FilterControllers(std::vector<ControllerDef>& items)
 {
@@ -75,14 +77,32 @@ static void FilterControllers(std::vector<ControllerDef>& items)
       { return def.gameId == nullptr || !std::string_view(def.gameId).starts_with(PMPI_GAMEID_PREFIX); });
 }
 
+static LightView statusLight;
+static ClaimWatch statusClaims;
+
 // API thread. The status light shows while any table plays, PinMAME or not, and follows its
 // settings mid-game; called every tick, so a change applies within one.
 static void ApplyStatusWindow()
 {
-   const bool playing = vpxSession != nullptr && vpxSession->PlayerRunning();
-   const int corner = (playing && setShowStatus_Get()) ? setStatusCorner_Get() : 0;
-   if (UpdateStatusWindow(corner))
-      LOGI("Status light: corner "s + std::to_string(corner) + " (prototype, fake status)");
+   if (vpxSession == nullptr)
+      return;
+   // Followed while hidden too, so the light never comes back showing a stale state.
+   statusLight = LightFor(vpxSession->ScriptStatus(), std::chrono::steady_clock::now(), statusLight);
+   const int corner = (vpxSession->PlayerRunning() && setShowStatus_Get()) ? setStatusCorner_Get() : 0;
+   bool claimed = false;
+   if (corner != 0)
+   {
+      ClaimWatch::Ids ids;
+      const ReadBackState& readBack = vpxSession->ScriptReadBack();
+      for (size_t i = 0; i < ids.size(); i++)
+         if (const PlayerView* p = readBack.Slot(static_cast<double>(i + 1)))
+            ids[i] = p->playerId;
+      claimed = statusClaims.Update(ids);
+   }
+   else
+      statusClaims.Reset();
+   if (UpdateStatusWindow(corner, statusLight, setStatusOpacity_Get() / 100.0, claimed))
+      LOGI("Status light: corner "s + std::to_string(corner));
 }
 
 // API thread. Reschedules itself for the plugin's lifetime, so a line the
@@ -171,6 +191,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setSocketPath);
    msgApi->RegisterSetting(endpointId, &setShowStatus);
    msgApi->RegisterSetting(endpointId, &setStatusCorner);
+   msgApi->RegisterSetting(endpointId, &setStatusOpacity);
 
    dmdTap = new DmdTap(msgApi, endpointId);
    {
@@ -232,7 +253,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
       return;
    LOGI("Scorbit plugin unloading"s);
    RemoveQuitHook();
-   UpdateStatusWindow(0);
+   UpdateStatusWindow(0, { }, 1, false);
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
    // Detach first: unsubscribing the controllers below would otherwise withdraw it
