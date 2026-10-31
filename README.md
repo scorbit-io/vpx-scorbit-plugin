@@ -86,7 +86,7 @@ Enable = 1
 | `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
-| `StatusCorner` | macOS only. Show the status light in this screen corner: 0 off (default), 1 top left, 2 top right, 3 bottom left, 4 bottom right. Off by default because no corner of a full-bleed table is guaranteed free; see `docs/status-window.md`. `ShowStatus = 0` hides it too. |
+| `StatusCorner` | macOS and Windows. Show the status light in this screen corner: 0 off (default), 1 top left, 2 top right, 3 bottom left, 4 bottom right. Off by default because no corner of a full-bleed table is guaranteed free; see `docs/status-window.md`. `ShowStatus = 0` hides it too. |
 | `StatusOpacity` | How strongly the status light draws, 10 to 100 percent, default 100. |
 
 The plugin tells the daemon which ROM PinMAME is running; the daemon identifies
