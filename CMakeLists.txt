@@ -63,6 +63,8 @@ add_library(scorbit-transport STATIC
    src/StatusNotice.cpp
    src/StatusLight.h
    src/StatusLight.cpp
+   src/StatusLightRaster.h
+   src/StatusLightRaster.cpp
    src/SocketWorker.h
    src/SocketWorker.cpp
    src/WireDump.h
@@ -106,6 +108,8 @@ if(APPLE)
    target_sources(plugin-scorbit PRIVATE src/QuitHook_mac.mm src/StatusWindow_mac.mm)
    set_source_files_properties(src/QuitHook_mac.mm src/StatusWindow_mac.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
    target_link_libraries(plugin-scorbit PRIVATE "-framework AppKit" "-framework QuartzCore")
+elseif(WIN32)
+   target_sources(plugin-scorbit PRIVATE src/StatusWindow_win.cpp)
 endif()
 
 target_include_directories(plugin-scorbit PRIVATE src "${VPX_HEADERS_DIR}")
