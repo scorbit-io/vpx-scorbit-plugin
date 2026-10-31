@@ -437,8 +437,14 @@ void ReadBackState::NewEpoch(uint64_t epoch)
 
 void ReadBackState::Drain(ReadBackChannel& channel, Clock::time_point now)
 {
-   if (std::unique_ptr<PlayersPost> players = channel.TakePlayers(); players && players->epoch == m_epoch)
-      m_players = std::move(*players);
+   if (std::unique_ptr<PlayersPost> players = channel.TakePlayers())
+   {
+      // Another table's slots go, but the snapshot count is the connection's and still counts.
+      if (players->epoch == m_epoch)
+         m_players = std::move(*players);
+      else
+         m_players.snapshots = players->snapshots;
+   }
    std::deque<TopScoresPost> results;
    channel.TakeResults(results);
    for (TopScoresPost& post : results)
