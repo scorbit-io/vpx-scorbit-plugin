@@ -79,6 +79,7 @@ static void FilterControllers(std::vector<ControllerDef>& items)
 
 static LightView statusLight;
 static ClaimWatch statusClaims;
+static uint32_t statusSnapshots = 0;
 
 // API thread. The status light shows while any table plays, PinMAME or not, and follows its
 // settings mid-game; called every tick, so a change applies within one.
@@ -94,6 +95,12 @@ static void ApplyStatusWindow()
    {
       ClaimWatch::Ids ids;
       const ReadBackState& readBack = vpxSession->ScriptReadBack();
+      // A new table or a new connection: what arrives next was claimed already, so it is learned.
+      if (readBack.PlayerSnapshots() != statusSnapshots)
+      {
+         statusSnapshots = readBack.PlayerSnapshots();
+         statusClaims.Reset();
+      }
       for (size_t i = 0; i < ids.size(); i++)
          if (const PlayerView* p = readBack.Slot(static_cast<double>(i + 1)))
             ids[i] = p->playerId;
@@ -253,6 +260,8 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
       return;
    LOGI("Scorbit plugin unloading"s);
    RemoveQuitHook();
+   // The tick stops first, so nothing rebuilds the light after its last flush.
+   logDrainActive = false;
    UpdateStatusWindow(0, { }, 1, false);
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
@@ -262,7 +271,6 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    if (unloadingAtQuit)
       dmdOverlay->Detach();
 
-   logDrainActive = false;
    // Joins the transport thread, so nothing reads vpxSession or dmdTap after
    // this returns. Bye goes out from the worker as it leaves its serve loop.
    delete socketWorker;

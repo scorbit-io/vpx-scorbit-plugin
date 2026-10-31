@@ -318,6 +318,8 @@ private:
    bool m_loggedPictureDir = false;      // once per plugin load: a refused directory stays refused
    bool m_loggedPictureSweep = false;    // once per plugin load
    PlayerTable m_players;
+   bool m_playersSnapshotDue = false;    // the next Players is the connection's snapshot
+   uint32_t m_playerSnapshots = 0;
 };
 
 }

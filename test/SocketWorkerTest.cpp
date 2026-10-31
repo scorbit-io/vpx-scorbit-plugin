@@ -2017,6 +2017,7 @@ void TestReadBacksWithA12Daemon()
       CHECK(players.epoch == 1 && players.slots[0].playerId == "p-123" && players.slots[0].DisplayName() == "ACE");
       CHECK(players.slots[1].claimDeeplink == "https://scorbit.link/c/AbC123" && !players.slots[1].Claimed());
       CHECK(players.slots[2].playerId.empty() && players.slots[2].claimDeeplink.empty());
+      CHECK_MSG(players.snapshots == 1, "the connection's first Players is its snapshot");
 
       // --- A picture is copied before the acknowledgement ---------------------------------
       CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 510, Wire::Encode(Wire::PlayerPicture { 1, "p-123", source.string() })));
@@ -2055,6 +2056,7 @@ void TestReadBacksWithA12Daemon()
       CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 520, Wire::Encode(next)));
       CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[0].playerId == "p-456"; }, players));
       CHECK(players.slots[0].picture.empty() && players.slots[0].DisplayName() == "Cy" && players.slots[1].claimDeeplink.empty());
+      CHECK_MSG(players.snapshots == 1, "a later Players is an update, not a snapshot");
       CHECK_MSG(!std::filesystem::exists(copy3), "a new claim deletes the old claim's picture");
       CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 521, Wire::Encode(Wire::PlayerPicture { 1, "p-456", source2.string() })));
       CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
@@ -2192,6 +2194,43 @@ void TestReadBacksWithOlderDaemons()
       CHECK(!channel.TakePlayers());
       worker.Stop();
    }
+}
+
+// An empty snapshot onto an empty table is posted all the same, so the API thread can tell the
+// claims a connection starts with from the ones made after; a repeat of it is not.
+void TestEmptyPlayersSnapshotIsPosted()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   ReadBackChannel channel;
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 90, Wire::Encode(Wire::Players { })));
+   PlayersPost players;
+   CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.snapshots == 1; }, players));
+   CHECK(!players.slots[0].Claimed());
+   CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 91, Wire::Encode(Wire::Players { })));
+   CHECK_MSG(!channel.TakePlayers(), "an unchanged update posts nothing");
+   worker.Stop();
 }
 
 // Leaderboards need a table that plays, not the chooser's empty Declare; and a TopScores that
@@ -2467,6 +2506,7 @@ int main()
    TestAuthoredTableWithoutAuthoredDaemon();
    TestReadBacksWithA12Daemon();
    TestReadBacksWithOlderDaemons();
+   TestEmptyPlayersSnapshotIsPosted();
    TestLeaderboardsNeedATable();
    TestNewIdentityWithinAnEpoch();
    TestLeaderboardsNeedAnIdentifiableTable();

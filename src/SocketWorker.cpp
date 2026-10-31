@@ -445,6 +445,7 @@ bool SocketWorker::Connect()
    m_seq = 0;
    m_haveDeclared = false;
    m_declared = { };
+   m_playersSnapshotDue = true;
    return true;
 }
 
@@ -1549,6 +1550,7 @@ void SocketWorker::PostPlayers()
 {
    PlayersPost post;
    post.epoch = m_declared.epoch;
+   post.snapshots = m_playerSnapshots;
    m_players.Fill(post);
    m_readBack->PostPlayers(post);
 }
@@ -1704,7 +1706,13 @@ bool SocketWorker::AnswerPlayers(const Wire::Message& msg)
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED,
          "a short payload, slots not 1 to 9 ascending, or an over-long string");
    }
-   if (m_players.Apply(players))
+   // The first after the first Declare is a snapshot of claims already made. It is posted even
+   // unchanged, so the API thread learns it before any later change reads as a new claim.
+   const bool snapshot = m_playersSnapshotDue;
+   m_playersSnapshotDue = false;
+   if (snapshot)
+      m_playerSnapshots++;
+   if (m_players.Apply(players) || snapshot)
    {
       Log(LOG_LEVEL_DEBUG, "Socket: players updated, " + std::to_string(players.slots.size()) + " slots");
       PostPlayers();

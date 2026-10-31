@@ -77,6 +77,9 @@ struct PlayersPost
 {
    uint64_t epoch = 0;
    std::array<PlayerView, Wire::MAX_PLAYERS> slots;
+   // How many connection snapshots the worker has taken, carried by every post since the latch
+   // keeps only the latest: a change means these slots were claimed already, not just now.
+   uint32_t snapshots = 0;
 };
 
 // Between the worker and the API thread. Every method is safe from either thread.
@@ -220,6 +223,7 @@ public:
    const Wire::TopScoreEntry* Score(double requestId, double index) const;
    void Release(double requestId);
    const PlayerView* Slot(double slot) const; // 1 to 9
+   uint32_t PlayerSnapshots() const { return m_players.snapshots; }
 
    TopScoresStore& Scores() { return m_scores; }
 
