@@ -48,6 +48,10 @@ constexpr int HELLO_TIMEOUT_MS = 1000;
 constexpr int CONNECT_TIMEOUT_MS = 1000;
 constexpr int DECLARE_TIMEOUT_MS = 1000;
 constexpr int GAME_TIMEOUT_MS = 1000;
+// TopScoresRequest is acknowledged at once; its result comes later as its own message.
+constexpr int TOP_SCORES_TIMEOUT_MS = 1000;
+// Sent requests awaiting their TopScores; the daemon answers each, so this only bounds a peer that does not.
+constexpr size_t MAX_PENDING_SCORES = 64;
 constexpr int PONG_TIMEOUT_MS = 2000;
 constexpr int SEND_TIMEOUT_MS = 1000;
 // Reading the rest of a message whose length header has already arrived.
@@ -147,11 +151,12 @@ int MillisUntil(std::chrono::steady_clock::time_point deadline)
 }
 
 SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory,
-   IOverlayTarget* overlay, StatusLatch* status)
+   IOverlayTarget* overlay, StatusLatch* status, ReadBackChannel* readBack)
    : m_source(source)
    , m_memory(memory)
    , m_overlay(overlay)
    , m_status(status)
+   , m_readBack(readBack)
    , m_config(std::move(config))
    , m_log(std::move(log))
    , m_instanceId([]
@@ -164,6 +169,9 @@ SocketWorker::SocketWorker(ISessionSource& source, SocketWorkerConfig config, Lo
    m_socketPath = m_config.socketPath.empty() ? DefaultSocketPath() : m_config.socketPath;
    m_tokenPath = m_config.tokenPath.empty() ? DefaultTokenPath(m_socketPath) : m_config.tokenPath;
    m_statusRecord.since = Clock::now();
+   const std::string& dir = m_config.pictureDir;
+   m_players.SetDirectory(dir.empty() ? DefaultPictureDirectory()
+      : std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(dir.data()), dir.size())), m_instanceId);
 }
 
 SocketWorker::~SocketWorker()
@@ -588,6 +596,7 @@ void SocketWorker::Disconnect()
          m_overlay->OverlayClear();
       NoSession(std::string());
    }
+   EndReadBacks(true);
 }
 
 void SocketWorker::PostStatus()
@@ -745,9 +754,18 @@ bool SocketWorker::ReadMessage(Wire::Message& out, int timeoutMs)
       Log(LOG_LEVEL_ERROR, "Socket: message body of " + std::to_string(length) + " bytes never arrived, closing");
       return false;
    }
-   m_wireDump.Received(lengthBytes, sizeof(lengthBytes), body.data(), body.size());
+   const bool decoded = Wire::DecodeBody(body.data(), body.size(), out);
+   if (decoded && m_wireDump.Enabled())
+   {
+      std::vector<SensitiveSpan> sensitive = Wire::ReceivedSensitive(out);
+      for (SensitiveSpan& span : sensitive)
+         span.offset += Wire::LENGTH_BYTES + Wire::HEADER_BYTES;
+      m_wireDump.Received(lengthBytes, sizeof(lengthBytes), body.data(), body.size(), sensitive);
+   }
+   else
+      m_wireDump.Received(lengthBytes, sizeof(lengthBytes), body.data(), body.size());
 
-   if (!Wire::DecodeBody(body.data(), body.size(), out))
+   if (!decoded)
    {
       Log(LOG_LEVEL_ERROR, "Socket: message shorter than a header, closing");
       SendError(0, 0, Wire::ERR_MALFORMED, "message shorter than a header");
@@ -850,12 +868,7 @@ bool SocketWorker::Handshake()
    hello.pluginApiCommit = m_config.pluginApiCommit;
    hello.token = token;
    hello.instanceId = m_instanceId;
-   // memory_write is advertised whenever reads are: whether the host can write is only known
-   // from the first Write, which answers unsupported_operation on a libpinmame without #634.
-   hello.capabilities = Wire::CAP_IDENTIFY_FRAMES
-      | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u)
-      | (m_overlay != nullptr ? Wire::CAP_OVERLAY : 0u)
-      | (m_config.authoredTables ? Wire::CAP_AUTHORED_TABLES : 0u);
+   hello.capabilities = OwnCapabilities();
 
    // Hello's vpx_revision is the build the plugin API headers were pinned to.
    // The plugin API exposes no runtime version, so this is what the plugin
@@ -911,6 +924,8 @@ bool SocketWorker::Handshake()
    m_peerMinor = ack.protoMinor;
    m_peerCapabilities = ack.capabilities;
    m_loggedNoAuthored = false;
+   m_scoresLogged = 0;
+   m_loggedPictureCopy = false;
    // Taken only once a session exists, so a daemon refusing Hello leaves them in the source's
    // bounded queue. Only never-acknowledged batches are left to replay, so nothing is counted
    // twice. They go on as is when they continue a game the daemon acknowledged the start of;
@@ -942,7 +957,10 @@ bool SocketWorker::Handshake()
    Log(LOG_LEVEL_INFO, "Socket: connected to daemon " + ack.daemonVersion + " (protocol "
       + std::to_string(ack.protoMajor) + '.' + std::to_string(ack.protoMinor)
       + ", session " + std::to_string(ack.sessionId)
-      + (AuthoredAllowed() ? ", authored tables" : "") + ')');
+      + (AuthoredAllowed() ? ", authored tables" : "")
+      + (ReadBackAllowed(Wire::CAP_LEADERBOARDS) ? ", leaderboards" : "")
+      + (ReadBackAllowed(Wire::CAP_PLAYERS) ? ", players" : "")
+      + (ReadBackAllowed(Wire::CAP_PLAYER_PICTURES) ? ", pictures" : "") + ')');
    return true;
 }
 
@@ -962,6 +980,25 @@ bool SocketWorker::AuthoredAllowed() const
    return m_peerMinor >= 1 && (m_peerCapabilities & Wire::CAP_AUTHORED_TABLES) != 0;
 }
 
+uint32_t SocketWorker::OwnCapabilities() const
+{
+   // memory_write is advertised whenever reads are: whether the host can write is only known
+   // from the first Write, which answers unsupported_operation on a libpinmame without #634.
+   const bool readBacks = m_config.authoredTables && m_readBack != nullptr;
+   return Wire::CAP_IDENTIFY_FRAMES
+      | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u)
+      | (m_overlay != nullptr ? Wire::CAP_OVERLAY : 0u)
+      | (m_config.authoredTables ? Wire::CAP_AUTHORED_TABLES : 0u)
+      | (readBacks ? Wire::CAP_LEADERBOARDS | Wire::CAP_PLAYERS | Wire::CAP_PLAYER_PICTURES : 0u);
+}
+
+bool SocketWorker::ReadBackAllowed(uint32_t capability) const
+{
+   if (capability == Wire::CAP_PLAYER_PICTURES && !ReadBackAllowed(Wire::CAP_PLAYERS))
+      return false;
+   return m_peerMinor >= 2 && (OwnCapabilities() & capability) != 0 && (m_peerCapabilities & capability) != 0;
+}
+
 void SocketWorker::TakeDeclare()
 {
    if (std::unique_ptr<DeclareSnapshot> posted = m_source.TakeDeclare())
@@ -979,6 +1016,10 @@ bool SocketWorker::MaybeDeclare()
    if (m_haveDeclared && m_current == m_declared)
       return true;
    const DeclareSnapshot now = m_current;
+   // Closed before the Declare goes out, so a request made while it awaits its answer gets no id.
+   // Opening waits for the answer, in Serve.
+   if (m_readBack != nullptr && !Identifies(now.declare))
+      m_readBack->SetLeaderboards(false);
 
    Wire::Declare sent = now.declare;
    if (sent.tableKind == Wire::TABLE_AUTHORED && !AuthoredAllowed())
@@ -1014,9 +1055,21 @@ bool SocketWorker::MaybeDeclare()
       return false;
    }
 
+   // A new identity is a new table even within one epoch: a hybrid table's ROM replaces its
+   // authored uuid without a game restart, and nothing read for the old identity may carry over.
+   const bool newIdentity = Wire::NewIdentity(m_declared.declare, now.declare);
+   const bool sameEpoch = now.epoch == m_declared.epoch;
+   const bool newTable = m_haveDeclared && (!sameEpoch || newIdentity);
    m_declared = now;
    m_haveDeclared = true;
    m_gameLogged = 0;
+   // The daemon empties its players for a different table; this side drops them, and their pictures.
+   if (newTable)
+      EndReadBacks(false);
+   // Queued under the same epoch, they were asked of the old identity. Across an epoch they sort
+   // themselves: the old one's are answered lost when taken, the new one's belong to this table.
+   if (newTable && sameEpoch)
+      LoseQueuedRequests();
    // The paths are never logged.
    const Wire::Declare& d = sent;
    Log(LOG_LEVEL_INFO, "Socket: declared romId=" + (d.romId.empty() ? "(none)" : d.romId)
@@ -1104,7 +1157,9 @@ void SocketWorker::Serve()
    bool alive = true;
    while (m_running)
    {
-      if (!MaybeDeclare() || !SendGames())
+      if (m_readBack != nullptr)
+         m_readBack->SetLeaderboards(TableIdentified() && ReadBackAllowed(Wire::CAP_LEADERBOARDS));
+      if (!MaybeDeclare() || !SendGames() || !SendTopScoresRequests())
       {
          alive = !m_running;
          break;
@@ -1238,6 +1293,19 @@ bool SocketWorker::Dispatch(const Wire::Message& msg)
       if (m_status != nullptr)
          return AnswerStatus(msg);
       break;
+   // Unknown to a session that did not negotiate them, as they are to a 1.1 plugin.
+   case Wire::TYPE_TOP_SCORES:
+      if (ReadBackAllowed(Wire::CAP_LEADERBOARDS))
+         return AnswerTopScores(msg);
+      break;
+   case Wire::TYPE_PLAYERS:
+      if (ReadBackAllowed(Wire::CAP_PLAYERS))
+         return AnswerPlayers(msg);
+      break;
+   case Wire::TYPE_PLAYER_PICTURE:
+      if (ReadBackAllowed(Wire::CAP_PLAYER_PICTURES))
+         return AnswerPlayerPicture(msg);
+      break;
    case Wire::TYPE_BYE:
    {
       Wire::Bye bye;
@@ -1311,11 +1379,11 @@ bool SocketWorker::AnswerStatus(const Wire::Message& msg)
    if (!m_haveDeclared)
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_NOT_DECLARED, "Status before the first Declare");
    Wire::Status status;
-   if (!Wire::Decode(msg.payload, status))
+   if (!Wire::Decode(msg.payload, status, m_peerMinor))
    {
       Log(LOG_LEVEL_WARN, "Socket: malformed Status request, " + std::to_string(msg.payload.size()) + " bytes");
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED,
-         "a short payload, or support_text over 256 bytes");
+         "a short payload, support_text over 256 bytes, or an unknown auth_status");
    }
    Log(LOG_LEVEL_INFO, "Socket: daemon status " + StatusNotifier::Describe(status));
    m_statusRecord.haveStatus = true;
@@ -1445,6 +1513,250 @@ bool SocketWorker::AnswerPing(const Wire::Message& msg)
    // What this side knows, as for a Write: served, unless the host has shown it applies none.
    pong.writesSupported = m_memory != nullptr && !m_memory->WritesUnsupported() ? 1 : 0;
    return SendWireMessage(Wire::TYPE_PONG, Wire::FLAG_RESPONSE, msg.header.seq, Wire::Encode(pong));
+}
+
+// --- Read-backs (protocol 1.2) --------------------------------------------------
+
+void SocketWorker::PostScores(uint64_t epoch, uint32_t requestId, int result)
+{
+   TopScoresPost post;
+   post.epoch = epoch;
+   post.requestId = requestId;
+   post.result = result;
+   post.received = Clock::now();
+   m_readBack->PostResult(std::move(post));
+}
+
+bool SocketWorker::TableActive() const
+{
+   // The chooser declares too, with neither; a table that plays names its file or its ROM.
+   return m_haveDeclared && (!m_declared.declare.tablePath.empty() || !m_declared.declare.romId.empty());
+}
+
+bool SocketWorker::TableIdentified() const
+{
+   return m_haveDeclared && Identifies(m_declared.declare);
+}
+
+bool SocketWorker::Identifies(const Wire::Declare& d) const
+{
+   // An authored table to a daemon without authored_tables is declared without its uuid, so
+   // nothing names it: scope would resolve against no machine.
+   return !d.romId.empty() || (!d.tablePath.empty() && d.tableKind == Wire::TABLE_AUTHORED && !d.machineUuid.empty() && AuthoredAllowed());
+}
+
+void SocketWorker::PostPlayers()
+{
+   PlayersPost post;
+   post.epoch = m_declared.epoch;
+   m_players.Fill(post);
+   m_readBack->PostPlayers(post);
+}
+
+void SocketWorker::EndReadBacks(bool lost)
+{
+   if (m_readBack == nullptr)
+      return;
+   if (lost)
+   {
+      // Closed and drained in one step, so no request is admitted after the drain and left unanswered.
+      m_readBack->Close(m_asks);
+      for (const TopScoresAsk& ask : m_asks)
+         PostScores(ask.epoch, ask.request.requestId, SCORES_LOST);
+      m_asks.clear();
+   }
+   // At a table switch these belong to the old epoch, which the API thread no longer reads.
+   for (const auto& [id, epoch] : m_pendingScores)
+      PostScores(epoch, id, SCORES_LOST);
+   m_pendingScores.clear();
+   if (m_players.Clear())
+      PostPlayers();
+}
+
+void SocketWorker::LoseQueuedRequests()
+{
+   if (m_readBack == nullptr)
+      return;
+   // Admission stays open, and a request the script made after the identity changed is the new
+   // identity's: only those asked of an older one are answered lost.
+   m_readBack->TakeRequests(m_asks);
+   std::erase_if(m_asks, [this](const TopScoresAsk& ask)
+   {
+      if (ask.epoch != m_declared.epoch || ask.identity >= m_declared.identity)
+         return false;
+      PostScores(ask.epoch, ask.request.requestId, SCORES_LOST);
+      return true;
+   });
+}
+
+bool SocketWorker::SendTopScoresRequests()
+{
+   if (m_readBack == nullptr)
+      return true;
+   m_readBack->TakeRequests(m_asks);
+   while (!m_asks.empty())
+   {
+      const TopScoresAsk& front = m_asks.front();
+      if (!m_haveDeclared || front.epoch > m_declared.epoch
+         || (front.epoch == m_declared.epoch && front.identity > m_declared.identity))
+         return true;  // its table is not declared yet
+      const TopScoresAsk ask = std::move(m_asks.front());
+      m_asks.pop_front();
+      const uint32_t id = ask.request.requestId;
+      if (ask.epoch < m_declared.epoch || ask.identity < m_declared.identity)
+      {
+         PostScores(ask.epoch, id, SCORES_LOST);  // its table has gone; the API thread drops it
+         continue;
+      }
+      if (!ReadBackAllowed(Wire::CAP_LEADERBOARDS))
+      {
+         PostScores(ask.epoch, id, SCORES_UNSUPPORTED);
+         continue;
+      }
+      if (!TableIdentified())
+      {
+         PostScores(ask.epoch, id, SCORES_NOT_DECLARED);
+         continue;
+      }
+      const std::vector<uint8_t> payload = Wire::Encode(ask.request);
+      if (payload.empty())
+      {
+         PostScores(ask.epoch, id, SCORES_MALFORMED);
+         continue;
+      }
+
+      // Registered before it goes out: Exchange serves requests that overtake its reply, and the
+      // result can be one of them. A failed exchange leaves it for the disconnect to answer lost.
+      if (m_pendingScores.size() >= MAX_PENDING_SCORES)
+      {
+         PostScores(m_pendingScores.begin()->second, m_pendingScores.begin()->first, SCORES_LOST);
+         m_pendingScores.erase(m_pendingScores.begin());
+      }
+      m_pendingScores[id] = ask.epoch;
+      Wire::Message reply;
+      if (!Exchange(Wire::TYPE_TOP_SCORES_REQUEST, payload, TOP_SCORES_TIMEOUT_MS, reply))
+         return false;
+      if (!reply.header.IsError())
+         continue;
+      // Refused, so no result is coming; unless one already arrived, the refusal is the answer.
+      if (m_pendingScores.erase(id) == 0)
+         continue;
+
+      Wire::ErrorPayload e;
+      Wire::Decode(reply.payload, e);
+      const int result = e.code == Wire::ERR_NOT_DECLARED ? static_cast<int>(SCORES_NOT_DECLARED)
+         : e.code == Wire::ERR_UNSUPPORTED_OPERATION || e.code == Wire::ERR_UNSUPPORTED_TYPE ? static_cast<int>(SCORES_UNSUPPORTED)
+         : e.code == Wire::ERR_MALFORMED ? static_cast<int>(SCORES_MALFORMED)
+         : static_cast<int>(Wire::TOP_SCORES_FAILED);
+      const uint32_t bit = 1u << (e.code < 31 ? e.code : 31);
+      if ((m_scoresLogged & bit) == 0)
+      {
+         Log(LOG_LEVEL_WARN, "Socket: daemon refused TopScoresRequest: "s + Wire::ErrorName(e.code) + " - " + e.reason);
+         m_scoresLogged |= bit;
+      }
+      PostScores(ask.epoch, id, result);
+   }
+   return true;
+}
+
+// Each result is delivered once, so it is handed over and acknowledged in the same step.
+bool SocketWorker::AnswerTopScores(const Wire::Message& msg)
+{
+   Wire::TopScores scores;
+   if (!Wire::Decode(msg.payload, scores))
+   {
+      Log(LOG_LEVEL_WARN, "Socket: malformed TopScores, " + std::to_string(msg.payload.size()) + " bytes");
+      // When the id at least is readable, its request is answered rather than left pending.
+      uint32_t id = 0;
+      Wire::Reader r(msg.payload.data(), msg.payload.size());
+      if (r.U32(id))
+         if (const auto pending = m_pendingScores.find(id); pending != m_pendingScores.end())
+         {
+            PostScores(pending->second, id, SCORES_MALFORMED);
+            m_pendingScores.erase(pending);
+         }
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "TopScores payload");
+   }
+   const auto pending = m_pendingScores.find(scores.requestId);
+   if (pending == m_pendingScores.end())
+      Log(LOG_LEVEL_DEBUG, "Socket: dropped TopScores for request " + std::to_string(scores.requestId) + ", not pending");
+   else
+   {
+      TopScoresPost post;
+      post.epoch = pending->second;
+      post.requestId = scores.requestId;
+      post.result = scores.result;
+      post.ageS = scores.ageS;
+      post.entries = std::move(scores.entries);
+      post.received = Clock::now();
+      m_pendingScores.erase(pending);
+      m_readBack->PostResult(std::move(post));
+   }
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, { });
+}
+
+bool SocketWorker::AnswerPlayers(const Wire::Message& msg)
+{
+   Wire::Players players;
+   if (!Wire::Decode(msg.payload, players))
+   {
+      Log(LOG_LEVEL_WARN, "Socket: malformed Players, " + std::to_string(msg.payload.size()) + " bytes");
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED,
+         "a short payload, slots not 1 to 9 ascending, or an over-long string");
+   }
+   if (m_players.Apply(players))
+   {
+      Log(LOG_LEVEL_DEBUG, "Socket: players updated, " + std::to_string(players.slots.size()) + " slots");
+      PostPlayers();
+   }
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, { });
+}
+
+// Copied before the acknowledgement: once acknowledged, the daemon may delete its file. The
+// paths are never logged.
+bool SocketWorker::AnswerPlayerPicture(const Wire::Message& msg)
+{
+   Wire::PlayerPicture picture;
+   if (!Wire::Decode(msg.payload, picture))
+   {
+      Log(LOG_LEVEL_WARN, "Socket: malformed PlayerPicture, " + std::to_string(msg.payload.size()) + " bytes");
+      return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED, "a short payload, or a player not 1 to 9");
+   }
+   std::string error;
+   const PlayerTable::Picture outcome = m_players.Apply(picture, error);
+   if (!m_players.SweepError().empty() && !m_loggedPictureSweep)
+   {
+      Log(LOG_LEVEL_WARN, "Socket: " + m_players.SweepError() + "; continuing");
+      m_loggedPictureSweep = true;
+   }
+   switch (outcome)
+   {
+   case PlayerTable::Picture::Ignored:
+      Log(LOG_LEVEL_DEBUG, "Socket: ignored a picture for player " + std::to_string(picture.player) + ", not its current claim");
+      break;
+   case PlayerTable::Picture::Unchanged:
+      break;
+   case PlayerTable::Picture::Failed:
+      if (m_players.DirectoryRefused())
+      {
+         if (!m_loggedPictureDir)
+         {
+            Log(LOG_LEVEL_WARN, "Socket: player pictures are off, " + error + " (it must be owned by this user and writable by no one else)");
+            m_loggedPictureDir = true;
+         }
+      }
+      else if (!m_loggedPictureCopy)
+      {
+         Log(LOG_LEVEL_WARN, "Socket: a player picture was not kept, " + error + "; that player shows none (logged once per session)");
+         m_loggedPictureCopy = true;
+      }
+      PostPlayers();
+      break;
+   default:
+      PostPlayers();
+      break;
+   }
+   return SendWireMessage(msg.header.type, Wire::FLAG_RESPONSE, msg.header.seq, { });
 }
 
 }

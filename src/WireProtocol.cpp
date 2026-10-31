@@ -26,6 +26,16 @@ const char* TypeName(uint16_t type)
    case TYPE_OVERLAY: return "Overlay";
    case TYPE_STATUS: return "Status";
    case TYPE_GAME: return "Game";
+   case TYPE_GAME_START_REQUESTED: return "GameStartRequested";
+   case TYPE_TOP_SCORES_REQUEST: return "TopScoresRequest";
+   case TYPE_TOP_SCORES: return "TopScores";
+   case TYPE_PLAYERS: return "Players";
+   case TYPE_PLAYER_PICTURE: return "PlayerPicture";
+   case TYPE_CREDITS_ADD_REQUESTED: return "CreditsAddRequested";
+   case TYPE_CREDITS_STATUS_REQUESTED: return "CreditsStatusRequested";
+   case TYPE_CREDITS_DROPPED: return "CreditsDropped";
+   case TYPE_CREDITS_STATUS: return "CreditsStatus";
+   case TYPE_PRICING: return "Pricing";
    default: return "unknown";
    }
 }
@@ -690,15 +700,25 @@ std::vector<uint8_t> Encode(const Status& v)
    w.U8(v.sessionState);
    w.U8(v.systemState);
    w.Str(v.supportText);
+   if (v.hasAuthStatus)
+      w.U8(v.authStatus);
    return w.Ok() ? w.Take() : std::vector<uint8_t> { };
 }
 
-bool Decode(const std::vector<uint8_t>& payload, Status& out)
+bool Decode(const std::vector<uint8_t>& payload, Status& out, uint16_t peerMinor)
 {
    Reader r(payload.data(), payload.size());
    r.U8(out.sessionState);
    r.U8(out.systemState);
    r.Str(out.supportText);
+   out.hasAuthStatus = false;
+   out.authStatus = AUTH_NOT_AUTHENTICATED;
+   if (peerMinor >= 2 && r.Ok() && !r.AtEnd())
+   {
+      out.hasAuthStatus = true;
+      if (!r.U8(out.authStatus) || out.authStatus > AUTH_FAILED)
+         return false;
+   }
    return r.Ok() && out.supportText.size() <= MAX_SUPPORT_TEXT_BYTES;
 }
 
@@ -818,6 +838,234 @@ bool Decode(const std::vector<uint8_t>& payload, GameBatch& out)
       out.ops.push_back(std::move(op));
    }
    return r.Ok() && ValidGameBatch(out);
+}
+
+// --- Slice 6 read-backs -------------------------------------------------------
+
+namespace
+{
+
+bool ValidRequest(const TopScoresRequest& v)
+{
+   return v.scope <= SCOPE_GAME && v.period <= PERIOD_DAYS_365 && v.vpinFilter <= VPIN_REAL_ONLY && v.limit >= 1
+      && v.limit <= MAX_TOP_SCORES && v.since.size() <= MAX_SINCE_BYTES;
+}
+
+bool ValidTopScores(const TopScores& v)
+{
+   if (v.result > TOP_SCORES_SUPERSEDED || v.entries.size() > MAX_TOP_SCORES)
+      return false;
+   if (v.result != TOP_SCORES_OK && !v.entries.empty())
+      return false;
+   for (const TopScoreEntry& e : v.entries)
+      if (e.displayName.size() > MAX_NAME_BYTES || e.initials.size() > MAX_INITIALS_BYTES || e.created.size() > MAX_CREATED_BYTES)
+         return false;
+   return true;
+}
+
+bool ValidPlayers(const Players& v)
+{
+   if (v.slots.size() > MAX_PLAYERS)
+      return false;
+   uint8_t last = 0;
+   for (const PlayerSlot& s : v.slots)
+   {
+      if (s.player <= last || s.player > MAX_PLAYERS)
+         return false;
+      last = s.player;
+      if (s.preferredName.size() > MAX_NAME_BYTES || s.name.size() > MAX_NAME_BYTES || s.initials.size() > MAX_INITIALS_BYTES
+         || s.claimDeeplink.size() > MAX_CLAIM_DEEPLINK_BYTES)
+         return false;
+   }
+   return true;
+}
+
+bool ValidPicture(const PlayerPicture& v)
+{
+   return v.player >= 1 && v.player <= MAX_PLAYERS;
+}
+
+// Records the UTF-8 bytes of a string about to be written or just read, never its length prefix.
+void Span(std::vector<SensitiveSpan>* sensitive, size_t prefixAt, const std::string& v)
+{
+   if (sensitive != nullptr && !v.empty())
+      sensitive->push_back({ prefixAt + 2, v.size() });
+}
+
+}
+
+std::vector<uint8_t> Encode(const TopScoresRequest& v)
+{
+   if (!ValidRequest(v))
+      return { };
+   Writer w;
+   w.U32(v.requestId);
+   w.U8(v.scope);
+   w.U8(v.period);
+   w.U8(v.vpinFilter);
+   w.U8(v.limit);
+   w.Str(v.since);
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, TopScoresRequest& out)
+{
+   Reader r(payload.data(), payload.size());
+   r.U32(out.requestId);
+   r.U8(out.scope);
+   r.U8(out.period);
+   r.U8(out.vpinFilter);
+   r.U8(out.limit);
+   r.Str(out.since);
+   return r.Ok() && ValidRequest(out);
+}
+
+std::vector<uint8_t> Encode(const TopScores& v)
+{
+   if (!ValidTopScores(v))
+      return { };
+   Writer w;
+   w.U32(v.requestId);
+   w.U8(v.result);
+   w.U32(v.ageS);
+   w.U8(static_cast<uint8_t>(v.entries.size()));
+   for (const TopScoreEntry& e : v.entries)
+   {
+      w.U16(e.rank);
+      w.U64(static_cast<uint64_t>(e.highScore));
+      w.Str(e.displayName);
+      w.Str(e.initials);
+      w.U8(e.flags);
+      w.Str(e.created);
+   }
+   return w.Ok() ? w.Take() : std::vector<uint8_t> { };
+}
+
+bool Decode(const std::vector<uint8_t>& payload, TopScores& out)
+{
+   Reader r(payload.data(), payload.size());
+   uint8_t count = 0;
+   out.entries.clear();
+   r.U32(out.requestId);
+   r.U8(out.result);
+   r.U32(out.ageS);
+   if (!r.U8(count) || count > MAX_TOP_SCORES)
+      return false;
+   out.entries.resize(count);
+   for (TopScoreEntry& e : out.entries)
+   {
+      uint64_t score = 0;
+      r.U16(e.rank);
+      r.U64(score);
+      e.highScore = static_cast<int64_t>(score);
+      r.Str(e.displayName);
+      r.Str(e.initials);
+      r.U8(e.flags);
+      r.Str(e.created);
+   }
+   return r.Ok() && ValidTopScores(out);
+}
+
+std::vector<uint8_t> Encode(const Players& v, std::vector<SensitiveSpan>* sensitive)
+{
+   if (sensitive != nullptr)
+      sensitive->clear();
+   if (!ValidPlayers(v))
+      return { };
+   Writer w;
+   w.U8(static_cast<uint8_t>(v.slots.size()));
+   for (const PlayerSlot& s : v.slots)
+   {
+      w.U8(s.player);
+      w.Str(s.playerId);
+      w.Str(s.preferredName);
+      w.Str(s.name);
+      w.Str(s.initials);
+      Span(sensitive, w.Size(), s.claimDeeplink);
+      w.Str(s.claimDeeplink);
+   }
+   if (!w.Ok())
+   {
+      if (sensitive != nullptr)
+         sensitive->clear();
+      return { };
+   }
+   return w.Take();
+}
+
+bool Decode(const std::vector<uint8_t>& payload, Players& out, std::vector<SensitiveSpan>* sensitive)
+{
+   if (sensitive != nullptr)
+      sensitive->clear();
+   Reader r(payload.data(), payload.size());
+   uint8_t count = 0;
+   out.slots.clear();
+   if (!r.U8(count) || count > MAX_PLAYERS)
+      return false;
+   out.slots.resize(count);
+   for (PlayerSlot& s : out.slots)
+   {
+      r.U8(s.player);
+      r.Str(s.playerId);
+      r.Str(s.preferredName);
+      r.Str(s.name);
+      r.Str(s.initials);
+      const size_t at = r.Position();
+      if (r.Str(s.claimDeeplink))
+         Span(sensitive, at, s.claimDeeplink);
+   }
+   return r.Ok() && ValidPlayers(out);
+}
+
+std::vector<uint8_t> Encode(const PlayerPicture& v, std::vector<SensitiveSpan>* sensitive)
+{
+   if (sensitive != nullptr)
+      sensitive->clear();
+   if (!ValidPicture(v))
+      return { };
+   Writer w;
+   w.U8(v.player);
+   w.Str(v.playerId);
+   const size_t at = w.Size();
+   w.Str(v.path);
+   if (!w.Ok())
+      return { };
+   Span(sensitive, at, v.path);
+   return w.Take();
+}
+
+bool Decode(const std::vector<uint8_t>& payload, PlayerPicture& out, std::vector<SensitiveSpan>* sensitive)
+{
+   if (sensitive != nullptr)
+      sensitive->clear();
+   Reader r(payload.data(), payload.size());
+   r.U8(out.player);
+   r.Str(out.playerId);
+   const size_t at = r.Position();
+   if (r.Str(out.path))
+      Span(sensitive, at, out.path);
+   return r.Ok() && ValidPicture(out);
+}
+
+std::vector<SensitiveSpan> ReceivedSensitive(const Message& msg)
+{
+   std::vector<SensitiveSpan> spans;
+   if (msg.header.IsResponse() || msg.payload.empty())
+      return spans;
+   bool decoded = true;
+   if (msg.header.type == TYPE_PLAYERS)
+   {
+      Players players;
+      decoded = Decode(msg.payload, players, &spans);
+   }
+   else if (msg.header.type == TYPE_PLAYER_PICTURE)
+   {
+      PlayerPicture picture;
+      decoded = Decode(msg.payload, picture, &spans);
+   }
+   if (!decoded)
+      spans = { { 0, msg.payload.size() } };
+   return spans;
 }
 
 }

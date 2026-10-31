@@ -19,6 +19,7 @@
 #include "Latch.h"
 #include "MemoryBridge.h"
 #include "OverlayState.h"
+#include "ReadBack.h"
 #include "StatusNotice.h"
 #include "WireProtocol.h"
 #include "WireDump.h"
@@ -27,7 +28,9 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -61,6 +64,9 @@ struct DeclareSnapshot
    // moves to another source, which must re-Declare (wire protocol definition, slice 4) even when
    // nothing declared changes.
    uint64_t surfaceGeneration = 0;
+   // Not on the wire: bumped by the API thread when the identity changes within an epoch, and
+   // carried by each leaderboard request, so the worker loses only the old identity's.
+   uint64_t identity = 0;
 
    bool operator==(const DeclareSnapshot&) const = default;
 };
@@ -127,8 +133,11 @@ struct SocketWorkerConfig
    std::string tokenPath;
    std::string pluginVersion;
    std::string pluginApiCommit;
-   // The table-script bindings are registered: Hello advertises authored_tables.
+   // The table-script bindings are registered: Hello advertises authored_tables, and, with a
+   // read-back channel, leaderboards, players and player_pictures.
    bool authoredTables = false;
+   // Where player pictures are copied; empty means DefaultPictureDirectory().
+   std::string pictureDir;
 };
 
 class SocketWorker final
@@ -139,9 +148,10 @@ public:
    // memory, when given, serves the slice 2 reads and makes Hello advertise
    // memory_read. overlay, when given, serves Overlay and advertises overlay; status,
    // when given, serves Status and carries the session state to the API thread. Each
-   // must outlive the worker.
+   // must outlive the worker. readBack, when given with authoredTables, serves the script's
+   // read-backs (protocol 1.2).
    SocketWorker(ISessionSource& source, SocketWorkerConfig config, LogFn log, MemoryBridge* memory = nullptr,
-      IOverlayTarget* overlay = nullptr, StatusLatch* status = nullptr);
+      IOverlayTarget* overlay = nullptr, StatusLatch* status = nullptr, ReadBackChannel* readBack = nullptr);
    ~SocketWorker();
 
    SocketWorker(const SocketWorker&) = delete;
@@ -191,6 +201,24 @@ private:
    bool SendGames();
    // HelloAck offered authored tables at a minor that carries them.
    bool AuthoredAllowed() const;
+   // What Hello advertises.
+   uint32_t OwnCapabilities() const;
+   // A Declare naming a table that plays, not the chooser's empty one.
+   bool TableActive() const;
+   // The daemon can resolve the declared table: a ROM, or an authored machine it serves.
+   bool TableIdentified() const;
+   bool Identifies(const Wire::Declare& d) const;
+   // A 1.2 read-back both sides offer; player_pictures also needs players.
+   bool ReadBackAllowed(uint32_t capability) const;
+   // Sends the script's queued TopScoresRequests. False closes the session.
+   bool SendTopScoresRequests();
+   void PostScores(uint64_t epoch, uint32_t requestId, int result);
+   void PostPlayers();
+   // Session end or table switch: pending requests answer lost when lost is set, and the
+   // players and their pictures go.
+   void EndReadBacks(bool lost);
+   // Answers lost every request queued and not yet sent, keeping admission open.
+   void LoseQueuedRequests();
    // Moves what the source committed into m_games, giving each batch the next id.
    void TakeSourceGames();
    // Takes a newly posted declaration into m_current, if there is one.
@@ -205,6 +233,9 @@ private:
    bool AnswerNvRam(const Wire::Message& msg);
    bool AnswerOverlay(const Wire::Message& msg);
    bool AnswerStatus(const Wire::Message& msg);
+   bool AnswerTopScores(const Wire::Message& msg);
+   bool AnswerPlayers(const Wire::Message& msg);
+   bool AnswerPlayerPicture(const Wire::Message& msg);
    // Hands the session state to the API thread, if anyone is listening.
    void PostStatus();
    void NoSession(const std::string& reason);
@@ -235,6 +266,7 @@ private:
    MemoryBridge* const m_memory;
    IOverlayTarget* const m_overlay;
    StatusLatch* const m_status;
+   ReadBackChannel* const m_readBack;
    const SocketWorkerConfig m_config;
    const LogFn m_log;
    const uint64_t m_instanceId;
@@ -277,6 +309,15 @@ private:
    Clock::time_point m_lastActivity { };
    std::string m_lastOnce;
    StatusRecord m_statusRecord;          // what was last posted to m_status
+   // Read-backs. Requests the script queued and not yet sent, kept until their table is declared;
+   // and those sent, by id, with the epoch they were asked under.
+   std::deque<TopScoresAsk> m_asks;
+   std::map<uint32_t, uint64_t> m_pendingScores;
+   uint32_t m_scoresLogged = 0;          // TopScoresRequest refusals logged, by code bit, per connection
+   bool m_loggedPictureCopy = false;     // once per connection
+   bool m_loggedPictureDir = false;      // once per plugin load: a refused directory stays refused
+   bool m_loggedPictureSweep = false;    // once per plugin load
+   PlayerTable m_players;
 };
 
 }

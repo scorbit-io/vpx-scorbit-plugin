@@ -11,7 +11,8 @@
 // CreateObject fails, so a script must guard it (SB-6010's author guidance).
 //
 // The game calls mirror the Scorbit SDK's setters and are buffered until Commit, which
-// sends them to the daemon as one Game (protocol 1.1).
+// sends them to the daemon as one Game (protocol 1.1). ApiLevel 2 adds read-only state the
+// script polls: status, leaderboards by request id, and players (protocol 1.2).
 
 #include "plugins/MsgPlugin.h"
 

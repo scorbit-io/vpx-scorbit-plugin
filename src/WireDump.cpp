@@ -74,6 +74,19 @@ void WireDump::Close()
    m_file = nullptr;
 }
 
+void WireDump::Redact(const std::vector<SensitiveSpan>& sensitive)
+{
+   const size_t size = m_redacted.size();
+   for (const SensitiveSpan& span : sensitive)
+   {
+      if (span.offset >= size)
+         continue;
+      const size_t end = span.offset + std::min(span.length, size - span.offset);
+      std::fill(m_redacted.begin() + static_cast<std::ptrdiff_t>(span.offset),
+         m_redacted.begin() + static_cast<std::ptrdiff_t>(end), static_cast<uint8_t>('*'));
+   }
+}
+
 void WireDump::Sent(const uint8_t* data, size_t size, const std::vector<SensitiveSpan>& sensitive)
 {
    if (m_file == nullptr)
@@ -84,20 +97,24 @@ void WireDump::Sent(const uint8_t* data, size_t size, const std::vector<Sensitiv
       return;
    }
    m_redacted.assign(data, data + size);
-   for (const SensitiveSpan& span : sensitive)
-   {
-      if (span.offset >= size)
-         continue;
-      const size_t end = span.offset + std::min(span.length, size - span.offset);
-      std::fill(m_redacted.begin() + static_cast<std::ptrdiff_t>(span.offset),
-         m_redacted.begin() + static_cast<std::ptrdiff_t>(end), static_cast<uint8_t>('*'));
-   }
+   Redact(sensitive);
    Record('>', m_redacted.data(), m_redacted.size(), nullptr, 0);
 }
 
-void WireDump::Received(const uint8_t* prefix, size_t prefixSize, const uint8_t* body, size_t bodySize)
+void WireDump::Received(const uint8_t* prefix, size_t prefixSize, const uint8_t* body, size_t bodySize,
+   const std::vector<SensitiveSpan>& sensitive)
 {
-   Record('<', prefix, prefixSize, body, bodySize);
+   if (m_file == nullptr)
+      return;
+   if (sensitive.empty())
+   {
+      Record('<', prefix, prefixSize, body, bodySize);
+      return;
+   }
+   m_redacted.assign(prefix, prefix + prefixSize);
+   m_redacted.insert(m_redacted.end(), body, body + bodySize);
+   Redact(sensitive);
+   Record('<', m_redacted.data(), m_redacted.size(), nullptr, 0);
 }
 
 void WireDump::Record(uint8_t direction, const uint8_t* prefix, size_t prefixSize, const uint8_t* body, size_t bodySize)

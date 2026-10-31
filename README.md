@@ -242,6 +242,67 @@ With a `Declare`, the plugin sends the daemon the table, VPX and preferences fol
 it needs to find the table's script. Those paths never appear in the log, and a wire dump
 blanks them.
 
+### Reading back
+
+`Scorbit.Table` also exposes read-only state a script can poll from a timer. Nothing here
+raises a script error: an index out of range, or a call while no daemon can answer, reads as
+`""`, `0`, `False` or the "none" value given below.
+
+| Member | Type | Reads |
+|---|---|---|
+| `Version` | String | the plugin's version |
+| `ApiLevel` | Integer | 2: the game calls and everything in this table. An object without `ApiLevel` is level 1, the game calls only |
+| `SystemState` | Integer | 0 ok, 1 not paired, 2 offline, 3 degraded; -1 before the daemon's first status |
+| `SessionState` | Integer | 0 no game, 1 tracking, 2 no data, 4 indicator hidden; -1 before the first status |
+| `AuthStatus` | Integer | 0 not authenticated, 1 authenticating, 2 checking pairing, 3 unpaired, 4 paired, 5 authentication failed; -1 until the daemon reports it |
+| `StatusText` | String | the daemon's support text, often empty |
+| `MachineUuid` | String | the uuid the table declared; `""` before `Declare` and while a ROM runs, since the ROM then identifies the table and the uuid is not sent |
+
+**Leaderboards.** A request returns an id, and the result arrives later under that id:
+
+```vbscript
+id = Scorbit.RequestTopScores(0, 0, 0, 10, "")   ' scope, period, vpinFilter, limit, since
+' later, from a timer
+If Scorbit.TopScoresResult(id) = 0 Then
+   For i = 0 To Scorbit.TopScoresCount(id) - 1
+      Debug.Print Scorbit.TopScoresRank(id, i) & " " & Scorbit.TopScoresName(id, i) & " " & Scorbit.TopScoresScore(id, i)
+   Next
+   Scorbit.ReleaseTopScores id
+End If
+```
+
+| Member | Type | Reads |
+|---|---|---|
+| `RequestTopScores(scope, period, vpinFilter, limit, since)` | Integer | a request id, or 0 when no daemon can serve leaderboards now (none connected, an older one, or the table not yet started) or an argument is out of range. scope 0 machine, 1 variant, 2 game; period 0 all time, 1 14 days, 2 30 days, 3 90 days, 4 180 days, 5 365 days; vpinFilter 0 any, 1 virtual only, 2 physical only; limit 1 to 20; since `""` or a UTC ISO-8601 time (up to 32 bytes) that replaces period |
+| `TopScoresResult(id)` | Integer | -1 no result yet, or an id not held; 0 ok, 1 not paired, 2 Scorbit error, 3 failed, 4 superseded by a table change; 5 no table declared, 6 not supported by the daemon, 7 the request or its answer was malformed, 8 connection lost before the answer |
+| `TopScoresAge(id)` | Integer | seconds since Scorbit was asked for these scores |
+| `TopScoresCount(id)` | Integer | entries, 0 unless the result is 0 |
+| `TopScoresRank(id, i)`, `TopScoresScore(id, i)` | Integer, Double | entry `i`, from 0. Scores are exact up to 2^53 |
+| `TopScoresName(id, i)`, `TopScoresInitials(id, i)`, `TopScoresCreated(id, i)` | String | display name, initials, and when the score was made, as Scorbit gives it |
+| `TopScoresFlags(id, i)` | Integer | bit 0 played on a virtual table, bit 1 verified, bit 2 verified by NFC |
+| `ReleaseTopScores(id)` | | forgets a result |
+
+The plugin keeps the eight most recent results; a ninth evicts the oldest, whose id then
+reads as -1. The daemon answers repeated requests from a cache, so polling the result is
+cheap, and a request repeated within a minute may be answered with the scores it already holds.
+
+**Players.** Slots are 1 to 9, as the game numbers its players.
+
+| Member | Type | Reads |
+|---|---|---|
+| `PlayerClaimed(slot)` | Boolean | a Scorbit player has claimed the slot |
+| `PlayerId(slot)`, `PlayerName(slot)`, `PlayerInitials(slot)` | String | the claimed player; the name is their preferred name when they set one |
+| `PlayerClaimLink(slot)` | String | for an unclaimed slot, the link a player opens to claim it, for a QR code on the table |
+| `PlayerPicture(slot)` | String | the full path of the claimed player's picture, a JPEG, or `""` |
+
+A picture file belongs to the plugin and lasts until the slot's claim or picture changes,
+the table ends, or the plugin unloads; load it, or copy it, rather than keeping the path.
+
+Leaderboard results, players and pictures belong to the table: they are cleared when the
+table ends, and players and pictures also when the connection to the daemon ends. A daemon
+that does not serve them leaves every member at its "none" value, so a script written for
+them still runs.
+
 ## Layout
 
 ```

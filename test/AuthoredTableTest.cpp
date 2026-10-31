@@ -119,6 +119,36 @@ void TestDumpRedactsSensitiveSpans()
    CHECK(std::string(clipped.end() - 3, clipped.end()) == "***");
 }
 
+// A received frame arrives as prefix and body; a span counts from the prefix, as for a sent one.
+void TestDumpRedactsReceivedSpans()
+{
+   const std::string prefix = "LEN:";
+   const std::string body = "picture=/Users/someone/p.jpg;";
+   const size_t at = prefix.size() + body.find("/Users");
+   const size_t length = body.find(';') - body.find("/Users");
+   const std::filesystem::path path = std::filesystem::temp_directory_path() / "scorbit-authored-table-received.wire";
+   SetDumpPath(path.string());
+   {
+      WireDump dump;
+      std::string error;
+      dump.Open(error);
+      dump.Received(reinterpret_cast<const uint8_t*>(prefix.data()), prefix.size(),
+         reinterpret_cast<const uint8_t*>(body.data()), body.size(), { { at, length } });
+      dump.Received(reinterpret_cast<const uint8_t*>(prefix.data()), prefix.size(),
+         reinterpret_cast<const uint8_t*>(body.data()), body.size());
+   }
+   const std::vector<uint8_t> dumped = ReadAll(path);
+   std::filesystem::remove(path);
+   const std::string redacted = prefix + "picture=" + std::string(length, '*') + ";";
+   const std::string plain = prefix + body;
+   const size_t first = 13 + 13, second = first + redacted.size() + 13;
+   CHECK(dumped.size() == second + plain.size());
+   CHECK_MSG(dumped.size() >= first + redacted.size() && dumped[13] == '<'
+      && std::string(dumped.begin() + first, dumped.begin() + first + redacted.size()) == redacted, "the path is blanked");
+   CHECK_MSG(dumped.size() == second + plain.size() && std::string(dumped.begin() + second, dumped.end()) == plain,
+      "no spans, the frame as received");
+}
+
 
 GamePost Post(uint8_t first, size_t ops)
 {
@@ -184,6 +214,7 @@ int main()
    TestMachineIds();
    TestNativePaths();
    TestDumpRedactsSensitiveSpans();
+   TestDumpRedactsReceivedSpans();
    TestGameQueueKeepsTheNewestGames();
    TestGameQueueRefusesAnOutgrownGame();
    return ScorbitTest::Summary("authored_table_test");

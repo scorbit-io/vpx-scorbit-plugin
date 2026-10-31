@@ -14,6 +14,7 @@
 #include <chrono>
 #include <deque>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -249,7 +250,8 @@ void TestSession()
 
    // --- Reserved and unknown types are refused, not ignored --------------
    const uint16_t refused[] = { Wire::TYPE_SUBSCRIBE, Wire::TYPE_POLL, Wire::TYPE_READ_DIRECT,
-      Wire::TYPE_WRITE, Wire::TYPE_NVRAM, Wire::TYPE_OVERLAY, Wire::TYPE_STATUS, 999 };
+      Wire::TYPE_WRITE, Wire::TYPE_NVRAM, Wire::TYPE_OVERLAY, Wire::TYPE_STATUS, Wire::TYPE_TOP_SCORES, Wire::TYPE_PLAYERS,
+      Wire::TYPE_PLAYER_PICTURE, Wire::TYPE_PRICING, 999 };
    uint32_t seq = 2000;
    for (const uint16_t type : refused)
    {
@@ -1589,7 +1591,7 @@ void TestAuthoredTableWithAuthoredDaemon()
    Wire::Hello hello;
    CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
    CHECK_MSG((hello.capabilities & Wire::CAP_AUTHORED_TABLES) != 0, "the bindings exist, so Hello offers bit 7");
-   CHECK(hello.protoMinor == 1);
+   CHECK(hello.protoMinor == Wire::PROTO_MINOR);
 
    // --- The authored Declare, 1.1 layout, ahead of any Game ---------------------
    Wire::Message msg;
@@ -1826,6 +1828,621 @@ void TestAuthoredTableWithoutAuthoredDaemon()
    worker.Stop();
 }
 
+// --- Slice 6 read-backs (protocol 1.2) -------------------------------------------
+
+// Every frame of the given direction and type in a wire dump, in order.
+std::vector<std::vector<uint8_t>> DumpedFrames(const std::string& path, uint8_t direction, uint16_t type)
+{
+   std::ifstream in(path, std::ios::binary);
+   const std::vector<uint8_t> dump { std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>() };
+   std::vector<std::vector<uint8_t>> out;
+   for (size_t at = 13; at + 13 <= dump.size();)
+   {
+      const size_t length = dump[at + 9] | (dump[at + 10] << 8) | (dump[at + 11] << 16)
+         | (static_cast<size_t>(dump[at + 12]) << 24);
+      const size_t frame = at + 13;
+      if (frame + length > dump.size())
+         break;
+      if (dump[at] == direction && length >= 6 && (dump[frame + 4] | (dump[frame + 5] << 8)) == type)
+         out.emplace_back(dump.begin() + static_cast<long>(frame), dump.begin() + static_cast<long>(frame + length));
+      at = frame + length;
+   }
+   return out;
+}
+
+// The latest players the worker posted, waiting for a table that passes the test.
+template <typename Pred>
+bool AwaitPlayers(ReadBackChannel& channel, Pred pred, PlayersPost& out)
+{
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+   while (std::chrono::steady_clock::now() < deadline)
+   {
+      if (std::unique_ptr<PlayersPost> p = channel.TakePlayers())
+      {
+         out = *p;
+         if (pred(out))
+            return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+   }
+   return false;
+}
+
+// Waits for the result of one request, keeping any others that arrive in results.
+bool AwaitScores(ReadBackChannel& channel, uint32_t id, TopScoresPost& out, std::deque<TopScoresPost>& results)
+{
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+   while (std::chrono::steady_clock::now() < deadline)
+   {
+      channel.TakeResults(results);
+      for (auto it = results.begin(); it != results.end(); ++it)
+         if (it->requestId == id)
+         {
+            out = std::move(*it);
+            results.erase(it);
+            return true;
+         }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+   }
+   return false;
+}
+
+bool AwaitLeaderboards(const ReadBackChannel& channel, bool want)
+{
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+   while (std::chrono::steady_clock::now() < deadline)
+   {
+      if (channel.Leaderboards() == want)
+         return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+   }
+   return false;
+}
+
+// Sends a daemon request and reads its empty acknowledgement.
+bool DaemonRequest(ScorbitTest::TestPeer& peer, uint16_t type, uint32_t seq, const std::vector<uint8_t>& payload)
+{
+   Wire::Message msg;
+   return peer.Send(type, 0, seq, payload) && peer.ReadOfType(type, msg, WAIT_MS) && msg.header.seq == seq
+      && msg.header.IsResponse() && !msg.header.IsError() && msg.payload.empty();
+}
+
+std::vector<uint8_t> ReadFile(const std::filesystem::path& path)
+{
+   std::ifstream in(path, std::ios::binary);
+   return { std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>() };
+}
+
+void WriteFile(const std::filesystem::path& path, const std::string& bytes)
+{
+   std::ofstream out(path, std::ios::binary);
+   out << bytes;
+}
+
+size_t FilesIn(const std::filesystem::path& dir)
+{
+   std::error_code ec;
+   size_t n = 0;
+   for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+      n++;
+   return n;
+}
+
+constexpr uint32_t READ_BACK_CAPS = Wire::CAP_LEADERBOARDS | Wire::CAP_PLAYERS | Wire::CAP_PLAYER_PICTURES;
+
+// A 1.2 daemon serving all three read-backs: negotiation, a leaderboard result and a refusal,
+// players and their pictures copied before the acknowledgement, the hidden indicator's Status,
+// the dump's redaction, a table switch and the session's end.
+void TestReadBacksWithA12Daemon()
+{
+   const std::string dir = MakeTempDir();
+   const std::string files = MakeTempDir();
+   CHECK(!dir.empty() && !files.empty());
+   if (dir.empty() || files.empty())
+      return;
+   const std::filesystem::path pictures = std::filesystem::path(files) / "pictures";
+   const std::filesystem::path source = std::filesystem::path(files) / "daemon-1-1.jpg";
+   const std::filesystem::path source2 = std::filesystem::path(files) / "daemon-1-2.jpg";
+   WriteFile(source, "\xff\xd8 first picture");
+   WriteFile(source2, "\xff\xd8 second picture");
+   {
+      ScorbitTest::TestPeer peer(dir);
+      CHECK(peer.Listening());
+      if (!peer.Listening())
+         return;
+      const std::string dumpPath = files + "/wire.dump";
+      setenv("SCORBIT_WIRE_DUMP", dumpPath.c_str(), 1);
+
+      FakeSource source1;
+      source1.Set(MakeAuthoredDeclare(1), { });
+      StatusLatch latch;
+      ReadBackChannel channel;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.authoredTables = true;
+      cfg.pictureDir = pictures.string();
+      SocketWorker worker(source1, cfg, Quiet(), nullptr, nullptr, &latch, &channel);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+
+      // --- Negotiation: bits 8 to 10 both ways at minor 2 ------------------------
+      Wire::Hello hello;
+      CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+      CHECK(hello.protoMinor == 2);
+      CHECK_MSG((hello.capabilities & READ_BACK_CAPS) == READ_BACK_CAPS, "caps " + std::to_string(hello.capabilities));
+      CHECK_MSG(channel.Request(1, { }) == 0, "no request before the Declare");
+      Wire::Message msg;
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(AwaitLeaderboards(channel, true));
+
+      // --- A leaderboard request, then its result as a separate message ------------
+      Wire::TopScoresRequest ask { 0, Wire::SCOPE_VARIANT, Wire::PERIOD_DAYS_30, Wire::VPIN_ONLY, 5, "" };
+      const uint32_t id = channel.Request(1, ask);
+      CHECK(id != 0);
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      Wire::TopScoresRequest sent;
+      ask.requestId = id;
+      CHECK(Wire::Decode(msg.payload, sent) && sent == ask);
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+      Wire::TopScores scores { id, Wire::TOP_SCORES_OK, 12, { { 1, 123456789, "Ace Player", "ACE", 3, "2026-10-29T18:04:11Z" } } };
+      CHECK(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 500, Wire::Encode(scores)));
+      TopScoresPost post;
+      std::deque<TopScoresPost> others;
+      CHECK(AwaitScores(channel, id, post, others));
+      CHECK(post.epoch == 1 && post.result == Wire::TOP_SCORES_OK && post.ageS == 12 && post.entries == scores.entries);
+      CHECK_MSG(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 501, Wire::Encode(scores)), "a result for no pending request is still acknowledged");
+
+      // A refusal surfaces as a result the script can read.
+      const uint32_t refused = channel.Request(1, ask);
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, msg.header.seq,
+         Wire::Encode(Wire::ErrorPayload { Wire::ERR_NOT_DECLARED, "no table" })));
+      CHECK(AwaitScores(channel, refused, post, others));
+      CHECK(post.result == SCORES_NOT_DECLARED && post.entries.empty());
+
+      // A malformed TopScores is refused and the session goes on.
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES, 0, 502, ScorbitTest::Unhex("01000000" "09")));
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES, msg, WAIT_MS));
+      CHECK(ErrorCode(msg) == Wire::ERR_MALFORMED);
+
+      // --- Players, the golden frame ---------------------------------------------------
+      CHECK(peer.SendRaw(ScorbitTest::Unhex("51000000" "4200" "0000" "06000000" "02"
+         "01" "0500" "702d313233" "0300" "414345" "0a00" "41636520506c61796572" "0300" "414345" "0000"
+         "02" "0000" "0000" "0000" "0000" "1d00" "68747470733a2f2f73636f726269742e6c696e6b2f632f416243313233")));
+      CHECK(peer.ReadOfType(Wire::TYPE_PLAYERS, msg, WAIT_MS));
+      CHECK(msg.header.seq == 6 && msg.header.IsResponse() && !msg.header.IsError());
+      PlayersPost players;
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[0].Claimed(); }, players));
+      CHECK(players.epoch == 1 && players.slots[0].playerId == "p-123" && players.slots[0].DisplayName() == "ACE");
+      CHECK(players.slots[1].claimDeeplink == "https://scorbit.link/c/AbC123" && !players.slots[1].Claimed());
+      CHECK(players.slots[2].playerId.empty() && players.slots[2].claimDeeplink.empty());
+
+      // --- A picture is copied before the acknowledgement ---------------------------------
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 510, Wire::Encode(Wire::PlayerPicture { 1, "p-123", source.string() })));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
+      const std::filesystem::path copy = players.slots[0].picture;
+      CHECK_MSG(copy.parent_path() == pictures, copy.string());
+      CHECK(ReadFile(copy) == ReadFile(source));
+      std::filesystem::remove(source);
+      CHECK_MSG(std::filesystem::exists(copy), "the copy outlives the daemon's file");
+
+      // The same path again copies nothing; a claim that is not the slot's is ignored.
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 511, Wire::Encode(Wire::PlayerPicture { 1, "p-123", source.string() })));
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 512, Wire::Encode(Wire::PlayerPicture { 1, "p-999", source2.string() })));
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 513, Wire::Encode(Wire::PlayerPicture { 2, "", source2.string() })));
+      CHECK(FilesIn(pictures) == 1);
+      CHECK_MSG(!channel.TakePlayers(), "nothing changed, nothing posted");
+
+      // A new picture supersedes the copy; an empty path removes it.
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 515, Wire::Encode(Wire::PlayerPicture { 1, "p-123", source2.string() })));
+      CHECK(AwaitPlayers(channel, [&copy](const PlayersPost& p) { return !p.slots[0].picture.empty() && p.slots[0].picture != copy.string(); }, players));
+      CHECK_MSG(!std::filesystem::exists(copy), "the superseded copy is deleted");
+      const std::filesystem::path copy2 = players.slots[0].picture;
+      CHECK(ReadFile(copy2) == ReadFile(source2));
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 516, Wire::Encode(Wire::PlayerPicture { 1, "p-123", "" })));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[0].picture.empty(); }, players));
+      CHECK(!std::filesystem::exists(copy2) && FilesIn(pictures) == 0);
+
+      // A file that cannot be copied leaves the slot without a picture, and the session goes on.
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 517, Wire::Encode(Wire::PlayerPicture { 1, "p-123", files + "/missing.jpg" })));
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 518, Wire::Encode(Wire::PlayerPicture { 1, "p-123", source2.string() })));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
+      const std::filesystem::path copy3 = players.slots[0].picture;
+
+      // A Players with the slot claimed by someone else supersedes its picture.
+      Wire::Players next { { { 1, "p-456", "", "Cy", "CY", "" } } };
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 520, Wire::Encode(next)));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[0].playerId == "p-456"; }, players));
+      CHECK(players.slots[0].picture.empty() && players.slots[0].DisplayName() == "Cy" && players.slots[1].claimDeeplink.empty());
+      CHECK_MSG(!std::filesystem::exists(copy3), "a new claim deletes the old claim's picture");
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 521, Wire::Encode(Wire::PlayerPicture { 1, "p-456", source2.string() })));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
+      const std::filesystem::path copy4 = players.slots[0].picture;
+
+      // --- Hidden: the auth change is stored, and nothing is shown ------------------------
+      CHECK(peer.SendRaw(ScorbitTest::Unhex("0d000000" "2100" "0000" "05000000" "04" "00" "0000" "04")));
+      CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS));
+      CHECK(msg.header.seq == 5 && msg.header.IsResponse() && !msg.header.IsError());
+      StatusRecord record;
+      CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return r.haveStatus; }, record));
+      CHECK(record.status.sessionState == Wire::SESSION_HIDDEN && record.status.hasAuthStatus
+         && record.status.authStatus == Wire::AUTH_PAIRED);
+      StatusNotifier notifier(std::chrono::steady_clock::now());
+      CHECK_MSG(notifier.Frame(std::make_unique<StatusRecord>(record), true, std::chrono::steady_clock::now()).empty(),
+         "hidden posts no notification");
+      Wire::Status authOnly = record.status;
+      authOnly.authStatus = Wire::AUTH_FAILED;
+      CHECK(DaemonRequest(peer, Wire::TYPE_STATUS, 530, Wire::Encode(authOnly)));
+      CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return r.status.authStatus == Wire::AUTH_FAILED; }, record));
+      CHECK_MSG(notifier.Frame(std::make_unique<StatusRecord>(record), true, std::chrono::steady_clock::now()).empty(),
+         "an auth change while hidden still posts nothing");
+      CHECK(peer.Send(Wire::TYPE_STATUS, 0, 531, ScorbitTest::Unhex("00" "00" "0000" "06")));
+      CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS));
+      CHECK_MSG(ErrorCode(msg) == Wire::ERR_MALFORMED, "auth_status 6");
+
+      // --- A table switch drops players, pictures and pending requests ---------------------
+      const uint32_t pending = channel.Request(1, ask);
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      DeclareSnapshot nextTable = MakeAuthoredDeclare(2);
+      nextTable.declare.machineUuid = "1b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
+      source1.Set(nextTable, { });
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.epoch == 2; }, players));
+      CHECK(!players.slots[0].Claimed() && players.slots[0].picture.empty());
+      CHECK_MSG(!std::filesystem::exists(copy4), "a table switch deletes the copies");
+      CHECK(AwaitScores(channel, pending, post, others));
+      CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the old table's request ends, under its own epoch");
+      // A request queued under the old epoch after the switch is never sent.
+      channel.Request(1, ask);
+      CHECK_MSG(peer.Silent(300), "a stale request is dropped");
+
+      // --- Disconnect: players gone, pending requests lost, leaderboards unavailable --------
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 540, Wire::Encode(next)));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[0].Claimed(); }, players));
+      const uint32_t lost = channel.Request(2, ask);
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      peer.CloseClient();
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].Claimed(); }, players));
+      CHECK(AwaitScores(channel, lost, post, others));
+      CHECK(post.result == SCORES_LOST && post.epoch == 2);
+      CHECK(AwaitLeaderboards(channel, false));
+      CHECK(channel.Request(2, ask) == 0);
+      worker.Stop();
+      unsetenv("SCORBIT_WIRE_DUMP");
+
+      // --- The dump blanks the deeplink and every picture path, and still decodes ------------
+      const std::vector<std::vector<uint8_t>> dumpedPlayers = DumpedFrames(dumpPath, '<', Wire::TYPE_PLAYERS);
+      CHECK(!dumpedPlayers.empty());
+      if (!dumpedPlayers.empty())
+      {
+         const std::vector<uint8_t>& f = dumpedPlayers.front();
+         CHECK(!Contains(f, "scorbit.link") && Contains(f, "Ace Player") && Contains(f, "p-123"));
+         Wire::Message redacted;
+         Wire::Players back;
+         CHECK(Wire::DecodeBody(f.data() + Wire::LENGTH_BYTES, f.size() - Wire::LENGTH_BYTES, redacted)
+            && Wire::Decode(redacted.payload, back) && back.slots.size() == 2 && back.slots.size() == 2
+            && back.slots[1].claimDeeplink == std::string(29, '*'));
+      }
+      const std::vector<std::vector<uint8_t>> dumpedPictures = DumpedFrames(dumpPath, '<', Wire::TYPE_PLAYER_PICTURE);
+      CHECK(dumpedPictures.size() >= 8);
+      for (const std::vector<uint8_t>& f : dumpedPictures)
+         CHECK_MSG(!Contains(f, files), "a picture path in the dump");
+      unlink(dumpPath.c_str());
+   }
+   std::error_code ec;
+   std::filesystem::remove_all(files, ec);
+}
+
+// An older daemon: no 64 is ever sent and the store stays empty; a newer one without the bits,
+// or a 1.1 one claiming them, has 65 to 67 refused as unknown.
+void TestReadBacksWithOlderDaemons()
+{
+   for (const uint16_t minor : { uint16_t(1), uint16_t(2) })
+   {
+      const std::string dir = MakeTempDir();
+      CHECK(!dir.empty());
+      if (dir.empty())
+         return;
+      ScorbitTest::TestPeer peer(dir);
+      CHECK(peer.Listening());
+      if (!peer.Listening())
+         return;
+
+      FakeSource source;
+      source.Set(MakeAuthoredDeclare(1), { });
+      StatusLatch latch;
+      ReadBackChannel channel;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.authoredTables = true;
+      SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, &latch, &channel);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+
+      Wire::Hello hello;
+      // A 1.1 daemon offering the bits still has no 1.2; a 1.2 daemon without them serves none.
+      const uint32_t caps = Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | (minor == 1 ? READ_BACK_CAPS : 0u);
+      CHECK(AckHello(peer, minor, caps, hello));
+      CHECK((hello.capabilities & READ_BACK_CAPS) == READ_BACK_CAPS);
+      Wire::Message msg;
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+      // A 1.1 Status, trailing byte and all, reads as one without auth_status.
+      CHECK(DaemonRequest(peer, Wire::TYPE_STATUS, 40, ScorbitTest::Unhex(minor == 1 ? "01" "00" "0000" "ff" : "01" "00" "0000")));
+      StatusRecord record;
+      CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return r.haveStatus; }, record));
+      CHECK_MSG(!record.status.hasAuthStatus, "minor " + std::to_string(minor));
+
+      const uint16_t types[] = { Wire::TYPE_TOP_SCORES, Wire::TYPE_PLAYERS, Wire::TYPE_PLAYER_PICTURE };
+      uint32_t seq = 50;
+      for (const uint16_t type : types)
+      {
+         CHECK(peer.Send(type, 0, seq, ScorbitTest::Unhex("00")));
+         CHECK(peer.ReadOfType(type, msg, WAIT_MS));
+         CHECK_MSG(ErrorCode(msg) == Wire::ERR_UNSUPPORTED_TYPE && msg.header.seq == seq, "type " + std::to_string(type));
+         seq++;
+      }
+      CHECK(!channel.Leaderboards());
+      CHECK_MSG(channel.Request(1, { }) == 0, "no request id without a daemon to answer it");
+      CHECK_MSG(peer.Silent(300), "and no TopScoresRequest");
+      CHECK(!channel.TakePlayers());
+      worker.Stop();
+   }
+}
+
+// Leaderboards need a table that plays, not the chooser's empty Declare; and a TopScores that
+// overtakes its request's acknowledgement is still delivered.
+void TestLeaderboardsNeedATable()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   DeclareSnapshot chooser = MakeDeclare("", 0, 0, 0, 0);
+   chooser.declare.tablePath.clear();
+   chooser.epoch = 2;
+   source.Set(chooser, { });
+   ReadBackChannel channel;
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 70, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+   std::this_thread::sleep_for(std::chrono::milliseconds(250));
+   CHECK_MSG(!channel.Leaderboards(), "the chooser's Declare names no table");
+   CHECK_MSG(channel.Request(2, { }) == 0, "no id at the table chooser");
+
+   // A table that plays but names neither a ROM nor a machine cannot be resolved either.
+   DeclareSnapshot anonymous = MakeDeclare("", 0, 0, 0, 0);
+   anonymous.declare.tablePath = "Orbit.vpx";
+   anonymous.epoch = 3;
+   source.Set(anonymous, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 69, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+   std::this_thread::sleep_for(std::chrono::milliseconds(250));
+   CHECK_MSG(!channel.Leaderboards() && channel.Request(3, { }) == 0, "an unnamed table gets no id");
+
+   DeclareSnapshot table = MakeAuthoredDeclare(3);
+   source.Set(table, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(AwaitLeaderboards(channel, true));
+
+   const Wire::TopScoresRequest ask { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 3, "" };
+   const uint32_t id = channel.Request(3, ask);
+   CHECK(id != 0);
+   CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+   const uint32_t requestSeq = msg.header.seq;
+   // The result first, while the worker still waits on the request's acknowledgement.
+   const Wire::TopScores scores { id, Wire::TOP_SCORES_OK, 4, { { 1, 42, "Ace", "A", 0, "" } } };
+   CHECK(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 71, Wire::Encode(scores)));
+   CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, requestSeq, { }));
+   TopScoresPost post;
+   std::deque<TopScoresPost> others;
+   CHECK(AwaitScores(channel, id, post, others));
+   CHECK_MSG(post.result == Wire::TOP_SCORES_OK && post.entries == scores.entries && post.epoch == 3,
+      "a result overtaking the acknowledgement is kept");
+   CHECK(post.received != std::chrono::steady_clock::time_point { });
+
+   // Back at the chooser, leaderboards are unavailable again, already while its Declare awaits an answer.
+   chooser.epoch = 4;
+   source.Set(chooser, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK_MSG(!channel.Leaderboards() && channel.Request(4, ask) == 0, "no id while the chooser's Declare is unanswered");
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(AwaitLeaderboards(channel, false));
+   worker.Stop();
+}
+
+// A hybrid table: its ROM replaces the authored uuid within one epoch. Nothing read for the
+// authored identity carries over; a display-only re-Declare of the same identity keeps it all.
+void TestNewIdentityWithinAnEpoch()
+{
+   const std::string dir = MakeTempDir();
+   const std::string files = MakeTempDir();
+   CHECK(!dir.empty() && !files.empty());
+   if (dir.empty() || files.empty())
+      return;
+   const std::filesystem::path pictures = std::filesystem::path(files) / "pictures";
+   const std::filesystem::path picture = std::filesystem::path(files) / "daemon-1-1.jpg";
+   WriteFile(picture, "\xff\xd8 picture");
+   {
+      ScorbitTest::TestPeer peer(dir);
+      CHECK(peer.Listening());
+      if (!peer.Listening())
+         return;
+
+      FakeSource source;
+      const DeclareSnapshot authored = MakeAuthoredDeclare(1);
+      source.Set(authored, { });
+      ReadBackChannel channel;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.authoredTables = true;
+      cfg.pictureDir = pictures.string();
+      SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+
+      Wire::Hello hello;
+      CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+      Wire::Message msg;
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(AwaitLeaderboards(channel, true));
+
+      // A claimed slot with its picture, and a request awaiting its result.
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 80, Wire::Encode(Wire::Players { { { 1, "p-1", "", "Ace", "A", "" } } })));
+      CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 81, Wire::Encode(Wire::PlayerPicture { 1, "p-1", picture.string() })));
+      PlayersPost players;
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
+      const std::filesystem::path copy = players.slots[0].picture;
+      CHECK(std::filesystem::exists(copy));
+      const uint32_t pending = channel.Request(1, { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 5, "" });
+      CHECK(pending != 0);
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+      // --- Control: the same identity and epoch, re-declared for the display only ---------
+      DeclareSnapshot display = authored;
+      display.surfaceGeneration = 1;
+      source.Set(display, { });
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(peer.Send(Wire::TYPE_PING, 0, 82, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+      CHECK_MSG(!channel.TakePlayers(), "a display-only re-Declare posts no players");
+      CHECK_MSG(std::filesystem::exists(copy), "and keeps the picture");
+      std::deque<TopScoresPost> results;
+      channel.TakeResults(results);
+      CHECK_MSG(results.empty(), "and the request stays pending");
+
+      // --- The ROM replaces the authored uuid, same epoch ---------------------------------
+      DeclareSnapshot rom = MakeDeclare("tom_13", 128, 32, 4, 1);
+      rom.epoch = 1;
+      rom.surfaceGeneration = 1;
+      rom.identity = 1;  // as the API thread bumps it for the ROM taking over
+      source.Set(rom, { });
+      CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+      Wire::Declare declared;
+      CHECK(Wire::Decode(msg.payload, declared) && declared.romId == "tom_13" && declared.machineUuid.empty());
+      // Queued while the worker waits on that Declare's answer, so asked of the authored identity.
+      const uint32_t queued = channel.Request(1, { 0, Wire::SCOPE_GAME, Wire::PERIOD_DAYS_14, Wire::VPIN_ANY, 3, "" });
+      CHECK(queued != 0 && queued != pending);
+      // Made after the API thread saw the ROM, so the new identity's: it must go out, not be lost.
+      const uint32_t fresh = channel.Request(1, { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_DAYS_30, Wire::VPIN_ANY, 4, "" }, 1);
+      CHECK(fresh != 0 && fresh != queued);
+      CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].Claimed(); }, players));
+      CHECK(players.epoch == 1 && players.slots[0].picture.empty());
+      CHECK_MSG(!std::filesystem::exists(copy), "the authored identity's picture is deleted");
+      TopScoresPost post;
+      CHECK(AwaitScores(channel, pending, post, results));
+      CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the pending request is answered lost");
+      CHECK(AwaitScores(channel, queued, post, results));
+      CHECK_MSG(post.result == SCORES_LOST && post.epoch == 1, "the queued request is answered lost");
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+      Wire::TopScoresRequest sentFresh;
+      CHECK_MSG(Wire::Decode(msg.payload, sentFresh) && sentFresh.requestId == fresh && sentFresh.limit == 4,
+         "the new identity's request goes out, and only it");
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+      // A malformed answer whose id still reads ends that request as 7, not pending forever.
+      // The id, then result 9, which no TopScores carries.
+      const std::vector<uint8_t> badResult { static_cast<uint8_t>(fresh), static_cast<uint8_t>(fresh >> 8),
+         static_cast<uint8_t>(fresh >> 16), static_cast<uint8_t>(fresh >> 24), 0x09 };
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES, 0, 85, badResult));
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES, msg, WAIT_MS));
+      CHECK(ErrorCode(msg) == Wire::ERR_MALFORMED);
+      CHECK(AwaitScores(channel, fresh, post, results));
+      CHECK_MSG(post.result == SCORES_MALFORMED && post.entries.empty(), "a malformed answer is result 7");
+      // Too short for an id: refused, and nothing is answered.
+      CHECK(peer.Send(Wire::TYPE_TOP_SCORES, 0, 86, ScorbitTest::Unhex("0100")));
+      CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES, msg, WAIT_MS));
+      CHECK(ErrorCode(msg) == Wire::ERR_MALFORMED);
+      // Its late result is not delivered as the ROM's.
+      CHECK(DaemonRequest(peer, Wire::TYPE_TOP_SCORES, 83,
+         Wire::Encode(Wire::TopScores { pending, Wire::TOP_SCORES_SUPERSEDED, 0, { } })));
+      CHECK(peer.Send(Wire::TYPE_PING, 0, 84, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+      channel.TakeResults(results);
+      CHECK(results.empty());
+      // The ROM's Declare and these two exchanges are all that crossed: the queued request never went out.
+      CHECK_MSG(peer.Silent(300), "no TopScoresRequest for the old identity's queued request");
+      worker.Stop();
+   }
+   std::error_code ec;
+   std::filesystem::remove_all(files, ec);
+}
+
+// An authored table to a daemon without authored_tables is declared without its uuid, so the
+// daemon cannot resolve it: no leaderboards. A ROM table needs only its ROM.
+void TestLeaderboardsNeedAnIdentifiableTable()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   ReadBackChannel channel;
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | READ_BACK_CAPS, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   Wire::Declare declared;
+   CHECK(Wire::Decode(msg.payload, declared) && declared.machineUuid.empty() && declared.romId.empty());
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Send(Wire::TYPE_PING, 0, 90, { }) && peer.ReadOfType(Wire::TYPE_PONG, msg, WAIT_MS));
+   std::this_thread::sleep_for(std::chrono::milliseconds(250));
+   CHECK_MSG(!channel.Leaderboards(), "a downgraded authored Declare names nothing the daemon can resolve");
+   CHECK_MSG(channel.Request(1, { }) == 0, "so RequestTopScores answers 0");
+
+   DeclareSnapshot rom = MakeDeclare("tom_13", 128, 32, 4, 1);
+   rom.epoch = 2;
+   source.Set(rom, { });
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK_MSG(AwaitLeaderboards(channel, true), "a ROM table is identified by its ROM alone");
+   CHECK(channel.Request(2, { 0, Wire::SCOPE_MACHINE, Wire::PERIOD_ALL_TIME, Wire::VPIN_ANY, 1, "" }) != 0);
+   CHECK(peer.ReadOfType(Wire::TYPE_TOP_SCORES_REQUEST, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_TOP_SCORES_REQUEST, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   worker.Stop();
+}
+
+// Per user, under the platform temp or runtime directory.
+void TestPictureDirectoryDefault()
+{
+   const std::filesystem::path dir = DefaultPictureDirectory();
+   CHECK(!dir.empty());
+   CHECK(dir.filename() == "pictures" && dir.parent_path().filename() == "scorbit-vpx");
+}
+
 int main()
 {
    TestSession();
@@ -1848,5 +2465,11 @@ int main()
    TestGameContinuesAcrossReconnect();
    TestInFlightGameKeepsItsId();
    TestAuthoredTableWithoutAuthoredDaemon();
+   TestReadBacksWithA12Daemon();
+   TestReadBacksWithOlderDaemons();
+   TestLeaderboardsNeedATable();
+   TestNewIdentityWithinAnEpoch();
+   TestLeaderboardsNeedAnIdentifiableTable();
+   TestPictureDirectoryDefault();
    return ScorbitTest::Summary("socket_worker_test");
 }

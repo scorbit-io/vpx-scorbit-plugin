@@ -2,7 +2,7 @@
 
 #pragma once
 
-// Wire protocol 1.1 between the Scorbit daemon and this plugin.
+// Wire protocol 1.2 between the Scorbit daemon and this plugin.
 //
 // The daemon listens on a user-scoped local socket and the plugin connects. On
 // the wire every integer is little-endian and a string is a u16 byte count
@@ -28,7 +28,7 @@ namespace Scorbit::Wire
 {
 
 inline constexpr uint16_t PROTO_MAJOR = 1;
-inline constexpr uint16_t PROTO_MINOR = 1;
+inline constexpr uint16_t PROTO_MINOR = 2;
 
 // Largest message accepted from the peer, counted from the first byte of the
 // length field. Sends are held one header below it so a peer that measures the
@@ -60,6 +60,18 @@ enum MsgType : uint16_t
    TYPE_STATUS = 33,
    // Slice 5, plugin to daemon only: one committed batch of an authored table's game calls.
    TYPE_GAME = 48,
+   TYPE_GAME_START_REQUESTED = 49,   // reserved, not in 1.2
+   // Slice 6 (protocol 1.2): the script's read-backs.
+   TYPE_TOP_SCORES_REQUEST = 64,     // plugin to daemon
+   TYPE_TOP_SCORES = 65,             // daemon to plugin, as are 66 and 67
+   TYPE_PLAYERS = 66,
+   TYPE_PLAYER_PICTURE = 67,
+   // Reserved, not in 1.2: answered as any type this side does not implement.
+   TYPE_CREDITS_ADD_REQUESTED = 68,
+   TYPE_CREDITS_STATUS_REQUESTED = 69,
+   TYPE_CREDITS_DROPPED = 70,
+   TYPE_CREDITS_STATUS = 71,
+   TYPE_PRICING = 72,
 };
 
 enum MsgFlags : uint16_t
@@ -103,6 +115,14 @@ enum Capability : uint32_t
    CAP_STATES = 1u << 6,
    // Hello: the plugin has the table-script bindings. HelloAck: the daemon serves authored tables.
    CAP_AUTHORED_TABLES = 1u << 7,
+   // 1.2. Hello: the script object exposes it. HelloAck: the daemon serves it.
+   CAP_LEADERBOARDS = 1u << 8,
+   CAP_PLAYERS = 1u << 9,
+   CAP_PLAYER_PICTURES = 1u << 10,  // needs CAP_PLAYERS on both sides
+   // Reserved, not in 1.2: never set.
+   CAP_START_REQUESTS = 1u << 11,
+   CAP_CREDITS = 1u << 12,
+   CAP_PRICING = 1u << 13,
 };
 
 const char* TypeName(uint16_t type);
@@ -123,6 +143,7 @@ public:
    bool Ok() const { return m_ok; }
    const std::vector<uint8_t>& Data() const { return m_data; }
    std::vector<uint8_t> Take() { return std::move(m_data); }
+   size_t Size() const { return m_data.size(); }
 
 private:
    std::vector<uint8_t> m_data;
@@ -151,6 +172,7 @@ public:
    bool Ok() const { return m_ok; }
    size_t Remaining() const { return m_size - m_pos; }
    bool AtEnd() const { return m_pos == m_size; }
+   size_t Position() const { return m_pos; }
 
 private:
    bool Need(size_t count);
@@ -264,6 +286,13 @@ struct Declare
 
    bool operator==(const Declare&) const = default;
 };
+
+// Two Declares name different tables: another ROM, kind or machine. A hybrid table's ROM
+// replaces its authored uuid within one table start, so this, not the epoch alone, is a switch.
+inline bool NewIdentity(const Declare& was, const Declare& now)
+{
+   return was.romId != now.romId || was.tableKind != now.tableKind || was.machineUuid != now.machineUuid;
+}
 
 // Reserved since_frame_id: the requester holds no frame at all, so the reply
 // must carry pixels whatever since_generation says.
@@ -471,12 +500,26 @@ enum SystemState : uint8_t
    SYSTEM_DEGRADED = 3,
 };
 
+// Appended to Status from minor 2. The contract's own values.
+enum AuthStatus : uint8_t
+{
+   AUTH_NOT_AUTHENTICATED = 0,
+   AUTH_AUTHENTICATING = 1,
+   AUTH_CHECKING_PAIRING = 2,
+   AUTH_UNPAIRED = 3,
+   AUTH_PAIRED = 4,
+   AUTH_FAILED = 5,
+};
+
 // Status request. The reply is empty.
 struct Status
 {
    uint8_t sessionState = SESSION_NONE;
    uint8_t systemState = SYSTEM_OK;
    std::string supportText;    // UTF-8, at most MAX_SUPPORT_TEXT_BYTES, may be empty
+   // 1.2 tail; a 1.0/1.1 daemon sends none.
+   bool hasAuthStatus = false;
+   uint8_t authStatus = AUTH_NOT_AUTHENTICATED;
 
    bool operator==(const Status&) const = default;
 };
@@ -523,6 +566,108 @@ struct GameBatch
    bool operator==(const GameBatch&) const = default;
 };
 
+// --- Slice 6 read-backs (protocol 1.2) ----------------------------------------
+
+// The contract's enum values; the daemon maps them by name.
+enum TopScoresScope : uint8_t { SCOPE_MACHINE = 0, SCOPE_VARIANT = 1, SCOPE_GAME = 2 };
+enum TopScoresPeriod : uint8_t
+{
+   PERIOD_ALL_TIME = 0,
+   PERIOD_DAYS_14 = 1,
+   PERIOD_DAYS_30 = 2,
+   PERIOD_DAYS_90 = 3,
+   PERIOD_DAYS_180 = 4,
+   PERIOD_DAYS_365 = 5,
+};
+enum VpinFilter : uint8_t { VPIN_ANY = 0, VPIN_ONLY = 1, VPIN_REAL_ONLY = 2 };
+enum TopScoresResult : uint8_t
+{
+   TOP_SCORES_OK = 0,
+   TOP_SCORES_NOT_PAIRED = 1,
+   TOP_SCORES_API_ERROR = 2,
+   TOP_SCORES_FAILED = 3,
+   TOP_SCORES_SUPERSEDED = 4,
+};
+enum TopScoreFlags : uint8_t
+{
+   SCORE_IS_VPIN = 1u << 0,
+   SCORE_VERIFIED = 1u << 1,
+   SCORE_NFC_VERIFIED = 1u << 2,
+};
+
+inline constexpr uint8_t MAX_TOP_SCORES = 20;
+inline constexpr size_t MAX_SINCE_BYTES = 32;
+inline constexpr size_t MAX_NAME_BYTES = 64;      // display_name, name, preferred_name
+inline constexpr size_t MAX_INITIALS_BYTES = 8;
+inline constexpr size_t MAX_CREATED_BYTES = 32;
+inline constexpr size_t MAX_CLAIM_DEEPLINK_BYTES = 512;
+inline constexpr uint8_t MAX_PLAYERS = 9;
+
+// The reply is empty; the result comes later as its own TopScores.
+struct TopScoresRequest
+{
+   uint32_t requestId = 0;
+   uint8_t scope = SCOPE_MACHINE;
+   uint8_t period = PERIOD_ALL_TIME;
+   uint8_t vpinFilter = VPIN_ANY;
+   uint8_t limit = 10;              // 1 to MAX_TOP_SCORES
+   std::string since;               // "" or UTC ISO-8601, at most MAX_SINCE_BYTES
+
+   bool operator==(const TopScoresRequest&) const = default;
+};
+
+struct TopScoreEntry
+{
+   uint16_t rank = 0;
+   int64_t highScore = 0;
+   std::string displayName;
+   std::string initials;
+   uint8_t flags = 0;               // TopScoreFlags
+   std::string created;
+
+   bool operator==(const TopScoreEntry&) const = default;
+};
+
+struct TopScores
+{
+   uint32_t requestId = 0;
+   uint8_t result = TOP_SCORES_OK;
+   uint32_t ageS = 0;               // seconds since the daemon fetched it
+   std::vector<TopScoreEntry> entries; // empty unless result is ok
+
+   bool operator==(const TopScores&) const = default;
+};
+
+// A slot is claimed exactly when playerId is not empty.
+struct PlayerSlot
+{
+   uint8_t player = 0;              // 1 to MAX_PLAYERS
+   std::string playerId;
+   std::string preferredName;
+   std::string name;
+   std::string initials;
+   std::string claimDeeplink;       // unclaimed slots only; sensitive
+
+   bool operator==(const PlayerSlot&) const = default;
+};
+
+// The whole slot table, every time; a slot not listed is empty.
+struct Players
+{
+   std::vector<PlayerSlot> slots;   // ascending by player, each at most once
+
+   bool operator==(const Players&) const = default;
+};
+
+struct PlayerPicture
+{
+   uint8_t player = 0;
+   std::string playerId;            // the claim the picture belongs to
+   std::string path;                // absolute local JPEG path, "" for none; sensitive
+
+   bool operator==(const PlayerPicture&) const = default;
+};
+
 std::vector<uint8_t> Encode(const Hello& v);
 std::vector<uint8_t> Encode(const HelloAck& v);
 std::vector<uint8_t> Encode(const FrameRequest& v);
@@ -541,6 +686,12 @@ std::vector<uint8_t> Encode(const OverlayRequest& v);
 std::vector<uint8_t> Encode(const OverlayControl& v);
 std::vector<uint8_t> Encode(const Status& v);
 std::vector<uint8_t> Encode(const GameBatch& v);
+// These four refuse (empty) what their Decode refuses. When sensitive is given, it receives the
+// spans of the claim deeplinks or the path.
+std::vector<uint8_t> Encode(const TopScoresRequest& v);
+std::vector<uint8_t> Encode(const TopScores& v);
+std::vector<uint8_t> Encode(const Players& v, std::vector<SensitiveSpan>* sensitive = nullptr);
+std::vector<uint8_t> Encode(const PlayerPicture& v, std::vector<SensitiveSpan>* sensitive = nullptr);
 
 // The layout the peer negotiated: minor 0 stops after identify_format, 1 appends the slice 5
 // fields. When sensitive is given, it receives the spans of the three path strings.
@@ -567,10 +718,22 @@ bool Decode(const std::vector<uint8_t>& payload, WriteReply& out);
 bool Decode(const std::vector<uint8_t>& payload, NvRamParameters& out);
 bool Decode(const std::vector<uint8_t>& payload, OverlayRequest& out);
 bool Decode(const std::vector<uint8_t>& payload, OverlayControl& out);
-// Also false when support_text is over MAX_SUPPORT_TEXT_BYTES.
-bool Decode(const std::vector<uint8_t>& payload, Status& out);
+// Also false when support_text is over MAX_SUPPORT_TEXT_BYTES. From peerMinor 2 the auth_status
+// tail is read when present, and an unknown value is false; below it, trailing bytes are ignored.
+bool Decode(const std::vector<uint8_t>& payload, Status& out, uint16_t peerMinor = PROTO_MINOR);
 // False unless the count is 1 to MAX_GAME_OPS, every kind is known, and game_start is first
 // and game_end last when present.
 bool Decode(const std::vector<uint8_t>& payload, GameBatch& out);
+// False for an enum out of range, a limit of 0 or over MAX_TOP_SCORES, an over-long string, more
+// entries than MAX_TOP_SCORES or any with a result other than ok, or slots not 1 to 9 ascending.
+bool Decode(const std::vector<uint8_t>& payload, TopScoresRequest& out);
+bool Decode(const std::vector<uint8_t>& payload, TopScores& out);
+bool Decode(const std::vector<uint8_t>& payload, Players& out, std::vector<SensitiveSpan>* sensitive = nullptr);
+bool Decode(const std::vector<uint8_t>& payload, PlayerPicture& out, std::vector<SensitiveSpan>* sensitive = nullptr);
+
+// The sensitive bytes of a daemon request, for a wire dump: the claim deeplinks of a Players and
+// the path of a PlayerPicture. One of those that does not decode is sensitive whole. Offsets count
+// from the first payload byte.
+std::vector<SensitiveSpan> ReceivedSensitive(const Message& msg);
 
 }

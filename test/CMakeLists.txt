@@ -48,6 +48,12 @@ target_link_libraries(authored_table_test PRIVATE scorbit-transport)
 target_compile_options(authored_table_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME authored_table COMMAND authored_table_test)
 
+# Pure, plus temp files: the script's read-back store and the player picture copies (protocol 1.2).
+add_executable(read_back_test ReadBackTest.cpp Check.h)
+target_link_libraries(read_back_test PRIVATE scorbit-transport)
+target_compile_options(read_back_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME read_back COMMAND read_back_test)
+
 if(NOT WIN32)
    # The peer speaks POSIX sockets directly. The worker's Windows path is
    # written but nothing in CI compiles it yet, so this test does not claim to
