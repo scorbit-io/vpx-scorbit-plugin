@@ -137,3 +137,42 @@ jobs:
           path: build/stage/scorbit
           if-no-files-found: error
           retention-days: 14
+
+  # The full plugin on Linux, which is the only build of the X11 status light. The xcb
+  # headers are a build dependency only: the libraries are loaded at run time.
+  linux-plugin:
+    name: linux-${{ matrix.arch }}-plugin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     arch: x64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install the xcb headers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --no-tests=error --output-on-failure
+
+      - name: Verify the staged plugin
+        run: |
+          so="build/stage/scorbit/$(sed -n 's/^linux\.${{ matrix.arch }} = "\(.*\)"$/\1/p' plugin.cfg)"
+          test -f "$so" || { echo "plugin.cfg's linux.${{ matrix.arch }} library was not staged"; exit 1; }
+          readelf -d "$so" | grep NEEDED
+          # Loaded with dlopen, so a machine without X can still load the plugin.
+          if readelf -d "$so" | grep -q 'NEEDED.*libxcb'; then echo "$so links libxcb"; exit 1; fi
+          # ...and the light is built in: it names the library it loads.
+          grep -q 'libxcb-shape.so.0' "$so" || { echo "$so has no X11 status light"; exit 1; }
