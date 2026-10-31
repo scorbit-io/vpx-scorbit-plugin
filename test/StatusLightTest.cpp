@@ -133,24 +133,6 @@ void TestNoDaemonAfterTheGrace()
    CHECK_MSG(LightFor(waiting, T0, none) == none, "a session awaiting its first Status keeps the light");
 }
 
-void TestClaimWatch()
-{
-   ClaimWatch watch;
-   ClaimWatch::Ids ids;
-   ids[0] = "p-1";
-   CHECK_MSG(!watch.Update(ids), "a table already claimed learns, never flashes");
-   CHECK(!watch.Update(ids));
-   ids[1] = "p-2";
-   CHECK_MSG(watch.Update(ids), "a new claim flashes");
-   ids[1] = "p-3";
-   CHECK_MSG(watch.Update(ids), "a different player in a slot flashes");
-   ids[1].clear();
-   CHECK_MSG(!watch.Update(ids), "a slot freed does not");
-   watch.Reset();
-   ids[2] = "p-4";
-   CHECK_MSG(!watch.Update(ids), "after a reset the table is learned again");
-}
-
 }
 
 int main()
@@ -162,6 +144,5 @@ int main()
    TestUnknownValues();
    TestHiddenShowsNothing();
    TestNoDaemonAfterTheGrace();
-   TestClaimWatch();
    return ScorbitTest::Summary("status_light_test");
 }

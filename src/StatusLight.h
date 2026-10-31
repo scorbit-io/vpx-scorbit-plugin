@@ -10,9 +10,7 @@
 
 #include "StatusNotice.h"
 
-#include <array>
 #include <cstdint>
-#include <string>
 
 namespace Scorbit
 {
@@ -77,22 +75,5 @@ inline constexpr size_t RING_SEGMENTS = 30;
 // or a loss younger than the notifications' grace, keeps what is shown, as the notifier does:
 // a quick reconnect into the same state is not a transition.
 LightView LightFor(const StatusRecord& record, StatusNotifier::Clock::time_point now, const LightView& shown);
-
-// Spots a new claim, for the ring's flash: a slot whose player id appears or changes.
-class ClaimWatch final
-{
-public:
-   static constexpr size_t SLOTS = 9;
-   using Ids = std::array<std::string, SLOTS>;
-
-   // True when any slot holds a player id it did not hold last time. The first call after
-   // Reset only learns the table, so a table that starts with players claimed does not flash.
-   bool Update(const Ids& ids);
-   void Reset() { m_known = false; }
-
-private:
-   Ids m_ids;
-   bool m_known = false;
-};
 
 }

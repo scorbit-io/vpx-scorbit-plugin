@@ -319,7 +319,7 @@ private:
    bool m_loggedPictureSweep = false;    // once per plugin load
    PlayerTable m_players;
    bool m_playersSnapshotDue = false;    // the next Players is the connection's snapshot
-   uint32_t m_playerSnapshots = 0;
+   uint32_t m_claims = 0;                // PlayersPost::claims
 };
 
 }

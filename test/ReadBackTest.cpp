@@ -125,22 +125,22 @@ void TestStatePlayers()
    post.slots[0].playerId = "p-1";
    post.slots[0].name = "Ace Player";
    post.slots[8].claimDeeplink = "link";
-   post.snapshots = 1;
+   post.claims = 1;
    channel.PostPlayers(post);
    state.Drain(channel, Clock::now());
    CHECK(state.Slot(1)->Claimed() && state.Slot(1)->DisplayName() == "Ace Player" && state.Slot(9)->claimDeeplink == "link");
 
    post.epoch = 0;
    post.slots[0].playerId = "p-old";
-   post.snapshots = 2;
+   post.claims = 2;
    channel.PostPlayers(post);
    state.Drain(channel, Clock::now());
    CHECK_MSG(state.Slot(1)->playerId == "p-1", "players from another table are dropped");
-   CHECK_MSG(state.PlayerSnapshots() == 2, "but their snapshot count, which is the connection's, is kept");
+   CHECK_MSG(state.Claims() == 2, "but their claim count, which is not the table's, is kept");
 
    state.NewEpoch(2);
    CHECK(!state.Slot(1)->Claimed() && state.Slot(9)->claimDeeplink.empty());
-   CHECK_MSG(state.PlayerSnapshots() == 2, "a new table keeps the connection's snapshot count");
+   CHECK_MSG(state.Claims() == 2, "a new table keeps the claim count");
 }
 
 void Write(const fs::path& path, const std::string& bytes)

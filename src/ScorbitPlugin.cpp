@@ -78,8 +78,7 @@ static void FilterControllers(std::vector<ControllerDef>& items)
 }
 
 static LightView statusLight;
-static ClaimWatch statusClaims;
-static uint32_t statusSnapshots = 0;
+static uint32_t statusClaims = 0;
 
 // API thread. The status light shows while any table plays, PinMAME or not, and follows its
 // settings mid-game; called every tick, so a change applies within one.
@@ -90,24 +89,10 @@ static void ApplyStatusWindow()
    // Followed while hidden too, so the light never comes back showing a stale state.
    statusLight = LightFor(vpxSession->ScriptStatus(), std::chrono::steady_clock::now(), statusLight);
    const int corner = (vpxSession->PlayerRunning() && setShowStatus_Get()) ? setStatusCorner_Get() : 0;
-   bool claimed = false;
-   if (corner != 0)
-   {
-      ClaimWatch::Ids ids;
-      const ReadBackState& readBack = vpxSession->ScriptReadBack();
-      // A new table or a new connection: what arrives next was claimed already, so it is learned.
-      if (readBack.PlayerSnapshots() != statusSnapshots)
-      {
-         statusSnapshots = readBack.PlayerSnapshots();
-         statusClaims.Reset();
-      }
-      for (size_t i = 0; i < ids.size(); i++)
-         if (const PlayerView* p = readBack.Slot(static_cast<double>(i + 1)))
-            ids[i] = p->playerId;
-      claimed = statusClaims.Update(ids);
-   }
-   else
-      statusClaims.Reset();
+   // The worker counts claims as they are made, so one is never mistaken for one made before.
+   const uint32_t claims = vpxSession->ScriptReadBack().Claims();
+   const bool claimed = claims != statusClaims && corner != 0;
+   statusClaims = claims;
    if (UpdateStatusWindow(corner, statusLight, setStatusOpacity_Get() / 100.0, claimed))
       LOGI("Status light: corner "s + std::to_string(corner));
 }

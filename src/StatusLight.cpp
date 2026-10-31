@@ -89,15 +89,4 @@ LightView LightFor(const StatusRecord& record, StatusNotifier::Clock::time_point
    return view;
 }
 
-bool ClaimWatch::Update(const Ids& ids)
-{
-   bool claimed = false;
-   if (m_known)
-      for (size_t i = 0; i < SLOTS; i++)
-         claimed = claimed || (!ids[i].empty() && ids[i] != m_ids[i]);
-   m_ids = ids;
-   m_known = true;
-   return claimed;
-}
-
 }
