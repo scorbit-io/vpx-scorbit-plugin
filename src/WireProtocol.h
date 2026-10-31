@@ -282,7 +282,8 @@ struct Declare
    std::string machineUuid;         // lower-case canonical uuid
    std::string tableFullPath;
    std::string vpxAppPath;
-   std::string prefsPath;
+   std::string prefsPath;           // VPX's preference directory (its m_prefPath, with a trailing separator), in
+                                    // every layout: never the VPinballX.ini file, which may live elsewhere
 
    bool operator==(const Declare&) const = default;
 };
