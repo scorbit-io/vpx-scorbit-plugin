@@ -7,7 +7,8 @@
 ' The table needs:
 '   - the table object named Table1 (rename the event subs if yours differs);
 '   - a Timer named ScorbitTimer, disabled in the editor (the script sets its interval and starts it);
-'   - its own game logic calling StartGame, AddScore, NextBall and EndGame below.
+'   - its own game logic calling StartGame, AddScore, ScorbitModeStarted, ScorbitModeEnded,
+'     NextBall and EndGame below.
 ' Replace ScorbitMachine with the uuid of your table's Scorbit machine.
 
 Option Explicit
@@ -74,6 +75,10 @@ Sub StartGame(players)
    Next
    If IsObject(Scorbit) Then
       Scorbit.SetGameStarted 0              ' 0 start button, 1 lobby
+      ' A player exists for Scorbit once it has a score, so every one in the game gets one now.
+      For i = 1 To PlayersInGame
+         Scorbit.SetScore i, 0
+      Next
       Scorbit.SetActivePlayer 1
       Scorbit.SetCurrentBall 1
       ScorbitPending = True
@@ -89,10 +94,20 @@ Sub AddScore(points)
    End If
 End Sub
 
-' Called when a mode starts or completes, e.g. ScorbitMode "MB:Multiball", False
-Sub ScorbitMode(mode, completed)
+' Called when a mode starts, e.g. ScorbitModeStarted "MB:Multiball"
+Sub ScorbitModeStarted(mode)
    If IsObject(Scorbit) Then
-      If completed Then Scorbit.SetModeCompleted mode Else Scorbit.AddMode mode
+      Scorbit.AddMode mode
+      ScorbitPending = True
+   End If
+End Sub
+
+' Called when a mode ends; completed when the player beat it. A completed mode is a one-time
+' event for achievements, not a state, so the mode is removed either way.
+Sub ScorbitModeEnded(mode, completed)
+   If IsObject(Scorbit) Then
+      If completed Then Scorbit.SetModeCompleted mode
+      Scorbit.RemoveMode mode
       ScorbitPending = True
    End If
 End Sub
