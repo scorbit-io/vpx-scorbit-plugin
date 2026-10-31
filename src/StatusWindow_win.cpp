@@ -27,12 +27,16 @@ using Clock = std::chrono::steady_clock;
 constexpr UINT_PTR TIMER_ID = 1;
 constexpr UINT TIMER_MS = 25;      // under the shortest dark phase of a dot (100 ms)
 constexpr double INSET_PT = 16;
+// The ring's pulse in this many opacity steps: about 10 redraws a second while it pulses, where
+// every byte value would redraw on every tick.
+constexpr int RING_STEPS = 16;
 constexpr wchar_t CLASS_NAME[] = L"ScorbitStatusLight";
 
 HWND window = nullptr;
 ATOM windowClass = 0;
 HWINEVENTHOOK foregroundHook = nullptr;
 bool inFront = false;
+HWND lastFront = nullptr;  // VPX's window in front when the light was last raised
 
 LightView shown;
 Clock::time_point shownSince;
@@ -48,6 +52,68 @@ double drawnScale = 0;
 POINT drawnAt { };
 BYTE drawnAlpha = 0;
 LightFrame frame;
+
+// Kept between frames and remade only when the frame's size changes.
+HDC memory = nullptr;
+HBITMAP bitmap = nullptr;
+HGDIOBJ previousBitmap = nullptr;
+void* bits = nullptr;
+int bitsSize = 0;
+
+void ReleaseSurface()
+{
+   if (memory != nullptr && previousBitmap != nullptr)
+      SelectObject(memory, previousBitmap);
+   if (bitmap != nullptr)
+      DeleteObject(bitmap);
+   if (memory != nullptr)
+      DeleteDC(memory);
+   memory = nullptr;
+   bitmap = nullptr;
+   previousBitmap = nullptr;
+   bits = nullptr;
+   bitsSize = 0;
+}
+
+bool Surface(HDC screen, int size)
+{
+   if (memory != nullptr && bitsSize == size)
+      return true;
+   ReleaseSurface();
+   BITMAPINFO info { };
+   info.bmiHeader.biSize = sizeof(info.bmiHeader);
+   info.bmiHeader.biWidth = size;
+   info.bmiHeader.biHeight = -size; // top-down rows, as the frame holds them
+   info.bmiHeader.biPlanes = 1;
+   info.bmiHeader.biBitCount = 32;
+   info.bmiHeader.biCompression = BI_RGB;
+   memory = CreateCompatibleDC(screen);
+   bitmap = memory != nullptr ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+   if (bitmap == nullptr || bits == nullptr)
+   {
+      ReleaseSurface();
+      return false;
+   }
+   previousBitmap = SelectObject(memory, bitmap);
+   bitsSize = size;
+   return true;
+}
+
+// GetDpiForWindow is Windows 10 1607 and later; imported by name so older Windows still loads the plugin.
+UINT WindowDpi(HWND hwnd)
+{
+   using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+   static const auto getDpiForWindow
+      = reinterpret_cast<GetDpiForWindowFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow")));
+   if (getDpiForWindow != nullptr)
+      if (const UINT dpi = getDpiForWindow(hwnd); dpi != 0)
+         return dpi;
+   const HDC screen = GetDC(nullptr);
+   const int dpi = screen != nullptr ? GetDeviceCaps(screen, LOGPIXELSX) : 0;
+   if (screen != nullptr)
+      ReleaseDC(nullptr, screen);
+   return dpi > 0 ? static_cast<UINT>(dpi) : 96;
+}
 
 HINSTANCE ThisModule()
 {
@@ -75,8 +141,7 @@ void Draw(bool force)
    const HWND playfield = PlayfieldWindow();
    if (playfield == nullptr)
       return;
-   const UINT dpi = GetDpiForWindow(playfield);
-   const double scale = (dpi == 0 ? 96 : dpi) / 96.0;
+   const double scale = WindowDpi(playfield) / 96.0;
    MONITORINFO monitor { };
    monitor.cbSize = sizeof(monitor);
    if (!GetMonitorInfoW(MonitorFromWindow(playfield, MONITOR_DEFAULTTOPRIMARY), &monitor))
@@ -94,7 +159,9 @@ void Draw(bool force)
          flashSeconds = -1;
       }
    }
-   const LightPhase phase = PhaseAt(shown, seconds, flashSeconds);
+   LightPhase phase = PhaseAt(shown, seconds, flashSeconds);
+   if (shown.ring == LightRing::Rainbow)
+      phase.ring = static_cast<uint8_t>(std::lround(std::round(phase.ring * (RING_STEPS - 1) / 255.0) * 255.0 / (RING_STEPS - 1)));
 
    const int size = std::max(1, static_cast<int>(std::lround(LightGeometry::DIAMETER * scale)));
    const int inset = static_cast<int>(std::lround(INSET_PT * scale));
@@ -107,22 +174,14 @@ void Draw(bool force)
       return;
    Rasterize(shown, phase, scale, frame);
 
-   BITMAPINFO info { };
-   info.bmiHeader.biSize = sizeof(info.bmiHeader);
-   info.bmiHeader.biWidth = frame.size;
-   info.bmiHeader.biHeight = -frame.size; // top-down rows, as the frame holds them
-   info.bmiHeader.biPlanes = 1;
-   info.bmiHeader.biBitCount = 32;
-   info.bmiHeader.biCompression = BI_RGB;
-   void* bits = nullptr;
    const HDC screen = GetDC(nullptr);
-   const HDC memory = CreateCompatibleDC(screen);
-   const HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-   if (memory != nullptr && bitmap != nullptr && bits != nullptr)
+   if (screen == nullptr)
+      return;
+   if (Surface(screen, frame.size))
    {
       // Premultiplied 0xAARRGGBB is the byte order a 32-bit DIB holds: B, G, R, A.
       std::memcpy(bits, frame.pixels.data(), frame.pixels.size() * sizeof(uint32_t));
-      const HGDIOBJ previous = SelectObject(memory, bitmap);
+      GdiFlush();
       SIZE extent { frame.size, frame.size };
       POINT origin { 0, 0 };
       BLENDFUNCTION blend { AC_SRC_OVER, 0, shownAlpha, AC_SRC_ALPHA };
@@ -134,30 +193,31 @@ void Draw(bool force)
          drawnAt = at;
          drawnAlpha = shownAlpha;
       }
-      SelectObject(memory, previous);
    }
-   if (bitmap != nullptr)
-      DeleteObject(bitmap);
-   if (memory != nullptr)
-      DeleteDC(memory);
    ReleaseDC(nullptr, screen);
 }
 
 // Shown only while VPX is the application in front, so it never sits over another one.
 void FollowForeground()
 {
-   const bool front = PlayfieldWindow() != nullptr;
-   if (front == inFront)
-      return;
-   inFront = front;
-   if (front)
+   const HWND front = PlayfieldWindow();
+   if (front == nullptr)
    {
-      // Raised again in case VPX's own topmost fullscreen window went above it.
-      SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-      Draw(true);
+      if (inFront)
+         ShowWindow(window, SW_HIDE);
+      inFront = false;
+      lastFront = nullptr;
+      return;
    }
-   else
-      ShowWindow(window, SW_HIDE);
+   const bool appearing = !inFront;
+   inFront = true;
+   if (appearing)
+      Draw(true); // the new frame, in place, before it shows: never the last one where it was
+   // Raised again whenever VPX brings another window forward, which may itself be topmost
+   // (a fullscreen playfield, a backglass).
+   if (appearing || front != lastFront)
+      SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | (appearing ? SWP_SHOWWINDOW : 0));
+   lastFront = front;
 }
 
 void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD)
@@ -197,7 +257,9 @@ void Hide()
    if (windowClass != 0)
       UnregisterClassW(CLASS_NAME, ThisModule());
    windowClass = 0;
+   ReleaseSurface();
    inFront = false;
+   lastFront = nullptr;
    drawn = false;
    flashing = false;
 }
