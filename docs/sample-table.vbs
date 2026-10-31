@@ -26,8 +26,10 @@ Dim PlayersInGame, CurrentPlayer, CurrentBall, GameInProgress
 Dim Score(4)            ' 1 to MaxPlayers; 0 unused
 Dim PlayerLabel(4)      ' what the table shows for each player: a Scorbit name once claimed
 Dim LeaderboardText     ' for the table's attract mode
+Dim LeaderboardId       ' the request in flight, or 0
+Dim LeaderboardTicks    ' ticks until the next request; while one is in flight, ticks since it was made
 PlayersInGame = 1 : CurrentPlayer = 1 : CurrentBall = 1 : GameInProgress = False
-LeaderboardText = ""
+LeaderboardText = "" : LeaderboardId = 0 : LeaderboardTicks = 0
 
 ' --- Gameplay settings, as Table Options ---------------------------------------------------
 ' Settings that change how a score is made belong in Table Options, so every player can see
@@ -117,7 +119,10 @@ Sub EndGame()
    If IsObject(Scorbit) Then
       Scorbit.SetGameFinished                ' commits too
       ScorbitPending = False
+      ' A request from before the game would answer without it: drop it and ask again.
+      If LeaderboardId <> 0 Then Scorbit.ReleaseTopScores LeaderboardId
    End If
+   LeaderboardId = 0
    LeaderboardTicks = 20                     ' refresh the leaderboard in 10 s, with this game in it
 End Sub
 
@@ -133,9 +138,6 @@ Function ScorbitApiLevel()
    If Err.Number <> 0 Then ScorbitApiLevel = 1
    On Error Goto 0
 End Function
-
-Dim LeaderboardId : LeaderboardId = 0
-Dim LeaderboardTicks : LeaderboardTicks = 0   ' ticks until the next request; while waiting, ticks since this one
 
 Sub ScorbitTimer_Timer()
    If Not IsObject(Scorbit) Then Exit Sub
