@@ -1,7 +1,7 @@
 # A plugin-owned status window (design, SB-6004)
 
-Status: implemented on macOS (see "What the light shows"); Windows and X11 come next. The macOS
-prototype's measurements are under "Prototype results".
+Status: implemented on macOS and Windows (see "What the light shows"); X11 comes next. The
+measurements are under "Prototype results, macOS" and "Results, Windows".
 
 ## Why
 
@@ -189,6 +189,33 @@ Three findings changed the design above:
 Not yet measured, left to the macOS implementation: exclusive fullscreen, switching to another
 application and back mid-game, a second display, frame times with and without the window, and the
 quit path from VPX's own menu rather than an Apple event.
+
+## Results, Windows (2026-10-31)
+
+VPX rev 6461, x64 and x86 builds, in a Parallels Windows 11 VM on Apple silicon, playing Theatre of Magic with
+`StatusCorner = 2` and a protocol 1.2 daemon that reports the device unpaired. Seven sessions, windowed and borderless
+fullscreen, with the daemon stopped and restarted in the windowed ones.
+
+- **The light follows the state.** It shows the dark disc, red ring, red and blue dots and `!` for an unpaired
+  daemon. While the daemon is stopped it shows dark dots in a solid blue ring with `!`, and it returns when the
+  daemon does. This was checked by eye on the VM's screen.
+- **Placement.** The window is topmost and layered, 44 by 44 logical pixels, inset from the top-right corner, and
+  above VPX's playfield in z-order.
+- **No focus taken.** In every session, every `Playfield window lost focus` line names another window: the test
+  harness's own consoles, or the Windows firewall prompt for the daemon. None names the light.
+- **Clean quit.** A close request unloads the plugin, logs `Player closed`, and VPX exits with code 0.
+- **One fix came from the run.** The window ignores `WM_CLOSE`. A close sent to every window of the process
+  (taskkill, logoff) would otherwise destroy it behind the plugin's back.
+
+Not measured: exclusive fullscreen (VPX's `PlayfieldFullScreen = 2`). In the VM, VPX fell back to a 1024x768 mode and
+never took the display, so the light's behaviour over an exclusive swap chain still needs real Windows hardware. The
+same goes for the independent-flip latency risk.
+
+Measuring this in a VM has pitfalls that each look like a defect in the light:
+- a console window opened mid-session takes the foreground, which pauses VPX and hides the light;
+- the host's VM screen capture and a GDI capture inside the guest both return black for VPX's GPU-presented frames;
+- a close sent from a remote shell never reaches the interactive session's windows;
+- the VM pauses itself when idle.
 
 ## Order
 
