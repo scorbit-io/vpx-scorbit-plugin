@@ -304,6 +304,38 @@ table ends, and players and pictures also when the connection to the daemon ends
 that does not serve them leaves every member at its "none" value, so a script written for
 them still runs.
 
+### Gameplay settings
+
+Scores are only comparable between games played under the same rules. Expose every setting
+that changes how a score is made as a VPX Table Option: balls per game, extra balls,
+difficulty, tilt sensitivity, rule toggles. Players then see them in VPX's options menu, and
+the table's settings file records them.
+
+```vbscript
+Sub Table1_OptionEvent(ByVal eventId)   ' 0 table started, 1 option changed, 3 menu closed
+   OptionBallsPerGame = Table1.Option("Balls per game", 3, 5, 1, 3, 0, Array("3", "4", "5"))
+End Sub
+```
+
+- `Table.Option(name, min, max, step, default, unit[, labels])` registers the option the first
+  time it is read and returns its value. `unit` is 0 for a plain number, or 1 to show a fraction
+  from 0 to 1 as a percentage. With `labels`, `step` must be 1, `min` and `max` whole numbers, and
+  there must be one label per value.
+- Read options in `<TableName>_OptionEvent`, not in `_Init`: VPX raises the option event after
+  `_Init`, and again whenever the player changes an option.
+- Apply a changed setting at the next game start, never during a game.
+- Keep option names stable. VPX stores each value under its option's name, so renaming an option
+  loses what players have set. Names that differ only in spaces or punctuation are the same
+  option.
+
+This is best effort. An option left at its default may have no entry in the settings file, and
+VPX can be pointed at another settings file, so the file alone does not always give the values a
+game was played under.
+
+[`docs/sample-table.vbs`](docs/sample-table.vbs) puts it all together: a guarded
+`Scorbit.Table`, `Declare`, the game calls, a balls-per-game option, and the reading-back
+members polled from a timer.
+
 ## Layout
 
 ```
