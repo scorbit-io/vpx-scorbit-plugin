@@ -47,6 +47,7 @@ BYTE shownAlpha = 255;
 
 // What was last handed to UpdateLayeredWindow, to draw again only on a change.
 bool drawn = false;
+LightView drawnView;
 LightPhase drawnPhase;
 double drawnScale = 0;
 POINT drawnAt { };
@@ -170,7 +171,7 @@ void Draw(bool force)
    at.x = (shownCorner == 1 || shownCorner == 3) ? area.left + inset : area.right - inset - size;
    at.y = (shownCorner == 3 || shownCorner == 4) ? area.bottom - inset - size : area.top + inset;
 
-   if (!force && drawn && phase == drawnPhase && scale == drawnScale && at.x == drawnAt.x && at.y == drawnAt.y && shownAlpha == drawnAlpha)
+   if (!force && drawn && shown == drawnView && phase == drawnPhase && scale == drawnScale && at.x == drawnAt.x && at.y == drawnAt.y && shownAlpha == drawnAlpha)
       return;
    Rasterize(shown, phase, scale, frame);
 
@@ -188,6 +189,7 @@ void Draw(bool force)
       if (UpdateLayeredWindow(window, screen, &at, &extent, memory, &origin, 0, &blend, ULW_ALPHA))
       {
          drawn = true;
+         drawnView = shown;
          drawnPhase = phase;
          drawnScale = scale;
          drawnAt = at;
