@@ -99,6 +99,12 @@ void TestUnauthorizedIsRedLikeTheDevice()
       CHECK_MSG(SessionIs(v, { 255, 0, 0 }), "no credentials outrank the game state");
       CHECK((v.ring == LightRing::Solid && v.ringRgb == LightRgb { 255, 0, 0 } && v.glyph == LightGlyph::Problem));
    }
+   // Unpaired by the authentication state alone, with the system state still ok.
+   const LightView unpaired = For(WithAuth(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, Wire::AUTH_UNPAIRED));
+   CHECK_MSG(SystemIs(unpaired, { 255, 0, 0 }) && SessionIs(unpaired, { 0, 255, 0 }), "the system dot says unpaired, the session stands");
+   CHECK((unpaired.ring == LightRing::Solid && unpaired.ringRgb == LightRgb { 255, 0, 0 } && unpaired.glyph == LightGlyph::Problem));
+   CHECK_MSG(SystemIs(For(WithAuth(Wire::SESSION_NONE, Wire::SYSTEM_OFFLINE, Wire::AUTH_UNPAIRED)), { 255, 165, 0 }),
+      "a system dot already showing a problem keeps it");
    for (uint8_t auth : { Wire::AUTH_AUTHENTICATING, Wire::AUTH_CHECKING_PAIRING, Wire::AUTH_PAIRED })
       CHECK(SessionIs(For(WithAuth(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, auth)), { 0, 255, 0 }));
    CHECK_MSG(SessionIs(For(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK)), { 0, 255, 0 }),

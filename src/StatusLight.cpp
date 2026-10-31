@@ -70,15 +70,18 @@ LightView LightFor(const StatusRecord& record, StatusNotifier::Clock::time_point
       return { };
    // A 1.0 or 1.1 daemon sends no authentication state, and its session state stands.
    const bool unauthorized = s.hasAuthStatus && (s.authStatus == Wire::AUTH_NOT_AUTHENTICATED || s.authStatus == Wire::AUTH_FAILED);
-   const bool knownSystem = SystemDot(s.systemState, view.system);
+   // The authentication state need not move with the system state, so either one can say unpaired.
+   const bool authUnpaired = s.hasAuthStatus && s.authStatus == Wire::AUTH_UNPAIRED;
+   const uint8_t system = authUnpaired && s.systemState == Wire::SYSTEM_OK ? Wire::SYSTEM_UNPAIRED : s.systemState;
+   const bool knownSystem = SystemDot(system, view.system);
    const bool knownSession = SessionDot(s.sessionState, unauthorized, view.session);
 
    if (!knownSystem || !knownSession)
       view.glyph = LightGlyph::Unknown;
-   else if (unauthorized || s.systemState != Wire::SYSTEM_OK || s.sessionState == Wire::SESSION_NO_DATA)
+   else if (unauthorized || authUnpaired || system != Wire::SYSTEM_OK || s.sessionState == Wire::SESSION_NO_DATA)
       view.glyph = LightGlyph::Problem;
 
-   if (unauthorized || s.systemState == Wire::SYSTEM_UNPAIRED)
+   if (unauthorized || authUnpaired || system == Wire::SYSTEM_UNPAIRED)
    {
       view.ring = LightRing::Solid;
       view.ringRgb = Light::RED;
