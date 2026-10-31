@@ -240,6 +240,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       return HTTRANSPARENT;
    case WM_MOUSEACTIVATE:
       return MA_NOACTIVATE;
+   case WM_CLOSE:
+      // A close sent to every window of the process (taskkill, logoff) is VPX's to answer. The light
+      // goes when the plugin hides it; destroyed here, the plugin would hold a dead handle.
+      return 0;
    default:
       return DefWindowProcW(hwnd, message, wParam, lParam);
    }
