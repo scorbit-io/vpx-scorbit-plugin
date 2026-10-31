@@ -445,6 +445,7 @@ bool SocketWorker::Connect()
    m_seq = 0;
    m_haveDeclared = false;
    m_declared = { };
+   m_playersSnapshotDue = true;
    return true;
 }
 
@@ -1549,6 +1550,7 @@ void SocketWorker::PostPlayers()
 {
    PlayersPost post;
    post.epoch = m_declared.epoch;
+   post.claims = m_claims;
    m_players.Fill(post);
    m_readBack->PostPlayers(post);
 }
@@ -1703,6 +1705,18 @@ bool SocketWorker::AnswerPlayers(const Wire::Message& msg)
       Log(LOG_LEVEL_WARN, "Socket: malformed Players, " + std::to_string(msg.payload.size()) + " bytes");
       return SendError(msg.header.type, msg.header.seq, Wire::ERR_MALFORMED,
          "a short payload, slots not 1 to 9 ascending, or an over-long string");
+   }
+   // The first after the first Declare is a snapshot of claims already made; any later player id a
+   // slot did not hold is a claim made now.
+   const bool snapshot = m_playersSnapshotDue;
+   m_playersSnapshotDue = false;
+   if (!snapshot)
+   {
+      PlayersPost before;
+      m_players.Fill(before);
+      for (const Wire::PlayerSlot& s : players.slots)
+         if (!s.playerId.empty() && s.player >= 1 && s.player <= before.slots.size() && s.playerId != before.slots[s.player - 1].playerId)
+            m_claims++;
    }
    if (m_players.Apply(players))
    {

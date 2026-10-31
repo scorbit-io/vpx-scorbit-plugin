@@ -77,6 +77,9 @@ struct PlayersPost
 {
    uint64_t epoch = 0;
    std::array<PlayerView, Wire::MAX_PLAYERS> slots;
+   // Claims made since the plugin loaded, not counting those a connection's snapshot reports as
+   // already made. Every post carries the running count, since the latch keeps only the latest.
+   uint32_t claims = 0;
 };
 
 // Between the worker and the API thread. Every method is safe from either thread.
@@ -220,6 +223,7 @@ public:
    const Wire::TopScoreEntry* Score(double requestId, double index) const;
    void Release(double requestId);
    const PlayerView* Slot(double slot) const; // 1 to 9
+   uint32_t Claims() const { return m_players.claims; }
 
    TopScoresStore& Scores() { return m_scores; }
 

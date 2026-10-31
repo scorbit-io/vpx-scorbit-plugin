@@ -428,14 +428,23 @@ void ReadBackState::NewEpoch(uint64_t epoch)
    m_epoch = epoch;
    m_clearedThrough = 0; // the epoch tag drops the old table's results from here
    m_scores.Clear();
+   // The claim count runs for the plugin's lifetime, which a new table does not end.
+   const uint32_t claims = m_players.claims;
    m_players = { };
    m_players.epoch = epoch;
+   m_players.claims = claims;
 }
 
 void ReadBackState::Drain(ReadBackChannel& channel, Clock::time_point now)
 {
-   if (std::unique_ptr<PlayersPost> players = channel.TakePlayers(); players && players->epoch == m_epoch)
-      m_players = std::move(*players);
+   if (std::unique_ptr<PlayersPost> players = channel.TakePlayers())
+   {
+      // Another table's slots go, but the claim count is not the table's and still counts.
+      if (players->epoch == m_epoch)
+         m_players = std::move(*players);
+      else
+         m_players.claims = players->claims;
+   }
    std::deque<TopScoresPost> results;
    channel.TakeResults(results);
    for (TopScoresPost& post : results)

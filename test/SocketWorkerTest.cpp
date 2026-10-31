@@ -2017,6 +2017,7 @@ void TestReadBacksWithA12Daemon()
       CHECK(players.epoch == 1 && players.slots[0].playerId == "p-123" && players.slots[0].DisplayName() == "ACE");
       CHECK(players.slots[1].claimDeeplink == "https://scorbit.link/c/AbC123" && !players.slots[1].Claimed());
       CHECK(players.slots[2].playerId.empty() && players.slots[2].claimDeeplink.empty());
+      CHECK_MSG(players.claims == 0, "a snapshot reports claims made before, not now");
 
       // --- A picture is copied before the acknowledgement ---------------------------------
       CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 510, Wire::Encode(Wire::PlayerPicture { 1, "p-123", source.string() })));
@@ -2055,6 +2056,7 @@ void TestReadBacksWithA12Daemon()
       CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 520, Wire::Encode(next)));
       CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[0].playerId == "p-456"; }, players));
       CHECK(players.slots[0].picture.empty() && players.slots[0].DisplayName() == "Cy" && players.slots[1].claimDeeplink.empty());
+      CHECK_MSG(players.claims == 1, "a different player in a slot is a claim made now");
       CHECK_MSG(!std::filesystem::exists(copy3), "a new claim deletes the old claim's picture");
       CHECK(DaemonRequest(peer, Wire::TYPE_PLAYER_PICTURE, 521, Wire::Encode(Wire::PlayerPicture { 1, "p-456", source2.string() })));
       CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[0].picture.empty(); }, players));
@@ -2192,6 +2194,50 @@ void TestReadBacksWithOlderDaemons()
       CHECK(!channel.TakePlayers());
       worker.Stop();
    }
+}
+
+// Claims are counted by the worker as they are made: never the snapshot's, and every post carries the
+// running count, so a claim coalesced with the snapshot in the latch is still counted.
+void TestClaimsAreCounted()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   ReadBackChannel channel;
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, nullptr, &channel);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   const Wire::PlayerSlot ace { 1, "p-1", "", "Ace", "A", "" };
+   const Wire::PlayerSlot cy { 2, "p-2", "", "Cy", "C", "" };
+   CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 90, Wire::Encode(Wire::Players { { ace } })));
+   CHECK_MSG(DaemonRequest(peer, Wire::TYPE_PLAYERS, 91, Wire::Encode(Wire::Players { { ace, cy } })),
+      "a claim straight after the snapshot, before the API thread takes either");
+   PlayersPost players;
+   CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return p.slots[1].Claimed(); }, players));
+   CHECK_MSG(players.claims == 1, "the snapshot's claim is not counted, the next one is");
+   CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 92, Wire::Encode(Wire::Players { { ace, cy } })));
+   CHECK_MSG(!channel.TakePlayers(), "an unchanged update posts nothing");
+   CHECK(DaemonRequest(peer, Wire::TYPE_PLAYERS, 93, Wire::Encode(Wire::Players { { ace } })));
+   CHECK(AwaitPlayers(channel, [](const PlayersPost& p) { return !p.slots[1].Claimed(); }, players));
+   CHECK_MSG(players.claims == 1, "a slot freed is no claim");
+   worker.Stop();
 }
 
 // Leaderboards need a table that plays, not the chooser's empty Declare; and a TopScores that
@@ -2467,6 +2513,7 @@ int main()
    TestAuthoredTableWithoutAuthoredDaemon();
    TestReadBacksWithA12Daemon();
    TestReadBacksWithOlderDaemons();
+   TestClaimsAreCounted();
    TestLeaderboardsNeedATable();
    TestNewIdentityWithinAnEpoch();
    TestLeaderboardsNeedAnIdentifiableTable();

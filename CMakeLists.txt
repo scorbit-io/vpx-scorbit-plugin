@@ -61,6 +61,8 @@ add_library(scorbit-transport STATIC
    src/Latch.h
    src/StatusNotice.h
    src/StatusNotice.cpp
+   src/StatusLight.h
+   src/StatusLight.cpp
    src/SocketWorker.h
    src/SocketWorker.cpp
    src/WireDump.h

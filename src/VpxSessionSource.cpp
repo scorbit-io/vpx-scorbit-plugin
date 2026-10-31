@@ -43,6 +43,8 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    , m_machineStateMsgId(msgApi->GetMsgID(PMPI_NAMESPACE, PMPI_GET_MACHINE_STATE))
    , m_notifier(std::chrono::steady_clock::now())
 {
+   // A plugin that never had a session lost it now, as the notifier counts it, so the light waits out the same grace.
+   m_scriptStatus.since = std::chrono::steady_clock::now();
    m_msgApi->SubscribeMsg(m_endpointId, m_gameStartMsgId, OnGameStart, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_gameEndMsgId, OnGameEnd, this);
    m_msgApi->SubscribeMsg(m_endpointId, m_prepareFrameMsgId, OnPrepareFrame, this);
