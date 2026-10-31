@@ -35,6 +35,11 @@ target_link_libraries(status_light_test PRIVATE scorbit-transport)
 target_compile_options(status_light_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME status_light COMMAND status_light_test)
 
+add_executable(status_light_raster_test StatusLightRasterTest.cpp Check.h)
+target_link_libraries(status_light_raster_test PRIVATE scorbit-transport)
+target_compile_options(status_light_raster_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME status_light_raster COMMAND status_light_raster_test)
+
 add_executable(override_chain_test OverrideChainTest.cpp Check.h)
 target_link_libraries(override_chain_test PRIVATE scorbit-transport)
 target_compile_options(override_chain_test PRIVATE ${SCORBIT_WARNINGS})
