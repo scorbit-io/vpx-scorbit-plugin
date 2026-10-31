@@ -428,8 +428,11 @@ void ReadBackState::NewEpoch(uint64_t epoch)
    m_epoch = epoch;
    m_clearedThrough = 0; // the epoch tag drops the old table's results from here
    m_scores.Clear();
+   // The snapshot count belongs to the connection, which a new table does not end.
+   const uint32_t snapshots = m_players.snapshots;
    m_players = { };
    m_players.epoch = epoch;
+   m_players.snapshots = snapshots;
 }
 
 void ReadBackState::Drain(ReadBackChannel& channel, Clock::time_point now)
