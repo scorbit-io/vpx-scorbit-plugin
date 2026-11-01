@@ -1,6 +1,7 @@
 # The Scorbit SDK for VBScript tables (design)
 
-Status: design. Nothing here is implemented yet.
+Status: the binding is written in `scorbit_sdk` (`wrappers/vbscript`, in review); the plugin's
+install step (below) is not wired in yet.
 
 ## What it is
 
@@ -87,12 +88,12 @@ none of this.)
 ## Delivery and versions
 
 The binding is versioned and never edited after release. Each release is its own file, named for
-its exact version, `scorbit-<major>.<minor>.<patch>.vbs` (`scorbit-1.0.0.vbs` first), carrying
+the SDK's exact version, `scorbit-<major>.<minor>.<patch>.vbs` (`scorbit-2.0.5.vbs` from SDK 2.0.5), carrying
 `SCORBIT_SDK_VERSION`. A table loads the exact version it was written for:
 
 ```vbscript
 On Error Resume Next
-ExecuteGlobal GetTextFile("scorbit-1.0.0.vbs")
+ExecuteGlobal GetTextFile("scorbit-2.0.5.vbs")
 On Error Goto 0
 ScorbitInit "<machine uuid>"
 ```
@@ -118,8 +119,9 @@ then VPX's folders, then the preferences folder and its `user/` and `scripts/`.
 `Scorbit.Table` gains read-only `Version` (the plugin's) and `ApiLevel`. Plugins released before it
 have no `ApiLevel` member at all, so the binding reads it under its own error guard: an object that
 exists but has no `ApiLevel` is level 1 (the original verbs), distinct from no object at all (no
-plugin). The binding states the level it needs; against a lower one it logs once and leaves the
-missing feature a no-op. Native verbs are never removed or changed in meaning.
+plugin). Each routine states the level it needs, and against a lower one it is a silent no-op:
+VBScript has no log a table's player would see. `ScorbitApiLevel()` lets a table check for itself.
+Native verbs are never removed or changed in meaning.
 
 ## Table Options
 
