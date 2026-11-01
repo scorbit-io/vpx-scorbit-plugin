@@ -59,6 +59,10 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      - name: Install the xcb headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev
+
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         run: cmake -S . -B build -A ${{ matrix.vs_arch }}

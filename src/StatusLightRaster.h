@@ -2,7 +2,7 @@
 
 #pragma once
 
-// The status light drawn in software, for windows with no animation layer of their own (Windows).
+// The status light drawn in software, for windows with no animation layer of their own (Windows, X11).
 // It draws what the macOS panel draws with Core Animation (StatusWindow_mac.mm): the same geometry,
 // blink, ring pulse and claim flash, so a frame here matches that panel at the same moment.
 

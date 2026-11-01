@@ -79,6 +79,7 @@ static void FilterControllers(std::vector<ControllerDef>& items)
 
 static LightView statusLight;
 static uint32_t statusClaims = 0;
+static bool statusUnavailableLogged = false;
 
 // API thread. The status light shows while any table plays, PinMAME or not, and follows its
 // settings mid-game; called every tick, so a change applies within one.
@@ -95,6 +96,11 @@ static void ApplyStatusWindow()
    statusClaims = claims;
    if (UpdateStatusWindow(corner, statusLight, setStatusOpacity_Get() / 100.0, claimed))
       LOGI("Status light: corner "s + std::to_string(corner));
+   else if (const char* why = corner != 0 && !statusUnavailableLogged ? StatusWindowUnavailable() : nullptr)
+   {
+      LOGI("Status light unavailable, notifications only: "s + why);
+      statusUnavailableLogged = true;
+   }
 }
 
 // API thread. Reschedules itself for the plugin's lifetime, so a line the

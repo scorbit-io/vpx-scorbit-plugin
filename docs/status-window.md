@@ -1,7 +1,8 @@
 # A plugin-owned status window (design, SB-6004)
 
-Status: implemented on macOS and Windows (see "What the light shows"); X11 comes next. The
-measurements are under "Prototype results, macOS" and "Results, Windows".
+Status: implemented on macOS, Windows and X11 (see "What the light shows"). Wayland keeps the
+notifications. The measurements are under "Prototype results, macOS", "Results, Windows" and
+"Results, X11".
 
 ## Why
 
@@ -98,20 +99,36 @@ The same on every platform:
 
 ### Linux
 
-- X11: an override-redirect window with an empty input shape (XShape), so it takes no input and
-  no focus.
+- X11: an override-redirect window with an empty input shape (SHAPE 1.1), so the window manager
+  never manages or focuses it and it takes no input. Its `WM_CLASS` is `scorbit-status-light`, so a
+  compositor can be told to leave it alone (no shadow or fade).
+  - Drawn through xcb on a connection of the plugin's own, with the libraries loaded at run time:
+    the plugin still loads where there is no X. xcb reports an error with its request, where Xlib
+    would call a process-wide handler that SDL also swaps and whose default exits.
+  - A thread of the plugin's own owns that connection and redraws on a 25 ms poll, since the API
+    thread's tick (250 ms) is slower than a dot's dark phase. Hiding the light joins it.
   - The window manager does not stack an override-redirect window, so nothing keeps it above the
-    playfield by itself. The plugin restacks it: `XRaiseWindow` after the playfield is mapped or
-    raised (seen from `ConfigureNotify` on the playfield's parent), and on each state change.
-    Raising an override-redirect window moves no focus.
-  - It is unmapped while another application's window is focused (`_NET_ACTIVE_WINDOW`), as on
-    the other platforms.
-  - A compositing window manager may unredirect a fullscreen playfield, which can hide any window
-    above it; the prototype's risk table covers that.
+    playfield by itself. The plugin selects `SubstructureNotify` on the root, and after a managed
+    top-level window is mapped or restacked (at most once every 50 ms) it stacks the light directly
+    above the topmost viewable managed window, never simply on top. Override-redirect windows above
+    it, such as menus and screen lockers, stay above it. It is stacked before it is first mapped,
+    since a window maps at the top.
+  - It is unmapped while VPX is not in front: the active window (`_NET_ACTIVE_WINDOW`, else the
+    input focus) or its nearest ancestor with a `_NET_WM_PID` must name VPX's process. SDL sets
+    that property. The light goes on that window's monitor (RandR 1.5, else the whole screen),
+    scaled by `Xft.dpi`.
+  - It always has a bounding shape cut to its disc. With no compositor the server shows each
+    pixel's colour as it is, so the shape keeps the more opaque pixels and the rim sits over black.
+    A compositor can also stop compositing a fullscreen window with the light above it
+    (picom's `unredir-if-possible`), which without the shape left a black square. With no
+    compositor, `StatusOpacity` darkens the light rather than blending it.
 - Wayland: clients cannot position windows or keep them on top, short of the layer-shell
   protocol, which SDL and most compositors used for VPX don't offer. **Unsupported**: the
-  notification stays the surface. The plugin detects the driver the way VPX does
-  (`SDL_GetCurrentVideoDriver`, `Window.cpp:208-220`).
+  notification stays the surface. The plugin asks SDL for its driver the way VPX does
+  (`SDL_GetCurrentVideoDriver`, `Window.cpp:208-220`) and shows the light only under `x11`. If SDL
+  can't be found by name, it guesses as SDL 3 chooses: Wayland when `WAYLAND_DISPLAY` is set,
+  unless `SDL_VIDEO_DRIVER` says otherwise. The reason is logged once:
+  `Status light unavailable, notifications only: ...`.
 
 ## What the light shows
 
@@ -217,10 +234,41 @@ Measuring this in a VM has pitfalls that each look like a defect in the light:
 - a close sent from a remote shell never reaches the interactive session's windows;
 - the VM pauses itself when idle.
 
+## Results, X11 (2026-10-31)
+
+No Linux desktop was available, so this is not a VPX run. An SDL2 window stands in for the
+playfield, in the same process as the plugin's `StatusWindow_x11.cpp`, so `_NET_WM_PID` and
+`SDL_GetCurrentVideoDriver` behave as they do under VPX, and SDL's focus-lost event is the signal
+VPX pauses on. Xvfb at 1920x1080, Openbox, on Ubuntu 24.04 (arm64), `StatusCorner = 2`, the
+unpaired state.
+
+| Mode | Light on top after the playfield and another app are raised | Focus lost | Click on the light |
+|---|---|---|---|
+| windowed, no compositor | yes | only when switched away | goes to the desktop beneath |
+| fullscreen, no compositor | yes | only when switched away | reaches the playfield |
+| windowed, picom | yes | only when switched away | goes to the desktop beneath |
+| fullscreen, picom | yes | only when switched away | reaches the playfield |
+| fullscreen, picom `--unredir-if-possible` | yes | only when switched away | reaches the playfield |
+
+- **Drawing.** Under picom the disc blends: black at 0.6 over the playfield's green reads
+  `#004000`, and at `StatusOpacity = 50` it reads `#007000`. With no compositor, and with picom
+  unredirecting the fullscreen playfield, the light is cut to its disc with the playfield around
+  it. Before the shape was made unconditional, the second case showed a black square.
+- **Other apps.** With another application active, the light is unmapped; it is mapped again when
+  the playfield is active.
+- **Not x11.** Under SDL's `offscreen` driver, a Wayland session, and no display, the light is
+  refused with the reason, and the notifications are unaffected.
+- **Five minutes.** Fullscreen under picom `--unredir-if-possible`, the playfield raised every
+  10 s: the light was on top after all 30 raises, and focus was never lost.
+- **Hiding** joins the light's thread in under 25 ms.
+
+Not measured: VPX itself on a Linux desktop, a GNOME or KDE compositor, a second display, and
+XWayland.
+
 ## Order
 
 1. This note.
 2. macOS prototype in a live VPX: the window as above driven by a fake status, then the focus and
    fullscreen rows of the risk table, each a live VPX session with the screen unlocked.
-3. An implementation per platform: macOS, Windows, then X11.
+3. An implementation per platform: macOS, Windows, then X11 (all three done).
 4. The status indication is already specified as plugin-owned rather than an upstream VPX event.

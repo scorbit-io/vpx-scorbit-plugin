@@ -23,9 +23,13 @@ your VPX plugins directory, enable it in `VPinballX.ini`, and play.
   version handshake, so a plugin loaded into an older VPX does not fail
   cleanly: it corrupts memory during table start. Match the pin to the VPX you
   run, and take VPX from the upstream CI artifacts until a release catches up.
-- CMake 3.28 or newer and a C++20 compiler. There are no other dependencies:
-  the VPX and PinMAME plugin headers are fetched at configure time, pinned by
-  commit and sha256.
+- CMake 3.28 or newer and a C++20 compiler. The VPX and PinMAME plugin headers
+  are fetched at configure time, pinned by commit and sha256.
+- On Linux, the xcb headers for the X11 status light: `libxcb1-dev`,
+  `libxcb-shape0-dev` and `libxcb-randr0-dev` on Debian and Ubuntu. The
+  libraries are loaded at run time, so the built plugin links nothing new and
+  still loads where there is no X. Configure with `-DSCORBIT_STATUS_X11=OFF` to
+  build without the light.
 
 ## Build
 
@@ -86,7 +90,7 @@ Enable = 1
 | `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
-| `StatusCorner` | macOS and Windows. Show the status light in this screen corner: 0 off (default), 1 top left, 2 top right, 3 bottom left, 4 bottom right. Off by default because no corner of a full-bleed table is guaranteed free; see `docs/status-window.md`. `ShowStatus = 0` hides it too. |
+| `StatusCorner` | macOS, Windows and Linux on X11 (not Wayland, where the notifications stay the surface). Show the status light in this screen corner: 0 off (default), 1 top left, 2 top right, 3 bottom left, 4 bottom right. Off by default because no corner of a full-bleed table is guaranteed free; see `docs/status-window.md`. `ShowStatus = 0` hides it too. |
 | `StatusOpacity` | How strongly the status light draws, 10 to 100 percent, default 100. |
 
 The plugin tells the daemon which ROM PinMAME is running; the daemon identifies
