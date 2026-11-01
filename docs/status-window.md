@@ -108,8 +108,11 @@ The same on every platform:
   - A thread of the plugin's own owns that connection and redraws on a 25 ms poll, since the API
     thread's tick (250 ms) is slower than a dot's dark phase. Hiding the light joins it.
   - The window manager does not stack an override-redirect window, so nothing keeps it above the
-    playfield by itself. The plugin selects `SubstructureNotify` on the root and raises the light
-    after any other top-level window is mapped or restacked, at most once every 50 ms.
+    playfield by itself. The plugin selects `SubstructureNotify` on the root, and after a managed
+    top-level window is mapped or restacked (at most once every 50 ms) it stacks the light directly
+    above the topmost viewable managed window, never simply on top. Override-redirect windows above
+    it, such as menus and screen lockers, stay above it. It is stacked before it is first mapped,
+    since a window maps at the top.
   - It is unmapped while VPX is not in front: the active window (`_NET_ACTIVE_WINDOW`, else the
     input focus) or its nearest ancestor with a `_NET_WM_PID` must name VPX's process. SDL sets
     that property. The light goes on that window's monitor (RandR 1.5, else the whole screen),

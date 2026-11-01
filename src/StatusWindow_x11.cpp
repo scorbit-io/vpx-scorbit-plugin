@@ -56,7 +56,8 @@ constexpr auto RAISE_GAP = 50ms;      // so two windows that each keep themselve
    X(xcb_depth_visuals_iterator) X(xcb_visualtype_next) X(xcb_setup_pixmap_formats) X(xcb_setup_pixmap_formats_length) \
    X(xcb_intern_atom) X(xcb_intern_atom_reply) X(xcb_get_property) X(xcb_get_property_reply) \
    X(xcb_get_property_value) X(xcb_get_property_value_length) X(xcb_get_input_focus) X(xcb_get_input_focus_reply) \
-   X(xcb_query_tree) X(xcb_query_tree_reply) X(xcb_get_geometry) X(xcb_get_geometry_reply) \
+   X(xcb_query_tree) X(xcb_query_tree_reply) X(xcb_query_tree_children) X(xcb_query_tree_children_length) \
+   X(xcb_get_window_attributes) X(xcb_get_window_attributes_reply) X(xcb_get_geometry) X(xcb_get_geometry_reply) \
    X(xcb_translate_coordinates) X(xcb_translate_coordinates_reply) X(xcb_get_selection_owner) \
    X(xcb_get_selection_owner_reply) X(xcb_create_colormap) X(xcb_create_window) X(xcb_change_window_attributes) \
    X(xcb_change_property) X(xcb_configure_window) X(xcb_map_window) X(xcb_unmap_window) X(xcb_create_gc) \
@@ -475,12 +476,35 @@ private:
       }
    }
 
+   // Directly above the topmost viewable window the window manager manages, so override-redirect
+   // windows over it (menus, a screen locker) stay above the light. With none, it is left where it is.
    void StackAbove()
    {
-      const uint32_t above = XCB_STACK_MODE_ABOVE;
-      x.xcb_configure_window(c, window, XCB_CONFIG_WINDOW_STACK_MODE, &above);
       lastRaise = Clock::now();
       raise = false;
+      xcb_query_tree_reply_t* tree = x.xcb_query_tree_reply(c, x.xcb_query_tree(c, root), nullptr);
+      if (tree == nullptr)
+         return;
+      const xcb_window_t* children = x.xcb_query_tree_children(tree);   // bottom to top
+      const int count = x.xcb_query_tree_children_length(tree);
+      std::vector<xcb_get_window_attributes_cookie_t> cookies(static_cast<size_t>(count));
+      for (int i = count - 1; i >= 0; i--)
+         cookies[static_cast<size_t>(i)] = x.xcb_get_window_attributes(c, children[i]);
+      xcb_window_t sibling = XCB_WINDOW_NONE;
+      for (int i = count - 1; i >= 0; i--)
+      {
+         // Every reply is collected, so none is left queued on the connection.
+         xcb_get_window_attributes_reply_t* attributes = x.xcb_get_window_attributes_reply(c, cookies[static_cast<size_t>(i)], nullptr);
+         if (sibling == XCB_WINDOW_NONE && attributes != nullptr && children[i] != window && !attributes->override_redirect
+            && attributes->map_state == XCB_MAP_STATE_VIEWABLE)
+            sibling = children[i];
+         std::free(attributes);
+      }
+      std::free(tree);
+      if (sibling == XCB_WINDOW_NONE)
+         return;
+      const uint32_t values[] = { sibling, XCB_STACK_MODE_ABOVE };
+      x.xcb_configure_window(c, window, XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, values);
    }
 
    void Tick()
@@ -549,8 +573,9 @@ private:
          Shape();
       if (!mapped)
       {
-         x.xcb_map_window(c, window);
+         // Stacked first: a window maps at the top, over any override-redirect window.
          StackAbove();
+         x.xcb_map_window(c, window);
          mapped = true;
       }
       else if (raise && now - lastRaise >= RAISE_GAP)
