@@ -700,6 +700,13 @@ void Hide()
    light = nullptr;
 }
 
+// If the library goes (dlclose, process exit) without the plugin hiding the light, a joinable
+// std::thread destroyed with the statics calls std::terminate. Defined after them, so destroyed first.
+struct StopAtUnload
+{
+   ~StopAtUnload() { Hide(); }
+} stopAtUnload;
+
 bool Show()
 {
    if (const char* why = DriverProblem())
