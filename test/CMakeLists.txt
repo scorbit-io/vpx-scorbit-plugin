@@ -64,6 +64,12 @@ target_link_libraries(read_back_test PRIVATE scorbit-transport)
 target_compile_options(read_back_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME read_back COMMAND read_back_test)
 
+# Temp folders: the add-only install of the bundled table-script binding.
+add_executable(binding_install_test BindingInstallTest.cpp Check.h)
+target_link_libraries(binding_install_test PRIVATE scorbit-transport)
+target_compile_options(binding_install_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME binding_install COMMAND binding_install_test)
+
 if(NOT WIN32)
    # The peer speaks POSIX sockets directly. The worker's Windows path is
    # written but nothing in CI compiles it yet, so this test does not claim to
