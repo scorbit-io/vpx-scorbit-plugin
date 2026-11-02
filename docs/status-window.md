@@ -170,8 +170,8 @@ keeps the light as it was. When the daemon hides its indicator, there is no ligh
 |---|---|---|
 | The window takes focus and pauses the table | all | 5-minute session, window visible and the state changing; `vpinball.log` has no `Playfield window lost focus` |
 | Not visible over VPX's fullscreen | macOS | windowed, borderless fullscreen and exclusive fullscreen (`Window.cpp:89-121`, 257-262), each with a cropped screenshot of the corner |
-| Hidden by exclusive fullscreen | Windows | VPX's `ExclusiveFullscreen` on BGFX D3D11/12. A topmost layered window over an exclusive swap chain is typically not shown; if so, that mode falls back to notifications, and the note records it |
-| Adds latency in borderless fullscreen | Windows | a window overlapping a fullscreen swap chain can take it off independent flip, adding a frame of latency. Compare `PresentMon` with the window shown and hidden |
+| Hidden by exclusive fullscreen | Windows | VPX's BGFX builds have no exclusive mode; only the DirectX 9 build does (`PlayfieldFullScreen = 2`). Measured: the light shows unless fullscreen optimizations are disabled for VPX; under that legacy exclusive mode it is hidden and the notifications remain. See "Results, Windows hardware" |
+| Adds latency in borderless fullscreen | Windows | a window overlapping a fullscreen swap chain can take it off independent flip, adding a frame of latency. Compare `PresentMon` with the window shown and hidden. Measured: see "Results, Windows hardware" |
 | Covers game content | all | windowed and pillarboxed tables: the window sits outside the playfield; full-bleed tables: no window by default; with `StatusCorner` set, screenshots of that corner on a few tables |
 | Stays on top of other apps | all | switch away from VPX mid-game and back; the window hides and returns |
 | Hidden under the playfield | X11 | windowed and fullscreen, with and without a compositor; the window stays above after the playfield is raised |
@@ -224,15 +224,76 @@ fullscreen, with the daemon stopped and restarted in the windowed ones.
 - **One fix came from the run.** The window ignores `WM_CLOSE`. A close sent to every window of the process
   (taskkill, logoff) would otherwise destroy it behind the plugin's back.
 
-Not measured: exclusive fullscreen (VPX's `PlayfieldFullScreen = 2`). In the VM, VPX fell back to a 1024x768 mode and
-never took the display, so the light's behaviour over an exclusive swap chain still needs real Windows hardware. The
-same goes for the independent-flip latency risk.
+Not measured in the VM: exclusive fullscreen (VPX's `PlayfieldFullScreen = 2`) and the independent-flip latency risk.
+VPX fell back to a 1024x768 window there. Both were measured on hardware below.
 
 Measuring this in a VM has pitfalls that each look like a defect in the light:
 - a console window opened mid-session takes the foreground, which pauses VPX and hides the light;
 - the host's VM screen capture and a GDI capture inside the guest both return black for VPX's GPU-presented frames;
 - a close sent from a remote shell never reaches the interactive session's windows;
 - the VM pauses itself when idle.
+
+## Results, Windows hardware (2026-11-01)
+
+A physical Windows 11 (26100) laptop. Its 3840x2160 60 Hz panel is driven by the Intel UHD 630, at 250% display
+scaling; its NVIDIA GTX 1650 renders but does not drive the panel (`nvidia-smi` reports no active display). VPX rev 6461
+(`9a8f24cb6`), x64. Theatre of Magic, `StatusCorner = 2` (light shown) or `0` (hidden), and a protocol 1.2 daemon
+reporting the device unpaired. In each session PresentMon 2.6 recorded 45 s of presents while VPX played, and the
+light and VPX's notifications were checked by eye on the panel. Screen captures return black, because VPX presents on
+a hardware plane.
+
+**Exclusive fullscreen exists only in VPX's DirectX 9 build.**
+- In the BGFX builds (`VPinballX_BGFX64.exe`), `PlayfieldFullScreen` offers only Windowed and Borderless Fullscreen
+  (`Settings_properties.inl`, under `ENABLE_BGFX`). `RenderDevice.cpp` notes that BGFX does not implement exclusive
+  fullscreen, so that backend does not support it.
+- The DirectX 9 build (`VPinballX64.exe`) creates its device with `Windowed = false` for `PlayfieldFullScreen = 2`.
+  So BGFX D3D11/12 has no exclusive swap chain to hide the light, and the DirectX 9 build is the one measured for
+  exclusive fullscreen.
+
+| Build and mode | Light | Present mode | Frame interval, median | Display latency, median (p99) | Light seen |
+|---|---|---|---|---|---|
+| BGFX, borderless | shown | Hardware Composed: Independent Flip | 16.68 ms | 14.99 ms (31.59) | yes |
+| BGFX, borderless | hidden | Hardware Composed: Independent Flip | 16.68 ms | 14.81 ms (31.41) | no |
+| DirectX 9, exclusive | shown | Hardware Composed: Independent Flip | 16.66 ms | 7.60 ms (9.93) | yes |
+| DirectX 9, exclusive | hidden | Hardware Composed: Independent Flip | 16.67 ms | 8.12 ms (9.63) | no |
+| DirectX 9, borderless | shown | Composed: Copy with GPU GDI | 16.67 ms | 32.26 ms (32.55) | yes |
+| DirectX 9, borderless (exclusive requested, mode not matched) | hidden | Composed: Copy with GPU GDI | 16.66 ms | 32.27 ms (33.03) | no |
+| DirectX 9, exclusive, fullscreen optimizations off | shown | **Hardware: Legacy Flip** | 16.67 ms | 8.63 ms (13.57) | **no** |
+| DirectX 9, exclusive, fullscreen optimizations off | hidden | Hardware: Legacy Flip | 16.68 ms | 9.15 ms (13.45) | no |
+| DirectX 9, exclusive, optimizations off, GPU preference High performance | shown | Hardware: Legacy Flip | 16.67 ms | 8.49 ms (10.70) | **no** |
+| DirectX 9, exclusive, optimizations off, GPU preference High performance | hidden | Hardware: Legacy Flip | 16.67 ms | 8.37 ms (10.56) | no |
+| BGFX, borderless, GPU preference High performance | shown | Hardware Composed: Independent Flip | 33.33 ms | 30.96 ms (31.44) | yes |
+| BGFX, borderless, GPU preference High performance | hidden | Hardware Composed: Independent Flip | 33.33 ms | 31.08 ms (31.62) | no |
+
+The first six rows are a first pass. The last six are a second pass, after an NVIDIA driver update (621.01). In that
+pass, the two per-application settings were set for the test executable for one session each and removed after it:
+"Disable fullscreen optimizations" (compatibility layer `DISABLEDXMAXIMIZEDWINDOWEDMODE`) and the GPU preference.
+
+- **Legacy exclusive fullscreen hides the light; the notifications stay visible.**
+  - With fullscreen optimizations disabled for VPX, its DirectX 9 exclusive mode is a legacy exclusive swap chain
+    (`Hardware: Legacy Flip`), and the topmost light is not shown over it.
+  - The plugin still creates the light: its log reads `Status light: corner 2`.
+  - The plugin's status notifications keep posting (`[!] Scorbit: no game, not paired`, repeated every minute),
+    whether the light is shown or not. VPX draws them in its own frame, so they appear on the panel in legacy
+    exclusive mode. That is the fallback, and it needs no change.
+- **With fullscreen optimizations, Windows' default, DirectX 9 exclusive is not legacy.** The exclusive request
+  presents through the flip model on a hardware plane, and the desktop composes the light over it.
+- **The light costs no latency.** Shown and hidden are within 0.6 ms of each other in every mode. VPX stays on
+  hardware independent flip with the light up, with the light on its own plane. The DirectX 9 build's borderless mode
+  is composed by the desktop, at about two frames of latency, with or without the light.
+- **Which GPU rendered.** In the second pass, every DirectX 9 session rendered on the GTX 1650, with or without the GPU
+  preference (`nvidia-smi pmon` lists `VPinballX64.exe`, about 65% busy). It used both adapters' 3D engines: the
+  GTX 1650 renders and the Intel GPU presents to the panel. BGFX with the GPU preference also rendered on the
+  GTX 1650 and ran at 30 fps at this resolution, with the light shown or hidden. The first pass recorded no adapter.
+- **The exclusive mode must match one the display lists.** VPX takes `PlayfieldFSWidth`, `PlayfieldFSHeight` and
+  `PlayfieldRefreshRate`. It logs `Requested fullscreen mode ... is not available. Switching to windowed mode.` and
+  runs borderless when no listed mode matches them. Windows reported this panel at 59 Hz while VPX listed it at
+  60 Hz. A refresh rate of 0 matches any. The VM's earlier attempt failed the same way.
+- **No focus taken.** No `Playfield window lost focus` line names the light. Only the harness's console at quit, and
+  once a Windows Security prompt at start, took focus.
+
+Not measured: a desktop whose NVIDIA (or other discrete) GPU drives the display itself, rather than rendering for an
+integrated GPU that drives the panel.
 
 ## Results, X11 (2026-10-31)
 
