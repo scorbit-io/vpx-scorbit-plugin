@@ -63,48 +63,78 @@ void TestPlatformFromHardwareGen()
 
 void TestShadeTable()
 {
-   // WPC: popcount(v & 7) of 3.
-   CHECK(Near(Overlay::Luminance(Platform::Wpc, 0, false), 0.f));
-   CHECK(Near(Overlay::Luminance(Platform::Wpc, 1, false), 1.f / 3));
-   CHECK(Near(Overlay::Luminance(Platform::Wpc, 4, false), 1.f / 3));
-   CHECK(Near(Overlay::Luminance(Platform::Wpc, 6, false), 2.f / 3));
-   CHECK(Near(Overlay::Luminance(Platform::Wpc, 7, false), 1.f));
-   CHECK_MSG(Near(Overlay::Luminance(Platform::Wpc, 0x78, false), 0.f), "bits WPC does not use are ignored");
+   // A value's low four bits are a brightness, 0 to 15, shown at the nearest of the platform's
+   // shades: round(b * (S - 1) / 15) of S - 1.
 
-   // Data East family: v & 3 of 3, bit 1 the long scan.
-   CHECK(Near(Overlay::Luminance(Platform::DataEast, 1, false), 1.f / 3));
-   CHECK(Near(Overlay::Luminance(Platform::DataEast, 2, false), 2.f / 3));
-   CHECK(Near(Overlay::Luminance(Platform::DataEast, 3, false), 1.f));
-   CHECK(Near(Overlay::Luminance(Platform::DataEast, 0x7c, false), 0.f));
-
-   // Gottlieb System 3: popcount(v & 0x3F) of 6.
-   CHECK(Near(Overlay::Luminance(Platform::Gts3, 0x3f, false), 1.f));
-   CHECK(Near(Overlay::Luminance(Platform::Gts3, 0x15, false), 0.5f));
-   CHECK(Near(Overlay::Luminance(Platform::Gts3, 0x01, false), 1.f / 6));
-   CHECK(Near(Overlay::Luminance(Platform::Gts3, 0x40, false), 0.f));
-
-   // Capcom and Alvin G: popcount(v & 0xF) of 4.
-   for (const Platform p : { Platform::Capcom, Platform::AlvinG })
+   // WPC and the Data East family: 4 shades.
+   for (const Platform p : { Platform::Wpc, Platform::DataEast })
    {
-      CHECK(Near(Overlay::Luminance(p, 0x0f, true), 1.f));
-      CHECK(Near(Overlay::Luminance(p, 0x05, true), 0.5f));
-      CHECK(Near(Overlay::Luminance(p, 0x08, true), 0.25f));
-      CHECK(Near(Overlay::Luminance(p, 0x70, true), 0.f));
+      CHECK(Near(Overlay::Luminance(p, 0, false), 0.f));
+      CHECK(Near(Overlay::Luminance(p, 5, false), 1.f / 3));
+      CHECK(Near(Overlay::Luminance(p, 7, false), 1.f / 3));
+      CHECK(Near(Overlay::Luminance(p, 8, false), 2.f / 3));
+      CHECK(Near(Overlay::Luminance(p, 10, false), 2.f / 3));
+      CHECK(Near(Overlay::Luminance(p, 15, false), 1.f));
+      CHECK_MSG(Near(Overlay::Luminance(p, 0x75, false), 1.f / 3), "bits 4 to 6 are ignored");
    }
 
-   // SAM: PinMAME's own LUT for the framebuffer value, 8 to 11 darker than 7.
+   // SAM: 16 shades, so the brightness itself.
    CHECK(Near(Overlay::Luminance(Platform::Sam, 0, true), 0.f));
-   CHECK(Near(Overlay::Luminance(Platform::Sam, 7, true), 7.f / 12));
-   CHECK(Near(Overlay::Luminance(Platform::Sam, 8, true), 5.f / 12));
-   CHECK(Near(Overlay::Luminance(Platform::Sam, 11, true), 8.f / 12));
-   CHECK(Near(Overlay::Luminance(Platform::Sam, 12, true), 9.f / 12));
+   CHECK(Near(Overlay::Luminance(Platform::Sam, 8, true), 8.f / 15));
+   CHECK(Near(Overlay::Luminance(Platform::Sam, 11, true), 11.f / 15));
    CHECK(Near(Overlay::Luminance(Platform::Sam, 15, true), 1.f));
    CHECK(Near(Overlay::Luminance(Platform::Sam, 0x1f, true), 1.f));
 
-   // Unknown: WPC's rule on a 4-shade display, the low nibble on a 16-shade one.
-   CHECK(Near(Overlay::Luminance(Platform::Unknown, 3, false), 2.f / 3));
+   // Gottlieb System 3: 7 shades.
+   CHECK(Near(Overlay::Luminance(Platform::Gts3, 1, false), 0.f));
+   CHECK(Near(Overlay::Luminance(Platform::Gts3, 3, false), 1.f / 6));
+   CHECK(Near(Overlay::Luminance(Platform::Gts3, 5, false), 2.f / 6));
+   CHECK(Near(Overlay::Luminance(Platform::Gts3, 10, false), 4.f / 6));
+   CHECK(Near(Overlay::Luminance(Platform::Gts3, 15, false), 1.f));
+
+   // Capcom and Alvin G: 5 shades.
+   for (const Platform p : { Platform::Capcom, Platform::AlvinG })
+   {
+      CHECK(Near(Overlay::Luminance(p, 2, true), 0.25f));
+      CHECK(Near(Overlay::Luminance(p, 5, true), 0.25f));
+      CHECK(Near(Overlay::Luminance(p, 10, true), 0.75f));
+      CHECK(Near(Overlay::Luminance(p, 15, true), 1.f));
+      CHECK(Near(Overlay::Luminance(p, 0x70, true), 0.f));
+   }
+
+   // Unknown: 4 shades on a 4-shade display, 16 on a 16-shade one.
+   CHECK(Near(Overlay::Luminance(Platform::Unknown, 10, false), 2.f / 3));
    CHECK(Near(Overlay::Luminance(Platform::Unknown, 5, true), 5.f / 15));
    CHECK(Near(Overlay::Luminance(Platform::Unknown, 15, true), 1.f));
+
+   // A 4-grey ramp (0, 85, 170, 255, brightness 0, 5, 10, 15) rises at every step on WPC, the
+   // Data East family and SAM; bit planes swapped WPC's middle two.
+   for (const Platform p : { Platform::Wpc, Platform::DataEast, Platform::Sam })
+   {
+      const bool sixteen = p == Platform::Sam;
+      float last = -1.f;
+      for (const uint8_t b : { 0, 5, 10, 15 })
+      {
+         const float l = Overlay::Luminance(p, b, sixteen);
+         CHECK_MSG(l > last, Overlay::PlatformName(p) + std::string(": the ramp rises at ") + std::to_string(b));
+         last = l;
+      }
+   }
+
+   // On every platform: brightness never shows darker as it rises, from black to full.
+   for (const Platform p : { Platform::Wpc, Platform::DataEast, Platform::Sam, Platform::Gts3, Platform::Capcom,
+           Platform::AlvinG, Platform::Unknown })
+      for (const bool sixteen : { false, true })
+      {
+         float last = 0.f;
+         for (int b = 0; b <= 15; b++)
+         {
+            const float l = Overlay::Luminance(p, static_cast<uint8_t>(b), sixteen);
+            CHECK_MSG(l >= last, Overlay::PlatformName(p) + std::string(": monotonic at ") + std::to_string(b));
+            last = l;
+         }
+         CHECK(Near(Overlay::Luminance(p, 0, sixteen), 0.f) && Near(Overlay::Luminance(p, 15, sixteen), 1.f));
+      }
 }
 
 void TestUploadIgnoresTrailingBytes()

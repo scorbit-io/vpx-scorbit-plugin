@@ -154,19 +154,22 @@ it. The frame tap keeps reading the controller's own frames, and the render path
 never waits on whoever writes the overlay. `docs/slice4-internals.md` has the
 rules and the thread handoffs.
 
-Placement and shading mirror the probe firmware: the bitmap is centred on the
+Placement mirrors the probe firmware: the bitmap is centred on the
 display, and pixels outside it or flagged transparent (`0x80`) show the live
-frame. The low seven bits of a pixel are the platform's bitplane bits, not a
-brightness, so each value is drawn at the shade the probe shows it at on that
-platform, taken from PinMAME's `hardwareGen` (`src/OverlayState.h`):
+frame. The low four bits of a pixel are a brightness, *b*, from 0 to 15, on
+every platform. Each pixel is drawn at the nearest of the platform's shades, the
+shade a Scorbitron shows it at: round(*b* × (*S* − 1) / 15) / (*S* − 1), where *S*
+is the platform's shade count, taken from PinMAME's `hardwareGen`
+(`src/OverlayState.h`). Bits 4 to 6 are ignored.
 
-| Platform | Shade of value *v* |
+| Platform | Shades *S* |
 |---|---|
-| WPC | popcount(*v* & 7) / 3 |
-| Data East, Whitestar, Sega 192x64 | (*v* & 3) / 3 |
-| Gottlieb System 3 | popcount(*v* & 0x3F) / 6 |
-| Capcom, Alvin G | popcount(*v* & 0xF) / 4 |
-| SAM | PinMAME's own luminance for framebuffer value *v* & 0xF |
+| WPC | 4 |
+| Data East, Whitestar, Sega 192x64 | 4 |
+| Gottlieb System 3 | 7 |
+| Capcom, Alvin G | 5 |
+| SAM | 16 |
+| Unknown | 16 on a 16-shade display, otherwise 4 |
 
 Overlays are normally full frames at the display's own size (128x32, 128x16 or
 192x64), shaped by transparency, which places them at the origin. A mismatched
