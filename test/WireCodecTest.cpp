@@ -689,14 +689,14 @@ void TestSliceFiveGoldenVectors()
 
    // Synthetic, like the paths and versions below: no real machine has this uuid.
    const std::string uuid = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
-   const std::string declareHex = "86000000" "0300" "0000" "03000000"
+   const std::string declareHex = "79000000" "0300" "0000" "03000000"
       "0000" "0900" "4f726269742e767078" "0600" "31302e382e31" "0700" "61316232633364"
       "0000" "0000" "00" "00000000" "0000"
       "01"
       "2400" "30623663326636652d376431612d346333652d396632302d356138653164346237633930"
       "0c00" "2f542f4f726269742e767078"
       "0c00" "2f412f5650696e62616c6c58"
-      "1000" "2f502f5650696e62616c6c582e696e69";
+      "0300" "2f502f";
    Wire::Declare authored;
    authored.tablePath = "Orbit.vpx";
    authored.vpxVersion = "10.8.1";
@@ -705,7 +705,7 @@ void TestSliceFiveGoldenVectors()
    authored.machineUuid = uuid;
    authored.tableFullPath = "/T/Orbit.vpx";
    authored.vpxAppPath = "/A/VPinballX";
-   authored.prefsPath = "/P/VPinballX.ini";
+   authored.prefsPath = "/P/";
    std::vector<Wire::SensitiveSpan> spans;
    const std::vector<uint8_t> payload = Wire::Encode(authored, 1, &spans);
    const std::string encoded = ScorbitTest::Hex(Wire::EncodeMessage(Wire::TYPE_DECLARE, 0, 3, payload));
@@ -729,7 +729,7 @@ void TestSliceFiveGoldenVectors()
 
    // The same table to a 1.0 peer stops after identify_format, and carries no span.
    const std::vector<uint8_t> old = Wire::Encode(authored, 0, &spans);
-   CHECK(old.size() == payload.size() - (1 + 2 + 36 + 2 + 12 + 2 + 12 + 2 + 16));
+   CHECK(old.size() == payload.size() - (1 + 2 + 36 + 2 + 12 + 2 + 12 + 2 + 3));
    CHECK(spans.empty());
    Wire::Declare oldBack;
    CHECK(Wire::Decode(old, oldBack));
