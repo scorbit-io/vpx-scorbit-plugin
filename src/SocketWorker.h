@@ -300,13 +300,16 @@ private:
    bool m_loggedNoAuthored = false;      // once per connection
    // Batches taken from the source and not yet acknowledged, kept across connections.
    std::deque<GamePost> m_games;
-   // The Declare epoch whose game_start the daemon acknowledged, 0 when no game is open. The
-   // daemon keeps that game open across a reconnect to the same table, so its tail goes on as is.
+   // The Declare epoch whose game_start the daemon acknowledged, 0 when no game is open. Across a
+   // reconnect its unacknowledged tail is kept, behind the replayed m_openGame.
    uint64_t m_gameOpenEpoch = 0;
    // The open game's acknowledged batches, from its game_start, kept until its game_end so a
-   // restarted daemon can be given the whole game again (SB-6325). Empty when none is retained.
+   // restarted daemon can be given the whole game again (SB-6326). Empty when none is retained.
+   // Bounded on its own by MAX_QUEUED_GAME_OPS; its unacknowledged tail is bounded by the source.
    std::deque<GamePost> m_openGame;
    size_t m_openGameOps = 0;
+   uint64_t m_openGameIdentity = 0;     // the declared identity its game_start was acknowledged under
+   bool m_replayPending = false;         // replay it once this session's Declare has gone out
    // Each batch's id is fixed when it is taken from the source, so a replay carries its own.
    uint32_t m_nextBatchId = 1;
    // Game outcomes already logged since the last Declare: error codes by bit, and bit 0 for

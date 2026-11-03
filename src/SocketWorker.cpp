@@ -930,13 +930,11 @@ bool SocketWorker::Handshake()
    m_scoresLogged = 0;
    m_loggedPictureCopy = false;
    // Taken only once a session exists, so a daemon refusing Hello leaves them in the source's
-   // bounded queue. The open game goes again from its game_start, with its own batch ids: a
-   // daemon that kept the game drops what it has by batch_id, and a restarted one rebuilds it.
-   // Without one, never-acknowledged batches before the first game_start are a fragment the
-   // session cannot place.
+   // bounded queue. The open game's acknowledged batches go again first, once this session's
+   // Declare shows the same table (SendGames). Otherwise never-acknowledged batches before the
+   // first game_start are a fragment the session cannot place.
    TakeSourceGames();
-   m_games.insert(m_games.begin(), std::make_move_iterator(m_openGame.begin()), std::make_move_iterator(m_openGame.end()));
-   DropOpenGame();
+   m_replayPending = !m_openGame.empty();
    size_t keepFrom = 0;
    if (m_games.empty() || m_games.front().epoch != m_gameOpenEpoch)
    {
@@ -974,12 +972,22 @@ void SocketWorker::RetainAcknowledged(GamePost&& post)
 {
    const std::vector<Wire::GameOp>& ops = post.batch.ops;
    if (ops.front().kind == Wire::GAME_START)
+   {
       DropOpenGame();
+      m_openGameIdentity = m_declared.identity;
+   }
    else if (m_openGame.empty() || post.epoch != m_openGame.front().epoch)
       return;  // no game_start retained: a fragment is not worth replaying
-   if (ops.back().kind == Wire::GAME_END || m_openGameOps + ops.size() > MAX_QUEUED_GAME_OPS)
+   if (ops.back().kind == Wire::GAME_END)
    {
-      DropOpenGame();  // ended, or past what a daemon queues for one game
+      DropOpenGame();
+      return;
+   }
+   if (m_openGameOps + ops.size() > MAX_QUEUED_GAME_OPS)
+   {
+      LogOnce(LOG_LEVEL_WARN, "Socket: a game passed " + std::to_string(MAX_QUEUED_GAME_OPS)
+         + " ops; it is no longer kept for a restarted daemon");
+      DropOpenGame();
       return;
    }
    m_openGameOps += ops.size();
@@ -1115,6 +1123,16 @@ bool SocketWorker::MaybeDeclare()
 bool SocketWorker::SendGames()
 {
    TakeSourceGames();
+   if (m_replayPending && m_haveDeclared)
+   {
+      // Replayed from its game_start with its own batch ids: a daemon that kept the game drops
+      // what it has by batch_id, and a restarted one rebuilds it. Only to the table it was
+      // played on: a new epoch or identity declared while disconnected is another machine.
+      m_replayPending = false;
+      if (!m_openGame.empty() && m_openGame.front().epoch == m_declared.epoch && m_openGameIdentity == m_declared.identity)
+         m_games.insert(m_games.begin(), std::make_move_iterator(m_openGame.begin()), std::make_move_iterator(m_openGame.end()));
+      DropOpenGame();
+   }
    while (!m_games.empty() && m_haveDeclared)
    {
       GamePost& front = m_games.front();
