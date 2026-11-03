@@ -1983,6 +1983,54 @@ void TestInterruptedReplayResumes()
    worker.Stop();
 }
 
+// A replay cut before its game_start is acknowledged again keeps its table check: another
+// machine declared in the same epoch meanwhile gets nothing of the old game.
+void TestCutReplayIsNotSentToAnotherMachine()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   Wire::GameBatch batch;
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_SCORE, 1, 100, 0) } });
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+
+   // The replay starts, and is cut before its game_start is acknowledged.
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, batch) && batch.batchId == 1);
+   peer.CloseClient();
+
+   DeclareSnapshot other = MakeAuthoredDeclare(1);
+   other.declare.machineUuid = "5d1e7a4b-2c3f-4e8a-9b6d-0f1a2b3c4d5e";
+   other.identity = 1;
+   source.Set(other, { });
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects again");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "the cut replay is not sent to the new machine");
+   worker.Stop();
+}
+
 // A whole game in one batch, acknowledged, leaves nothing to replay.
 void TestOneBatchGameIsNotReplayed()
 {
@@ -2781,6 +2829,7 @@ int main()
    TestEndedGameIsNotReplayed();
    TestBrokenGameIsNotReplayed();
    TestInterruptedReplayResumes();
+   TestCutReplayIsNotSentToAnotherMachine();
    TestOneBatchGameIsNotReplayed();
    TestInFlightGameKeepsItsId();
    TestAuthoredTableWithoutAuthoredDaemon();
