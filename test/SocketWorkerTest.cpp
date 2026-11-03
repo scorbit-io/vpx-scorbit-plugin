@@ -1519,7 +1519,7 @@ DeclareSnapshot MakeAuthoredDeclare(uint64_t epoch)
    d.declare.machineUuid = "0b6c2f6e-7d1a-4c3e-9f20-5a8e1d4b7c90";
    d.declare.tableFullPath = "/T/Orbit.vpx";
    d.declare.vpxAppPath = "/A/VPinballX";
-   d.declare.prefsPath = "/P/VPinballX.ini";
+   d.declare.prefsPath = "/P/";
    d.epoch = epoch;
    return d;
 }
@@ -1602,7 +1602,7 @@ void TestAuthoredTableWithAuthoredDaemon()
    CHECK(declare.tableKind == Wire::TABLE_AUTHORED && declare.romId.empty());
    CHECK(declare.machineUuid == authored.declare.machineUuid);
    CHECK(declare.tableFullPath == "/T/Orbit.vpx" && declare.vpxAppPath == "/A/VPinballX"
-      && declare.prefsPath == "/P/VPinballX.ini");
+      && declare.prefsPath == "/P/");
    CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
 
    // --- The Game committed before it, then one refused, which is logged and survived
@@ -1647,7 +1647,7 @@ void TestAuthoredTableWithAuthoredDaemon()
    CHECK(dumped.size() > Wire::LENGTH_BYTES
       && Wire::DecodeBody(dumped.data() + Wire::LENGTH_BYTES, dumped.size() - Wire::LENGTH_BYTES, redacted));
    CHECK_MSG(Wire::Decode(redacted.payload, declare) && declare.tableFullPath == std::string(12, '*')
-      && declare.vpxAppPath == std::string(12, '*') && declare.prefsPath == std::string(16, '*')
+      && declare.vpxAppPath == std::string(12, '*') && declare.prefsPath == std::string(3, '*')
       && declare.machineUuid == authored.declare.machineUuid,
       "a redacted Declare still decodes, with only its paths blanked");
    unlink(dumpPath.c_str());
