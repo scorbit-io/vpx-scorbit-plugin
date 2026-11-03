@@ -1019,7 +1019,7 @@ void SocketWorker::PopGame()
 
 void SocketWorker::DiscardQueuedReplay()
 {
-   const size_t n = std::min(m_replayQueued, m_games.size());
+   const size_t n = (std::min)(m_replayQueued, m_games.size());  // parenthesised: windows.h's min macro
    m_games.erase(m_games.begin(), m_games.begin() + static_cast<std::ptrdiff_t>(n));
    m_replayQueued = 0;
 }
