@@ -221,6 +221,9 @@ private:
    void LoseQueuedRequests();
    // Moves what the source committed into m_games, giving each batch the next id.
    void TakeSourceGames();
+   // Updates m_openGame for a batch the daemon acknowledged, taking the batch.
+   void RetainAcknowledged(GamePost&& post);
+   void DropOpenGame();
    // Takes a newly posted declaration into m_current, if there is one.
    void TakeDeclare();
    bool Dispatch(const Wire::Message& msg);
@@ -300,6 +303,10 @@ private:
    // The Declare epoch whose game_start the daemon acknowledged, 0 when no game is open. The
    // daemon keeps that game open across a reconnect to the same table, so its tail goes on as is.
    uint64_t m_gameOpenEpoch = 0;
+   // The open game's acknowledged batches, from its game_start, kept until its game_end so a
+   // restarted daemon can be given the whole game again (SB-6325). Empty when none is retained.
+   std::deque<GamePost> m_openGame;
+   size_t m_openGameOps = 0;
    // Each batch's id is fixed when it is taken from the source, so a replay carries its own.
    uint32_t m_nextBatchId = 1;
    // Game outcomes already logged since the last Declare: error codes by bit, and bit 0 for

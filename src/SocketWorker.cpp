@@ -2,6 +2,8 @@
 
 #include "SocketWorker.h"
 
+#include "GameQueue.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -928,10 +930,13 @@ bool SocketWorker::Handshake()
    m_scoresLogged = 0;
    m_loggedPictureCopy = false;
    // Taken only once a session exists, so a daemon refusing Hello leaves them in the source's
-   // bounded queue. Only never-acknowledged batches are left to replay, so nothing is counted
-   // twice. They go on as is when they continue a game the daemon acknowledged the start of;
-   // otherwise those before the first game_start are a fragment the session cannot place.
+   // bounded queue. The open game goes again from its game_start, with its own batch ids: a
+   // daemon that kept the game drops what it has by batch_id, and a restarted one rebuilds it.
+   // Without one, never-acknowledged batches before the first game_start are a fragment the
+   // session cannot place.
    TakeSourceGames();
+   m_games.insert(m_games.begin(), std::make_move_iterator(m_openGame.begin()), std::make_move_iterator(m_openGame.end()));
+   DropOpenGame();
    size_t keepFrom = 0;
    if (m_games.empty() || m_games.front().epoch != m_gameOpenEpoch)
    {
@@ -963,6 +968,28 @@ bool SocketWorker::Handshake()
       + (ReadBackAllowed(Wire::CAP_PLAYERS) ? ", players" : "")
       + (ReadBackAllowed(Wire::CAP_PLAYER_PICTURES) ? ", pictures" : "") + ')');
    return true;
+}
+
+void SocketWorker::RetainAcknowledged(GamePost&& post)
+{
+   const std::vector<Wire::GameOp>& ops = post.batch.ops;
+   if (ops.front().kind == Wire::GAME_START)
+      DropOpenGame();
+   else if (m_openGame.empty() || post.epoch != m_openGame.front().epoch)
+      return;  // no game_start retained: a fragment is not worth replaying
+   if (ops.back().kind == Wire::GAME_END || m_openGameOps + ops.size() > MAX_QUEUED_GAME_OPS)
+   {
+      DropOpenGame();  // ended, or past what a daemon queues for one game
+      return;
+   }
+   m_openGameOps += ops.size();
+   m_openGame.push_back(std::move(post));
+}
+
+void SocketWorker::DropOpenGame()
+{
+   m_openGame.clear();
+   m_openGameOps = 0;
 }
 
 void SocketWorker::TakeSourceGames()
@@ -1066,7 +1093,10 @@ bool SocketWorker::MaybeDeclare()
    m_gameLogged = 0;
    // The daemon empties its players for a different table; this side drops them, and their pictures.
    if (newTable)
+   {
       EndReadBacks(false);
+      DropOpenGame();
+   }
    // Queued under the same epoch, they were asked of the old identity. Across an epoch they sort
    // themselves: the old one's are answered lost when taken, the new one's belong to this table.
    if (newTable && sameEpoch)
@@ -1121,9 +1151,13 @@ bool SocketWorker::SendGames()
             m_gameOpenEpoch = front.epoch;
          if (front.batch.ops.back().kind == Wire::GAME_END)
             m_gameOpenEpoch = 0;
+         RetainAcknowledged(std::move(front));
          m_games.pop_front();
          continue;
       }
+      // The game this batch belongs to is no longer whole, so it is no longer replayed.
+      if (!m_openGame.empty() && front.epoch == m_openGame.front().epoch)
+         DropOpenGame();
       m_games.pop_front();
       // Logged once per code per Declare and otherwise carried on: the daemon drops what it
       // must (too_large drops the whole game), and a later game can still score.
