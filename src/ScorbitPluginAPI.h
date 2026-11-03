@@ -24,7 +24,8 @@
 // :3 changed behaviour again, as the probe firmware does it: trailing upload
 // bytes are ignored, Show arms before any upload, every op is refused without a display,
 // and a value is shaded per platform rather than as a brightness.
-#define SCORBIT_MSG_OVERLAY "Overlay:3"
+// :4 (SB-6309) reads a value as a brightness, 0 to 15, at the platform's nearest shade.
+#define SCORBIT_MSG_OVERLAY "Overlay:4"
 
 #define SCORBIT_OVERLAY_OP_UPLOAD 1
 #define SCORBIT_OVERLAY_OP_SHOW   2
@@ -32,12 +33,12 @@
 
 typedef struct ScorbitOverlayMsg
 {
-   int version;            // Always 1: the layout, unchanged by the :2 and :3 markers
+   int version;            // Always 1: the layout, unchanged by the :2 to :4 markers
    int op;                 // SCORBIT_OVERLAY_OP_xxx
    // Upload: the WriteDmdOverlay payload as the daemon builds it. Header is two
    // bytes, width then height, followed by width*height pixels, row major, one
-   // byte each: 0x80 set for transparent, the low seven bits the platform's
-   // bitplane bits, shaded as the probe on that platform shows them. Bytes past
+   // byte each: 0x80 set for transparent, the low four bits a brightness, 0 to 15,
+   // drawn at the nearest of the platform's shades; bits 4 to 6 ignored. Bytes past
    // the pixels are ignored. As the probe firmware does: the bitmap is centred on
    // the display, and a larger one is cropped. Outside 10x10 to 192x64 it is
    // refused and the previous one kept.

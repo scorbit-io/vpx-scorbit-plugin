@@ -11,8 +11,8 @@
 
 #include "OverlayPlacement.h"
 
-#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -79,29 +79,28 @@ inline const char* PlatformName(Platform p)
    }
 }
 
-// SAM writes a 4-bit value per dot and the board makes the signals, so an overlay value
-// is drawn exactly as PinMAME draws a game pixel of that value (src/wpc/core.c,
-// CORE_DMD_PWM_PREINTEGRATED_SAM). 8 to 11 are never written by games and map darker.
-inline constexpr float SAM_LUMINANCE[16] = { 0.f, 1.f / 12, 2.f / 12, 3.f / 12, 4.f / 12, 5.f / 12, 6.f / 12, 7.f / 12,
-   5.f / 12, 6.f / 12, 7.f / 12, 8.f / 12, 9.f / 12, 10.f / 12, 11.f / 12, 1.f };
-
-// The luminance an overlay value shows at: the probe's own decode of it as shade over
-// the platform's top shade. Bits a platform does not use are ignored. Unknown falls
-// back to WPC's rule, or to the low four bits on a 16-shade display.
-inline float Luminance(Platform platform, uint8_t value, bool sixteenShades)
+// The shades a platform's display shows. Unknown goes by the display's depth.
+inline int Shades(Platform platform, bool sixteenShades)
 {
-   const auto lit = [value](unsigned mask) { return static_cast<float>(std::popcount(static_cast<unsigned>(value) & mask)); };
    switch (platform)
    {
-   case Platform::Wpc: return lit(0x07) / 3.f;
-   case Platform::DataEast: return static_cast<float>(value & 0x03) / 3.f;
-   case Platform::Sam: return SAM_LUMINANCE[value & 0x0F];
-   case Platform::Gts3: return lit(0x3F) / 6.f;
-   // Alvin G is a correctable guess: PinMAME's four equal-weight planes.
+   case Platform::Wpc:
+   case Platform::DataEast: return 4;
+   case Platform::Sam: return 16;
+   case Platform::Gts3: return 7;
    case Platform::Capcom:
-   case Platform::AlvinG: return lit(0x0F) / 4.f;
-   default: return sixteenShades ? static_cast<float>(value & 0x0F) / 15.f : lit(0x07) / 3.f;
+   case Platform::AlvinG: return 5;
+   default: return sixteenShades ? 16 : 4;
    }
+}
+
+// An overlay value's low four bits are a brightness, 0 to 15, on every platform. It shows at the
+// nearest of the platform's shades, the shade a Scorbitron draws it at. Bits 4 to 6 are ignored.
+inline float Luminance(Platform platform, uint8_t value, bool sixteenShades)
+{
+   const int top = Shades(platform, sixteenShades) - 1;
+   const long shade = std::lround(static_cast<double>(value & 0x0F) * top / 15.0);
+   return static_cast<float>(shade) / static_cast<float>(top);
 }
 
 // Not TRANSPARENT: wingdi.h defines that as a macro.
