@@ -19,6 +19,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1697,9 +1698,27 @@ void TestGamesCommittedBeforeConnecting()
    worker.Stop();
 }
 
-// The daemon acknowledged the game's start, then the session dropped: the batches committed
-// meanwhile go on as is after the reconnect, and nothing acknowledged is sent again.
-void TestGameContinuesAcrossReconnect()
+// Hello and the authored Declare acknowledged: a session ready for Game batches.
+bool OpenAuthoredSession(ScorbitTest::TestPeer& peer)
+{
+   Wire::Hello hello;
+   Wire::Message msg;
+   return AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello)
+      && peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS)
+      && peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { });
+}
+
+// Reads one Game batch into batch and acknowledges it.
+bool AckGame(ScorbitTest::TestPeer& peer, Wire::GameBatch& batch)
+{
+   Wire::Message msg;
+   return peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS) && Wire::Decode(msg.payload, batch)
+      && peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { });
+}
+
+// The game's start and a score were acknowledged, then the daemon restarted: the new one, with
+// no open game, is given the whole game again from its game_start, then the rest of it.
+void TestOpenGameReplaysToRestartedDaemon()
 {
    const std::string dir = MakeTempDir();
    CHECK(!dir.empty());
@@ -1718,15 +1737,71 @@ void TestGameContinuesAcrossReconnect()
    worker.Start();
 
    CHECK(peer.Accept(WAIT_MS));
-   Wire::Hello hello;
-   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
-   Wire::Message msg;
-   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
-   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(OpenAuthoredSession(peer));
    const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball") } };
+   const Wire::GameBatch score { { Op(Wire::GAME_SCORE, 1, 12340, 0) } };
+   Wire::GameBatch batch;
    source.Commit(1, start);
-   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
-   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, score);
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+
+   peer.CloseClient();  // the daemon restarts, keeping nothing
+   const Wire::GameBatch more { { Op(Wire::GAME_SCORE, 1, 56780, 0) } };
+   const Wire::GameBatch end { { Op(Wire::GAME_END) } };
+   source.Commit(1, more);
+   source.Commit(1, end);
+
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   const Wire::GameBatch* whole[] = { &start, &score, &more, &end };
+   for (uint32_t i = 0; i < 4; i++)
+   {
+      CHECK(AckGame(peer, batch));
+      CHECK_MSG(batch.ops == whole[i]->ops && batch.batchId == i + 1,
+         "the whole game, in order, with its own ids: batch " + std::to_string(i + 1));
+   }
+   CHECK_MSG(peer.Silent(300), "nothing else follows");
+   worker.Stop();
+}
+
+// The same daemon, kept running across the reconnect, gets the acknowledged batches again with
+// their original ids; dropping those it has applied, it counts every op once.
+void TestOpenGameReplayIsDeduplicated()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   // The daemon's side: ops applied once per batch_id.
+   std::set<uint32_t> applied;
+   std::vector<Wire::GameOp> ops;
+   const auto apply = [&](const Wire::GameBatch& b)
+   {
+      if (applied.insert(b.batchId).second)
+         ops.insert(ops.end(), b.ops.begin(), b.ops.end());
+   };
+
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0), Op(Wire::GAME_MODE_COMPLETED, 0, 0, 0, 0, "MB:Multiball") } };
+   Wire::GameBatch batch;
+   source.Commit(1, start);
+   CHECK(AckGame(peer, batch));
+   apply(batch);
    CHECK(peer.Silent(200));
 
    peer.CloseClient();
@@ -1734,16 +1809,257 @@ void TestGameContinuesAcrossReconnect()
    source.Commit(1, tail);
 
    CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
-   CHECK(AckHello(peer, 1, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES, hello));
+   CHECK(OpenAuthoredSession(peer));
+   CHECK(AckGame(peer, batch));
+   CHECK_MSG(batch.ops == start.ops && batch.batchId == 1, "the acknowledged start again, with its own id");
+   apply(batch);
+   CHECK(AckGame(peer, batch));
+   CHECK_MSG(batch.ops == tail.ops && batch.batchId == 2, "then the tail, its id running on");
+   apply(batch);
+   CHECK_MSG(peer.Silent(300), "nothing else follows");
+
+   std::vector<Wire::GameOp> expected = start.ops;
+   expected.insert(expected.end(), tail.ops.begin(), tail.ops.end());
+   CHECK_MSG(ops == expected, "each op counted once");
+   worker.Stop();
+}
+
+// Once game_end is acknowledged nothing of that game is kept, so a reconnect replays nothing.
+void TestEndedGameIsNotReplayed()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   Wire::GameBatch batch;
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_SCORE, 1, 12340, 0) } });
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_END) } });
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+
+   peer.CloseClient();
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "an ended game is not replayed");
+   worker.Stop();
+}
+
+// A game the daemon refused a batch of, or whose table was replaced, is not replayed.
+void TestBrokenGameIsNotReplayed()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   // --- Refused: too_large drops the whole game daemon-side
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   Wire::GameBatch batch;
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_SCORE, 1, 12340, 0) } });
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE | Wire::FLAG_ERROR, msg.header.seq,
+      Wire::Encode(Wire::ErrorPayload { Wire::ERR_TOO_LARGE, "queue full" })));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "a refused game is not replayed");
+
+   // --- Replaced in session: another authored machine in the same epoch, a new identity
+   DeclareSnapshot other = MakeAuthoredDeclare(1);
+   other.declare.machineUuid = "5d1e7a4b-2c3f-4e8a-9b6d-0f1a2b3c4d5e";
+   other.identity = 1;
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+   CHECK(AckGame(peer, batch));
+   source.Set(other, { });
    CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
    CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "the old machine's game is not replayed");
+
+   // --- Replaced while disconnected: the first Declare of the next session shows the new identity
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+   DeclareSnapshot third = other;
+   third.declare.machineUuid = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+   third.identity = 2;
+   source.Set(third, { });
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "a game is not replayed to a machine declared while disconnected");
+   worker.Stop();
+}
+
+// A disconnect part way through a replay: the next session still gets the whole game, in order.
+void TestInterruptedReplayResumes()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   const Wire::GameBatch start { { Op(Wire::GAME_START, 0) } };
+   const Wire::GameBatch first { { Op(Wire::GAME_SCORE, 1, 100, 0) } };
+   const Wire::GameBatch second { { Op(Wire::GAME_SCORE, 1, 200, 0) } };
    Wire::GameBatch batch;
+   source.Commit(1, start);
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, first);
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, second);
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+
+   // The replay is cut after the start was acknowledged again.
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK(AckGame(peer, batch));
+   CHECK(batch.ops == start.ops && batch.batchId == 1);
+   Wire::Message msg;
    CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
-   CHECK_MSG(Wire::Decode(msg.payload, batch) && batch.ops == tail.ops,
-      "the tail of a game whose start was acknowledged, not the acknowledged start again");
-   CHECK_MSG(batch.batchId == 2, "the id runs on across the reconnect");
-   CHECK(peer.Send(Wire::TYPE_GAME, Wire::FLAG_RESPONSE, msg.header.seq, { }));
-   CHECK_MSG(peer.Silent(300), "nothing acknowledged is replayed");
+   peer.CloseClient();
+
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects again");
+   CHECK(OpenAuthoredSession(peer));
+   const Wire::GameBatch* whole[] = { &start, &first, &second };
+   for (uint32_t i = 0; i < 3; i++)
+   {
+      CHECK(AckGame(peer, batch));
+      CHECK_MSG(batch.ops == whole[i]->ops && batch.batchId == i + 1,
+         "the whole game again, in order: batch " + std::to_string(i + 1));
+   }
+   CHECK_MSG(peer.Silent(300), "nothing else follows");
+   worker.Stop();
+}
+
+// A replay cut before its game_start is acknowledged again keeps its table check: another
+// machine declared in the same epoch meanwhile gets nothing of the old game.
+void TestCutReplayIsNotSentToAnotherMachine()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   Wire::GameBatch batch;
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0) } });
+   CHECK(AckGame(peer, batch));
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_SCORE, 1, 100, 0) } });
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+
+   // The replay starts, and is cut before its game_start is acknowledged.
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_GAME, msg, WAIT_MS));
+   CHECK(Wire::Decode(msg.payload, batch) && batch.batchId == 1);
+   peer.CloseClient();
+
+   DeclareSnapshot other = MakeAuthoredDeclare(1);
+   other.declare.machineUuid = "5d1e7a4b-2c3f-4e8a-9b6d-0f1a2b3c4d5e";
+   other.identity = 1;
+   source.Set(other, { });
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects again");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "the cut replay is not sent to the new machine");
+   worker.Stop();
+}
+
+// A whole game in one batch, acknowledged, leaves nothing to replay.
+void TestOneBatchGameIsNotReplayed()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   source.Set(MakeAuthoredDeclare(1), { });
+   SocketWorkerConfig cfg = MakeConfig(peer);
+   cfg.authoredTables = true;
+   SocketWorker worker(source, cfg, Quiet());
+   worker.Start();
+
+   CHECK(peer.Accept(WAIT_MS));
+   CHECK(OpenAuthoredSession(peer));
+   Wire::GameBatch batch;
+   source.Commit(1, Wire::GameBatch { { Op(Wire::GAME_START, 0), Op(Wire::GAME_SCORE, 1, 100, 0), Op(Wire::GAME_END) } });
+   CHECK(AckGame(peer, batch));
+   CHECK(peer.Silent(200));
+   peer.CloseClient();
+   CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+   CHECK(OpenAuthoredSession(peer));
+   CHECK_MSG(peer.Silent(300), "a game started and ended in one batch is not replayed");
    worker.Stop();
 }
 
@@ -2508,7 +2824,13 @@ int main()
    TestRefusedHelloReason();
    TestAuthoredTableWithAuthoredDaemon();
    TestGamesCommittedBeforeConnecting();
-   TestGameContinuesAcrossReconnect();
+   TestOpenGameReplaysToRestartedDaemon();
+   TestOpenGameReplayIsDeduplicated();
+   TestEndedGameIsNotReplayed();
+   TestBrokenGameIsNotReplayed();
+   TestInterruptedReplayResumes();
+   TestCutReplayIsNotSentToAnotherMachine();
+   TestOneBatchGameIsNotReplayed();
    TestInFlightGameKeepsItsId();
    TestAuthoredTableWithoutAuthoredDaemon();
    TestReadBacksWithA12Daemon();

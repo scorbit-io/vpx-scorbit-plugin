@@ -2,6 +2,10 @@
 
 #include "SocketWorker.h"
 
+#include "GameQueue.h"
+
+#include <algorithm>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -928,10 +932,19 @@ bool SocketWorker::Handshake()
    m_scoresLogged = 0;
    m_loggedPictureCopy = false;
    // Taken only once a session exists, so a daemon refusing Hello leaves them in the source's
-   // bounded queue. Only never-acknowledged batches are left to replay, so nothing is counted
-   // twice. They go on as is when they continue a game the daemon acknowledged the start of;
-   // otherwise those before the first game_start are a fragment the session cannot place.
+   // bounded queue. The open game's acknowledged batches go again first, once this session's
+   // Declare shows the same table (SendGames). Otherwise never-acknowledged batches before the
+   // first game_start are a fragment the session cannot place.
    TakeSourceGames();
+   // A replay cut short goes back whole, so the next session checks its table again.
+   for (; m_replayQueued > 0 && !m_games.empty(); m_replayQueued--)
+   {
+      m_openGameOps += m_games.front().batch.ops.size();
+      m_openGame.push_back(std::move(m_games.front()));
+      m_games.pop_front();
+   }
+   m_replayQueued = 0;
+   m_replayPending = !m_openGame.empty();
    size_t keepFrom = 0;
    if (m_games.empty() || m_games.front().epoch != m_gameOpenEpoch)
    {
@@ -963,6 +976,52 @@ bool SocketWorker::Handshake()
       + (ReadBackAllowed(Wire::CAP_PLAYERS) ? ", players" : "")
       + (ReadBackAllowed(Wire::CAP_PLAYER_PICTURES) ? ", pictures" : "") + ')');
    return true;
+}
+
+void SocketWorker::RetainAcknowledged(GamePost&& post)
+{
+   const std::vector<Wire::GameOp>& ops = post.batch.ops;
+   if (ops.front().kind == Wire::GAME_START)
+   {
+      DropOpenGame();
+      m_openGameIdentity = m_declared.identity;
+   }
+   else if (m_openGame.empty() || post.epoch != m_openGame.front().epoch)
+      return;  // no game_start retained: a fragment is not worth replaying
+   if (ops.back().kind == Wire::GAME_END)
+   {
+      DropOpenGame();
+      return;
+   }
+   if (m_openGameOps + ops.size() > MAX_QUEUED_GAME_OPS)
+   {
+      LogOnce(LOG_LEVEL_WARN, "Socket: a game passed " + std::to_string(MAX_QUEUED_GAME_OPS)
+         + " ops; it is no longer kept for a restarted daemon");
+      DropOpenGame();
+      return;
+   }
+   m_openGameOps += ops.size();
+   m_openGame.push_back(std::move(post));
+}
+
+void SocketWorker::DropOpenGame()
+{
+   m_openGame.clear();
+   m_openGameOps = 0;
+}
+
+void SocketWorker::PopGame()
+{
+   m_games.pop_front();
+   if (m_replayQueued > 0)
+      m_replayQueued--;
+}
+
+void SocketWorker::DiscardQueuedReplay()
+{
+   const size_t n = (std::min)(m_replayQueued, m_games.size());  // parenthesised: windows.h's min macro
+   m_games.erase(m_games.begin(), m_games.begin() + static_cast<std::ptrdiff_t>(n));
+   m_replayQueued = 0;
 }
 
 void SocketWorker::TakeSourceGames()
@@ -1066,7 +1125,11 @@ bool SocketWorker::MaybeDeclare()
    m_gameLogged = 0;
    // The daemon empties its players for a different table; this side drops them, and their pictures.
    if (newTable)
+   {
       EndReadBacks(false);
+      DropOpenGame();
+      DiscardQueuedReplay();
+   }
    // Queued under the same epoch, they were asked of the old identity. Across an epoch they sort
    // themselves: the old one's are answered lost when taken, the new one's belong to this table.
    if (newTable && sameEpoch)
@@ -1085,6 +1148,19 @@ bool SocketWorker::MaybeDeclare()
 bool SocketWorker::SendGames()
 {
    TakeSourceGames();
+   if (m_replayPending && m_haveDeclared)
+   {
+      // Replayed from its game_start with its own batch ids: a daemon that kept the game drops
+      // what it has by batch_id, and a restarted one rebuilds it. Only to the table it was
+      // played on: a new epoch or identity declared while disconnected is another machine.
+      m_replayPending = false;
+      if (!m_openGame.empty() && m_openGame.front().epoch == m_declared.epoch && m_openGameIdentity == m_declared.identity)
+      {
+         m_games.insert(m_games.begin(), std::make_move_iterator(m_openGame.begin()), std::make_move_iterator(m_openGame.end()));
+         m_replayQueued = m_openGame.size();
+      }
+      DropOpenGame();
+   }
    while (!m_games.empty() && m_haveDeclared)
    {
       GamePost& front = m_games.front();
@@ -1107,7 +1183,7 @@ bool SocketWorker::SendGames()
             Log(LOG_LEVEL_WARN, "Socket: dropped a Game: its table is no longer declared, or not as an authored table");
             m_gameLogged |= 1u;
          }
-         m_games.pop_front();
+         PopGame();
          continue;
       }
 
@@ -1121,10 +1197,17 @@ bool SocketWorker::SendGames()
             m_gameOpenEpoch = front.epoch;
          if (front.batch.ops.back().kind == Wire::GAME_END)
             m_gameOpenEpoch = 0;
-         m_games.pop_front();
+         RetainAcknowledged(std::move(front));
+         PopGame();
          continue;
       }
-      m_games.pop_front();
+      // The game this batch belongs to is no longer whole, so it is no longer replayed.
+      const bool replayed = m_replayQueued > 0;
+      if (!m_openGame.empty() && front.epoch == m_openGame.front().epoch)
+         DropOpenGame();
+      PopGame();
+      if (replayed)
+         DiscardQueuedReplay();
       // Logged once per code per Declare and otherwise carried on: the daemon drops what it
       // must (too_large drops the whole game), and a later game can still score.
       Wire::ErrorPayload e;
