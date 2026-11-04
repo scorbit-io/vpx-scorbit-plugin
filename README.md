@@ -131,9 +131,12 @@ rotates its token is picked up without restarting VPX.
 
 `src/WireProtocol.*` is the whole wire format: little-endian, a `u32` length
 followed by `u16` type, `u16` flags and a `u32` sequence number, then the
-payload. This build speaks protocol 1.1 and serves Hello, Declare, Frame, Ping,
-Bye, the memory messages, Overlay and Status, and sends Game for table scripts. It
-still talks to a 1.0 daemon, without the table-script calls. A type it does not serve is
+payload. This build speaks protocol 1.2 and serves Hello, Declare, Frame, Ping,
+Bye, the memory messages, Overlay and Status. For table scripts it sends Game and
+TopScoresRequest, and takes TopScores, Players and PlayerPicture. It still talks to a
+1.1 daemon, which serves no leaderboards, players or pictures and sends Status without
+`AuthStatus`, and to a 1.0 daemon, which also takes no Game. `SystemState`,
+`SessionState` and `StatusText` read the same from either. A type it does not serve is
 answered with `unsupported_type` rather than ignored. Frames cross as one shade
 index per pixel, row major, exactly as the tap captured them.
 
