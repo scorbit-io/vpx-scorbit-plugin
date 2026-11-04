@@ -1,6 +1,6 @@
 # Status notices during play (design, SB-6341)
 
-Status: proposal. Nothing here is implemented yet.
+Status: accepted, not yet implemented. "Work" at the end lists the changes.
 
 ## Why
 
@@ -40,28 +40,32 @@ The plugin already has the signal. The daemon's Status carries a session state: 
 scored. **A game is in progress from a Status that says `tracking` or `no data` until one that says
 `no game`, or until the table ends.**
 
-A connection to the daemon lost mid-game does not end the game. The plugin keeps the last state it
-had until a new Status arrives or the table ends. Otherwise a daemon restart mid-game would show the
-"no connection" notice that this design keeps out of play.
+A connection to the daemon lost mid-game does not end the game at once. The plugin keeps the last
+state it had, so a daemon restart mid-game shows no "no connection" notice. The hold is bounded:
+**after 2 minutes with no connection, the game counts as over** and the no-connection state is
+posted. A daemon that is gone for good is told within that time, not only when the table ends.
 
-## Proposal
+## Design
 
 1. **Outside a game, no change.** The current state is posted at table load and on each change.
 2. **In a game, no notices.** A change made during a game is not posted then; the light shows it
    if it is up.
-3. **At the end of a game**, if the state is `[!]`, it is posted once.
-4. **The 60 s repeat stays only outside a game and only while the light is not shown.** A light
-   that is up already shows the state for as long as it lasts.
-5. **The rule does not depend on the light.** It applies with `StatusCorner = 0` (the default),
+3. **At the end of a game, one notice if anything went wrong during it.** The plugin remembers the
+   last `[!]` text seen during the game. At game end it posts the current state if that is `[!]`.
+   Otherwise, if a `[!]` state came up during the game, it posts that one, marked as earlier
+   ("during the game: ..."). The state at game end alone is not enough: the end is a `no game`
+   Status, which reads `[OK]` after a game that ran unscored in `no data`.
+4. **The 60 s repeat of a `[!]` state stays outside a game, as today, and stops in one.**
+5. **None of this depends on the light.** It applies with `StatusCorner = 0` (the default),
    on Wayland, and in legacy exclusive fullscreen alike. That matters because the plugin cannot
    tell when the light is hidden. In Windows' legacy exclusive mode the light is created and logged
    as shown, but it never reaches the screen (`docs/status-window.md`, "Results, Windows hardware").
    A rule of "notices only when the light can't show" would have nothing reliable to test.
 
-One alternative to point 2, for players without a light: post a change mid-game only when the
+Considered and not taken, for players without a light: post a change mid-game only when the
 marker or the states change (not the support text alone), only after the new state has held for
-10 s, and never repeat it. That is one notice for an outage instead of several. It is more code and
-still covers the playfield, so it is not the recommendation.
+10 s, and never repeat it. That is one notice for an outage instead of several, but it still covers
+the playfield during play.
 
 ### A setting
 
@@ -105,17 +109,12 @@ Rejected:
 - **A caption shown on each change.** It would be wider than the corner the user cleared for the
   light, so it would cover game content the light does not.
 
-## Open questions
+## Work
 
-1. The recommendation (no notices in a game, one at its end) or the alternative (held-change
-   notices in a game for players without a light).
-2. The default for `StatusNotices`: 1 as proposed, or 2 so existing users see no change.
-3. Whether the hover caption is worth building, given that it helps desktop players only.
-
-## Work after the decision
-
-1. The notice policy and `StatusNotices`, on every platform. All of it is in `StatusNotifier`, so
-   `test/StatusNoticeTest.cpp` covers it with no VPX.
-2. If hover is wanted, one change per platform: macOS, Windows, X11. Each needs a live check that the
-   cursor polling finds the light while VPX plays, and that the caption takes no focus. The check is
-   the same five-minute session `docs/status-window.md` uses.
+1. The notice rules and `StatusNotices`, on every platform. All of it is in `StatusNotifier`, so
+   `test/StatusNoticeTest.cpp` covers it with no VPX: no notices in a game, the end-of-game notice
+   (current and earlier), the 2-minute bound on a lost connection, the repeat outside a game only,
+   and each setting value.
+2. The hover caption, one change per platform: macOS, Windows, X11. Each needs a live check that
+   cursor polling finds the light while VPX plays and that the caption takes no focus, using the same
+   five-minute session as `docs/status-window.md`.
