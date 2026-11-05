@@ -45,6 +45,13 @@ state it had, so a daemon restart mid-game shows no "no connection" notice. The 
 **after 2 minutes with no connection, the game counts as over** and the no-connection state is
 posted. A daemon that is gone for good is told within that time, not only when the table ends.
 
+**A reconnect does not end the game either.** After a reconnect the plugin replays the open game
+from its `game_start`, but the daemon sends its first Status after the session's `Declare`, which can
+come before the replay is applied. A restarted daemon in particular says `no game` until then. So a
+`no game` Status ends the game only when no replay is outstanding: the worker marks the status
+record as replaying from the handshake until the replayed batches are acknowledged, and a
+`no game` that arrives while it is set is shown on the light but not taken as the game's end.
+
 ## Design
 
 1. **Outside a game, no change.** The current state is posted at table load and on each change.
@@ -124,14 +131,29 @@ Rejected:
 1. The notice rules and `StatusNotices`, on every platform.
    - The rules live in `StatusNotifier`, so `test/StatusNoticeTest.cpp` covers them with no VPX: no
      notices in a game, taking down a notice on screen at game start, the end-of-game notice
-     (current and earlier), the 2-minute bound on a lost connection, the repeat outside a game only,
-     and each setting value.
+     (current and earlier), the 2-minute bound on a lost connection, a `no game` during a replay
+     not ending the game, the repeat outside a game only, and each setting value.
+   - `StatusNotifier::Frame` returns an action, not a string: post this text, expire the notice on
+     screen, or nothing. Today an empty string means both "suppressed" and "nothing to do", and
+     `VpxSessionSource::PostStatusNotice` returns early on it. The session source expires its
+     notice handle with a length of 0. The live check starts a game within 5 s of a table-load
+     notice and sees it go.
+   - The worker sets the status record's replaying mark (`SocketWorker`: from the handshake until
+     the replayed batches are acknowledged, cleared at once when there is nothing to replay).
+     `test/SocketWorkerTest.cpp` covers it against a peer that sends `no game` before acknowledging
+     the replay.
    - `VpxSessionSource` must tell the notifier when the table ends. Today `OnGameEnd` does not, and
      the notifier is called only from the per-frame callback, which stops with the table. The table
      end clears the game state without posting, since nothing renders after it, so the next table
      starts outside a game. The notifier's table-end call is unit tested with the rest; the wiring
      itself needs VPX, so the live check ends a table mid-game and loads another.
-2. The hover caption, one change per platform: macOS, Windows, X11. Each needs a live check that
-   cursor polling finds the light while VPX plays and that the caption takes no focus, using the same
-   five-minute session as `docs/status-window.md`. The check includes resting the cursor on the light
-   and pressing a flipper: the caption goes within 3 s.
+2. The hover caption.
+   - First, shared by all platforms: the caption text reaches the window. `UpdateStatusWindow` takes
+     only a `LightView`, the rendered light state, and only `ApplyStatusWindow` has the
+     `StatusRecord`. The call gains the caption text, built by a pure function from the record
+     (`StatusNotifier::Describe` of the current state, or the no-connection line), which
+     `test/StatusLightTest.cpp` covers alongside the light's mapping.
+   - Then one change per platform: macOS, Windows, X11. Each needs a live check that cursor polling
+     finds the light while VPX plays, that the caption shows the current support text, and that it
+     takes no focus, using the same five-minute session as `docs/status-window.md`. The check
+     includes resting the cursor on the light and pressing a flipper: the caption goes within 3 s.
