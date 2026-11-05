@@ -1015,10 +1015,9 @@ bool SocketWorker::Handshake()
    // A ROM game's end can only come from the daemon, so one lost for this long is over.
    if (m_history.romGame && !m_statusRecord.inSession
       && m_sessionStart - m_statusRecord.since >= std::chrono::milliseconds(m_config.romGameLostMs))
-   {
       m_history.romGame = false;
-      m_history.romGameEndsAt = { };
-   }
+   // A deferral is the old session's; this one's first no game gets its own.
+   m_history.romGameEndsAt = { };
    m_statusRecord = { };
    m_statusRecord.inSession = true;
    PostStatus();

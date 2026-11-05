@@ -2894,6 +2894,16 @@ void TestStatusFollowsTheRomGame()
       status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NONE; }, r));
       CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
+      // The session drops with the deferral pending: the next session starts without it, and
+      // its own first no game is deferred afresh.
+      peer.CloseClient();
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.haveStatus; }, r));
+      CHECK_MSG(r.history.romGame && r.history.romGameEndsAt == std::chrono::steady_clock::time_point { }, "a deferral does not outlive its session");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
+      CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NO_DATA; }, r));
