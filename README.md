@@ -209,8 +209,8 @@ daemon's `tracking` to its `no game`; an authored table's from its script's `gam
 to its `game_end`. `StatusNotices = 2` posts on every change as before, and `0` posts
 nothing. The rules are in `docs/status-notices.md`.
 
-On macOS and Windows, moving the mouse over the status light shows the same text beside it for
-a few seconds, on the side toward the middle of the screen. The light stays click-through and
+On macOS, Windows and Linux on X11, moving the mouse over the status light shows the same text
+beside it for a few seconds, on the side toward the middle of the screen. The light stays click-through and
 never takes focus; the caption goes after 3 s without mouse movement, since VPX hides the cursor
 on a button press without moving it, and on Windows as soon as the cursor is hidden.
 

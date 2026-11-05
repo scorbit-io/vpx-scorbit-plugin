@@ -48,6 +48,15 @@ constexpr uint32_t SHAPE_ALPHA = 64;  // without a compositor, pixels at least t
 constexpr auto FRONT_EVERY = 250ms;   // the active window, the playfield's place and its monitor
 constexpr auto COMPOSITOR_EVERY = 1s;
 constexpr auto RAISE_GAP = 50ms;      // so two windows that each keep themselves on top cannot spin
+// The caption beside the light while the cursor hovers over it (docs/status-notices.md, "Hover"),
+// in a core X font the server draws itself: the plugin loads no font library.
+constexpr auto HOVER_EVERY = 50ms;
+constexpr double CAPTION_GAP_PT = 8;
+constexpr double CAPTION_MAX_WIDTH_PT = 360;
+constexpr double CAPTION_PAD_X_PT = 8;
+constexpr double CAPTION_PAD_Y_PT = 5;
+constexpr uint32_t CAPTION_BACKGROUND = 0x99000000; // black at 0.6, as behind the light
+constexpr uint32_t CAPTION_TEXT = 0xffffffff;
 
 #define SCORBIT_XCB_CORE(X) \
    X(xcb_connect) X(xcb_disconnect) X(xcb_connection_has_error) X(xcb_get_setup) X(xcb_get_file_descriptor) \
@@ -61,7 +70,9 @@ constexpr auto RAISE_GAP = 50ms;      // so two windows that each keep themselve
    X(xcb_translate_coordinates) X(xcb_translate_coordinates_reply) X(xcb_get_selection_owner) \
    X(xcb_get_selection_owner_reply) X(xcb_create_colormap) X(xcb_create_window) X(xcb_change_window_attributes) \
    X(xcb_change_property) X(xcb_configure_window) X(xcb_map_window) X(xcb_unmap_window) X(xcb_create_gc) \
-   X(xcb_put_image)
+   X(xcb_put_image) X(xcb_query_pointer) X(xcb_query_pointer_reply) X(xcb_open_font) \
+   X(xcb_query_text_extents) X(xcb_query_text_extents_reply) X(xcb_image_text_8) X(xcb_change_gc) \
+   X(xcb_poly_fill_rectangle)
 #define SCORBIT_XCB_SHAPE(X) \
    X(xcb_shape_id) X(xcb_shape_query_version) X(xcb_shape_query_version_reply) X(xcb_shape_rectangles)
 #define SCORBIT_XCB_RANDR(X) \
@@ -139,6 +150,7 @@ struct Wanted
    uint8_t alpha = 255;
    bool flash = false;     // a claim flash, stamped when asked for, as on Windows
    Clock::time_point flashAt;
+   std::string caption;    // shown beside the light while the cursor hovers over it
 };
 
 std::mutex wantedLock;
@@ -210,6 +222,7 @@ public:
 
       if (!CreateWindow(setup, why))
          return false;
+      CreateCaption();
       scale = ReadScale();
       x.xcb_flush(c);
       if (x.xcb_connection_has_error(c))
@@ -268,6 +281,7 @@ private:
                   visual = v.data->visual_id;
                   depth = 32;
                   argb = true;
+                  lightVisual = visual;
                   break;
                }
       // The frame is 0xAARRGGBB words, which the server takes as they are only at 32 bits a pixel.
@@ -307,6 +321,222 @@ private:
       const uint32_t rootEvents = XCB_EVENT_MASK_PROPERTY_CHANGE | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
       x.xcb_change_window_attributes(c, root, XCB_CW_EVENT_MASK, &rootEvents);
       return true;
+   }
+
+   // A second window of the light's kind, with a core font the server draws: a scalable Helvetica
+   // where the server has one, else its "fixed". No font means no caption, and the light is unaffected.
+   void CreateCaption()
+   {
+      caption = x.xcb_generate_id(c);
+      uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK;
+      std::vector<uint32_t> values { Pixel(CAPTION_BACKGROUND), 0, 1, XCB_EVENT_MASK_EXPOSURE };
+      xcb_visualid_t visual = screen->root_visual;
+      uint8_t depth = screen->root_depth;
+      if (argb)
+      {
+         // The light's visual and a colormap of the caption's own.
+         visual = lightVisual;
+         depth = 32;
+         const xcb_colormap_t colormap = x.xcb_generate_id(c);
+         x.xcb_create_colormap(c, XCB_COLORMAP_ALLOC_NONE, colormap, root, visual);
+         mask |= XCB_CW_COLORMAP;
+         values.push_back(colormap);
+      }
+      x.xcb_create_window(c, depth, caption, root, 0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, visual, mask, values.data());
+      x.xcb_shape_rectangles(c, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT, XCB_CLIP_ORDERING_UNSORTED, caption, 0, 0, 0, nullptr);
+      static constexpr char CLASS[] = "scorbit-status-caption\0Scorbit";
+      x.xcb_change_property(c, XCB_PROP_MODE_REPLACE, caption, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(CLASS), CLASS);
+      x.xcb_change_property(c, XCB_PROP_MODE_REPLACE, caption, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, 22, "Scorbit status caption");
+      if (typeAtom != XCB_ATOM_NONE && notificationAtom != XCB_ATOM_NONE)
+         x.xcb_change_property(c, XCB_PROP_MODE_REPLACE, caption, typeAtom, XCB_ATOM_ATOM, 32, 1, &notificationAtom);
+      font = x.xcb_generate_id(c);
+      const int px = static_cast<int>(std::lround(12 * ReadScale()));
+      const std::string name = "-*-helvetica-medium-r-normal--" + std::to_string(px) + "-*-*-*-*-*-iso8859-1";
+      // Checked: an unknown font name is an error on the open, which the reply of a query shows.
+      x.xcb_open_font(c, font, static_cast<uint16_t>(name.size()), name.c_str());
+      int width = 0;
+      if (!TextExtents("x", fontAscent, fontDescent, width))
+      {
+         x.xcb_open_font(c, font, 5, "fixed");
+         if (!TextExtents("x", fontAscent, fontDescent, width))
+         {
+            font = 0;
+            return;
+         }
+      }
+      const uint32_t gcValues[] = { Pixel(CAPTION_TEXT), Pixel(CAPTION_BACKGROUND), font };
+      captionGc = x.xcb_generate_id(c);
+      x.xcb_create_gc(c, captionGc, caption, XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT, gcValues);
+   }
+
+   // A premultiplied ARGB colour as the caption's visual takes it: without alpha at depth 24.
+   uint32_t Pixel(uint32_t argbColour) const { return argb ? argbColour : argbColour & 0xffffff; }
+
+   // The width of 8-bit text in the caption's font, with its ascent and descent. False when the
+   // font is not open.
+   bool TextExtents(const std::string& text, int& ascent, int& descent, int& width)
+   {
+      std::vector<xcb_char2b_t> chars(text.size());
+      for (size_t i = 0; i < text.size(); i++)
+         chars[i] = { 0, static_cast<uint8_t>(text[i]) };
+      xcb_query_text_extents_reply_t* reply = x.xcb_query_text_extents_reply(c,
+         x.xcb_query_text_extents(c, font, static_cast<uint32_t>(chars.size()), chars.data()), nullptr);
+      if (reply == nullptr)
+         return false;
+      ascent = reply->font_ascent;
+      descent = reply->font_descent;
+      width = reply->overall_width;
+      std::free(reply);
+      return true;
+   }
+
+   // The caption's text as the font takes it: Latin-1 for what UTF-8 carries of it, '?' for the rest.
+   static std::string Latin1(const std::string& utf8)
+   {
+      std::string out;
+      for (size_t i = 0; i < utf8.size();)
+      {
+         const unsigned char b = static_cast<unsigned char>(utf8[i]);
+         if (b < 0x80)
+         {
+            out.push_back(static_cast<char>(b));
+            i++;
+         }
+         else if ((b & 0xe0) == 0xc0 && i + 1 < utf8.size())
+         {
+            const unsigned int code = ((b & 0x1fu) << 6) | (static_cast<unsigned char>(utf8[i + 1]) & 0x3fu);
+            out.push_back(code < 0x100 ? static_cast<char>(code) : '?');
+            i += 2;
+         }
+         else
+         {
+            out.push_back('?');
+            i += (b & 0xf0) == 0xf0 ? 4 : (b & 0xe0) == 0xe0 ? 3 : 1;
+         }
+      }
+      return out;
+   }
+
+   // Greedy word wrap within the caption's width, measured by the server.
+   std::vector<std::string> Wrap(const std::string& text, int maxWidth)
+   {
+      std::vector<std::string> lines;
+      std::string line;
+      int ascent = 0, descent = 0, width = 0;
+      for (size_t at = 0; at <= text.size();)
+      {
+         size_t end = text.find_first_of(" \n", at);
+         if (end == std::string::npos)
+            end = text.size();
+         const std::string word = text.substr(at, end - at);
+         const std::string candidate = line.empty() ? word : line + " " + word;
+         if (!line.empty() && TextExtents(candidate, ascent, descent, width) && width > maxWidth)
+         {
+            lines.push_back(line);
+            line = word;
+         }
+         else
+            line = candidate;
+         if (end < text.size() && text[end] == '\n')
+         {
+            lines.push_back(line);
+            line.clear();
+         }
+         at = end + 1;
+      }
+      if (!line.empty() || lines.empty())
+         lines.push_back(line);
+      return lines;
+   }
+
+   // Beside the light on the side toward the monitor's centre, level with it. Drawn again only
+   // when the text changes; the window is cleared and the lines written by the server.
+   void ShowCaption(const std::string& text, const Rect& lightAt)
+   {
+      if (font == 0)
+         return;
+      const int padX = static_cast<int>(std::lround(CAPTION_PAD_X_PT * scale));
+      const int padY = static_cast<int>(std::lround(CAPTION_PAD_Y_PT * scale));
+      if (text != captionText)
+      {
+         const std::string latin = Latin1(text);
+         captionLines = Wrap(latin, static_cast<int>(std::lround(CAPTION_MAX_WIDTH_PT * scale)));
+         int ascent = 0, descent = 0, width = 0, widest = 1;
+         for (const std::string& line : captionLines)
+            if (TextExtents(line, ascent, descent, width))
+               widest = std::max(widest, width);
+         lineHeight = std::max(1, fontAscent + fontDescent);
+         captionSize = { 0, 0, widest + 2 * padX, static_cast<int>(captionLines.size()) * lineHeight + 2 * padY };
+         captionText = text;
+         captionDirty = true;
+      }
+      const int gap = static_cast<int>(std::lround(CAPTION_GAP_PT * scale));
+      const bool lightOnRight = lightAt.x + lightAt.w / 2 > monitor.x + monitor.w / 2;
+      const int xAt = lightOnRight ? lightAt.x - gap - captionSize.w : lightAt.x + lightAt.w + gap;
+      const int lowest = std::max(monitor.y, monitor.y + monitor.h - captionSize.h);
+      const int yAt = std::clamp(lightAt.y + lightAt.h / 2 - captionSize.h / 2, monitor.y, lowest);
+      const Rect at { xAt, yAt, captionSize.w, captionSize.h };
+      if (!(at == captionPlaced))
+      {
+         const uint32_t geometry[] = { static_cast<uint32_t>(at.x), static_cast<uint32_t>(at.y), static_cast<uint32_t>(at.w),
+            static_cast<uint32_t>(at.h) };
+         x.xcb_configure_window(c, caption, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+            geometry);
+         captionPlaced = at;
+         captionDirty = true;
+      }
+      if (!captionMapped)
+      {
+         // Directly above the light, which is itself stacked above the playfield.
+         const uint32_t values[] = { window, XCB_STACK_MODE_ABOVE };
+         x.xcb_configure_window(c, caption, XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, values);
+         x.xcb_map_window(c, caption);
+         captionMapped = true;
+         captionDirty = true;
+      }
+      if (captionDirty)
+      {
+         const uint32_t fill[] = { Pixel(CAPTION_BACKGROUND) };
+         x.xcb_change_gc(c, captionGc, XCB_GC_FOREGROUND, fill);
+         const xcb_rectangle_t whole { 0, 0, static_cast<uint16_t>(at.w), static_cast<uint16_t>(at.h) };
+         x.xcb_poly_fill_rectangle(c, caption, captionGc, 1, &whole);
+         const uint32_t ink[] = { Pixel(CAPTION_TEXT) };
+         x.xcb_change_gc(c, captionGc, XCB_GC_FOREGROUND, ink);
+         int baseline = padY + fontAscent;
+         for (const std::string& line : captionLines)
+         {
+            x.xcb_image_text_8(c, static_cast<uint8_t>(std::min<size_t>(line.size(), 255)), caption, captionGc, static_cast<int16_t>(padX),
+               static_cast<int16_t>(baseline), line.c_str());
+            baseline += lineHeight;
+         }
+         captionDirty = false;
+      }
+   }
+
+   void HideCaption()
+   {
+      if (captionMapped)
+         x.xcb_unmap_window(c, caption);
+      captionMapped = false;
+   }
+
+   // The pointer's place, read with no input of our own, so both windows stay click-through.
+   void Hover(const std::string& text, const Rect& lightAt, Clock::time_point now)
+   {
+      if (now < nextHover)
+         return;
+      nextHover = now + HOVER_EVERY;
+      xcb_query_pointer_reply_t* pointer = x.xcb_query_pointer_reply(c, x.xcb_query_pointer(c, root), nullptr);
+      if (pointer == nullptr)
+         return;
+      const int px = pointer->root_x, py = pointer->root_y;
+      std::free(pointer);
+      const bool over = px >= lightAt.x && px < lightAt.x + lightAt.w && py >= lightAt.y && py < lightAt.y + lightAt.h;
+      // X has no cheap word on whether the cursor is hidden; the movement rule alone applies.
+      if (hover.Tick(px, py, over, false, now) && !text.empty())
+         ShowCaption(text, lightAt);
+      else
+         HideCaption();
    }
 
    // Xft.dpi, which desktops set for a scaled display, over the 96 dpi of an unscaled one.
@@ -446,7 +676,10 @@ private:
          case 0: // an error, e.g. a window that went between two requests: the next tick asks again
             break;
          case XCB_EXPOSE:
-            redraw = true;
+            if (reinterpret_cast<xcb_expose_event_t*>(event)->window == caption)
+               captionDirty = true;
+            else
+               redraw = true;
             break;
          case XCB_PROPERTY_NOTIFY:
             if (reinterpret_cast<xcb_property_notify_event_t*>(event)->atom == activeAtom)
@@ -505,6 +738,12 @@ private:
          return;
       const uint32_t values[] = { sibling, XCB_STACK_MODE_ABOVE };
       x.xcb_configure_window(c, window, XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, values);
+      if (captionMapped)
+      {
+         // The caption stays directly above the light, wherever the light went.
+         const uint32_t above[] = { window, XCB_STACK_MODE_ABOVE };
+         x.xcb_configure_window(c, caption, XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, above);
+      }
    }
 
    void Tick()
@@ -528,6 +767,7 @@ private:
          if (mapped)
             x.xcb_unmap_window(c, window);
          mapped = false;
+         HideCaption();
          return;
       }
       if (now >= nextCompositor)
@@ -588,6 +828,7 @@ private:
          drawnAlpha = w.alpha;
          redraw = false;
       }
+      Hover(w.caption, placed, now);
    }
 
    // Always cut to the disc. Without a compositor the server shows each pixel's colour as it is,
@@ -661,6 +902,20 @@ private:
    bool argb = false;
    bool lsbImage = true;
    double scale = 1;
+   xcb_visualid_t lightVisual = 0;
+
+   // The caption.
+   xcb_window_t caption = XCB_WINDOW_NONE;
+   xcb_gcontext_t captionGc = 0;
+   xcb_font_t font = 0;
+   int fontAscent = 0, fontDescent = 0, lineHeight = 1;
+   HoverTracker hover;
+   Clock::time_point nextHover;
+   std::string captionText;
+   std::vector<std::string> captionLines;
+   Rect captionSize, captionPlaced;
+   bool captionMapped = false;
+   bool captionDirty = true;
 
    bool inFront = false;
    bool frontStale = true;
@@ -754,7 +1009,7 @@ bool Show()
 
 }
 
-bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash, const std::string& /*caption, SB-6352*/)
+bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash, const std::string& caption)
 {
    if (corner < 1 || corner > 4 || !view.visible)
    {
@@ -790,6 +1045,7 @@ bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool 
       }
       wanted.corner = corner;
       wanted.alpha = static_cast<uint8_t>(std::lround(std::clamp(opacity, 0.0, 1.0) * 255));
+      wanted.caption = caption;
    }
    if (appeared && !Show())
       return false;
