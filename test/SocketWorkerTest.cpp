@@ -2838,7 +2838,9 @@ void TestStatusFollowsTheRomGame()
    {
       StatusLatch latch;
       SocketWorkerConfig cfg = MakeConfig(peer);
-      cfg.noGameDeferMs = 400;  // the no game deferral, shortened; the lost bound stays at 2 minutes
+      // The no game deferral, shortened but longer than a reconnect (about 1 s), so a drop with a
+      // deferral pending comes back before it runs out; the lost bound stays at 2 minutes.
+      cfg.noGameDeferMs = 1500;
       SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, &latch);
       worker.Start();
       CHECK(peer.Accept(WAIT_MS));
@@ -2846,7 +2848,7 @@ void TestStatusFollowsTheRomGame()
       Wire::Declare declare;
       CHECK(Handshake(peer, hello, declare));
       // The deferral window follows every handshake, this first one included.
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      std::this_thread::sleep_for(std::chrono::milliseconds(1700));
 
       status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
@@ -2904,7 +2906,7 @@ void TestStatusFollowsTheRomGame()
       status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
       CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      std::this_thread::sleep_for(std::chrono::milliseconds(1700));
       status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NO_DATA; }, r));
       CHECK_MSG(!r.history.romGame && r.history.romGames == 3, "the deferred end took effect when its time came; no data starts nothing");
@@ -2957,6 +2959,54 @@ void TestStatusFollowsTheRomGame()
       CHECK(declare.romId == "jupk_513");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.history.romGame; }, r));
       CHECK_MSG(r.history.romGames == 1, "the old table's game is over; the new table has none");
+      peer.CloseClient();
+   }
+
+   // A game whose first Status is itself a warning: that warning is the game's.
+   {
+      StatusLatch latch;
+      SocketWorker worker(source, MakeConfig(peer), Quiet(), nullptr, nullptr, &latch);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+      Wire::Hello hello;
+      Wire::Declare declare;
+      CHECK(Handshake(peer, hello, declare));
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OFFLINE, "Scorbit API unreachable");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame; }, r));
+      CHECK_MSG(r.history.warnings == 1 && r.history.warningsAtGameStart == 0, "the baseline is from before the game-start Status's own warning");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NONE; }, r));
+      CHECK_MSG(r.history.warnings == 1 && r.history.warningsAtGameStart == 0, "the counts hold through the deferred end");
+      peer.CloseClient();
+   }
+
+   // A deferral that runs out with no further Status, then the session drops: the game ended
+   // when the deferral did, and the next session does not revive it.
+   {
+      StatusLatch latch;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.noGameDeferMs = 300;
+      SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, &latch);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+      Wire::Hello hello;
+      Wire::Declare declare;
+      CHECK(Handshake(peer, hello, declare));
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame; }, r));
+      peer.CloseClient();
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
+      CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      peer.CloseClient();
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.haveStatus; }, r));
+      CHECK_MSG(!r.history.romGame, "an elapsed deferral ended the game; the new session starts without one");
       peer.CloseClient();
    }
 }
