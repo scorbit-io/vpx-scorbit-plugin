@@ -35,22 +35,35 @@ or something they would want to know before playing:
 
 ## "In a game"
 
-The plugin already has the signal. The daemon's Status carries a session state: `no game`,
-`tracking` or `no data` (`src/WireProtocol.h`). The light uses it to darken its ring while a game is
-scored. **A game is in progress from a Status that says `tracking` or `no data` until one that says
-`no game`, or until the table ends.**
+The plugin has the signal, but not from one place.
+
+- **An authored table** tells the plugin itself: its script calls `game_start` and `game_end`.
+  **A game is in progress from a committed `game_start` until a committed `game_end`, or until the
+  table ends.** The daemon's session state plays no part.
+- **A ROM table** tells the daemon, which reports it in Status as a session state: `no game`,
+  `tracking` or `no data` (`src/WireProtocol.h`). **A game is in progress from a Status that says
+  `tracking` until one that says `no game`, or until the table ends.** `no data` continues a game
+  already in progress and never starts one.
+
+`no data` cannot start a game because the daemon also uses it outside games: briefly at table load
+("waiting for this table's first scores", "switching to this table's machine"), and after an
+authored game it could not record ("this game was not recorded", held until the next
+`game_start`). Counted as a game, those would hide the very notices meant for between games.
+
+A ROM game the daemon cannot track at all (no memory map, not paired) never reaches `tracking`, so
+it counts as outside a game: its state posts once when it changes, and repeats every 60 s while it
+holds. Those states are known at table load, before the player starts.
 
 A connection to the daemon lost mid-game does not end the game at once. The plugin keeps the last
 state it had, so a daemon restart mid-game shows no "no connection" notice. The hold is bounded:
 **after 2 minutes with no connection, the game counts as over** and the no-connection state is
 posted. A daemon that is gone for good is told within that time, not only when the table ends.
 
-**A reconnect does not end the game either.** After a reconnect the plugin replays the open game
-from its `game_start`, but the daemon sends its first Status after the session's `Declare`, which can
-come before the replay is applied. A restarted daemon in particular says `no game` until then. So a
-`no game` Status ends the game only when no replay is outstanding: the worker marks the status
-record as replaying from the handshake until the replayed batches are acknowledged, and a
-`no game` that arrives while it is set is shown on the light but not taken as the game's end.
+**A reconnect does not end the game either.** On an authored table the script's own calls decide,
+so nothing the daemon says after a reconnect can end the game; the plugin replays it from its
+`game_start` and carries on. On a ROM table, a restarted daemon says `no game` until it has read
+the machine again. So a `no game` that arrives within 10 s of a reconnect is shown on the light but
+not taken as the end of a game already in progress; a `tracking` within that time continues it.
 
 ## Design
 
@@ -131,17 +144,17 @@ Rejected:
 1. The notice rules and `StatusNotices`, on every platform.
    - The rules live in `StatusNotifier`, so `test/StatusNoticeTest.cpp` covers them with no VPX: no
      notices in a game, taking down a notice on screen at game start, the end-of-game notice
-     (current and earlier), the 2-minute bound on a lost connection, a `no game` during a replay
+     (current and earlier), the 2-minute bound on a lost connection, a `no game` just after a reconnect
      not ending the game, the repeat outside a game only, and each setting value.
    - `StatusNotifier::Frame` returns an action, not a string: post this text, expire the notice on
      screen, or nothing. Today an empty string means both "suppressed" and "nothing to do", and
      `VpxSessionSource::PostStatusNotice` returns early on it. The session source expires its
      notice handle with a length of 0. The live check starts a game within 5 s of a table-load
      notice and sees it go.
-   - The worker sets the status record's replaying mark (`SocketWorker`: from the handshake until
-     the replayed batches are acknowledged, cleared at once when there is nothing to replay).
-     `test/SocketWorkerTest.cpp` covers it against a peer that sends `no game` before acknowledging
-     the replay.
+   - The notifier learns an authored game's boundaries from the script's `game_start` and
+     `game_end` as `VpxSessionSource` commits them, and the table kind from its Declare. The 10 s
+     after a reconnect need the time the session started, a field the worker adds to the status
+     record beside `since`.
    - `VpxSessionSource` must tell the notifier when the table ends. Today `OnGameEnd` does not, and
      the notifier is called only from the per-frame callback, which stops with the table. The table
      end clears the game state without posting, since nothing renders after it, so the next table
