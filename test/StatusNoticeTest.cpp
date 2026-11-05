@@ -261,7 +261,15 @@ void TestNoWarningNoEndNotice()
    CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(10)) == NONE);
    CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(60)) == NONE);
    CHECK(Quiet(n, nullptr, t0 + seconds(61)) == NONE);
-   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame(2)), t0 + seconds(62)) == NONE,
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "free play", Over()), t0 + seconds(61)) == Post("[OK] Scorbit: no game, ok - free play"),
+      "a ROM game has no settling: an [OK] change after it posts");
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame(2)), t0 + seconds(62)) == Expire("[OK] Scorbit: no game, ok - free play"),
+      "the fresh post is what the next game takes down");
+   StatusNotifier m(t0);
+   CHECK(Quiet(m, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0) == Post(NO_GAME_OK));
+   CHECK(Quiet(m, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(10)) == NONE);
+   CHECK(Quiet(m, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(60)) == NONE);
+   CHECK_MSG(Quiet(m, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame(2)), t0 + seconds(61)) == NONE,
       "a game right after one that ended quietly has nothing to take down (seen live: a spurious take-down)");
 }
 
@@ -309,7 +317,7 @@ void TestAuthoredGameFollowsTheScript()
    const Clock::time_point t0 = Clock::now();
    StatusNotifier n(t0);
    CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
-   n.GameStarted();
+   n.GameStarted(0);
    CHECK(Quiet(n, nullptr, t0 + seconds(1), true) == Expire(NO_GAME_OK));
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over(3)), t0 + seconds(5), true) == NONE,
       "the daemon's session state plays no part");
@@ -323,7 +331,7 @@ void TestAuthoredGameFollowsTheScript()
    // An earlier [!] that an [OK] overtook before any frame saw it.
    StatusNotifier m(t0);
    CHECK(Quiet(m, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
-   m.GameStarted();
+   m.GameStarted(0);
    CHECK(Quiet(m, nullptr, t0 + seconds(10), true) == NONE);
    m.GameEnded();
    const std::string notRecorded = "[!] Scorbit: no data, ok - this game was not recorded";
@@ -367,7 +375,7 @@ void TestAuthoredEndSettles()
    const Clock::time_point t0 = Clock::now();
    StatusNotifier n(t0);
    CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
-   n.GameStarted();
+   n.GameStarted(0);
    CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(10), true) == NONE);
    n.GameEnded();
    CHECK_MSG(Quiet(n, nullptr, t0 + seconds(30), true) == NONE, "a clean game ends with no notice");
@@ -377,10 +385,29 @@ void TestAuthoredEndSettles()
       == Post("[OK] Scorbit: no game, ok - free play"), "once settled, an [OK] change outside a game posts again");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_UNPAIRED, "", Warned(Over(), 1, "x")), t0 + seconds(32), true)
       == Post("[!] Scorbit: no game, not paired"), "a [!] after it is");
+   // An end that posted a [!]: the daemon's settling [OK] must not replace it.
+   StatusNotifier w(t0);
+   CHECK(Quiet(w, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
+   w.GameStarted(0);
+   const std::string held = "[!] Scorbit: no data, ok - can't reach Scorbit to switch tables, retrying";
+   CHECK(Quiet(w, Rom(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "can't reach Scorbit to switch tables, retrying", Warned(InGame(), 1, held)), t0 + seconds(10), true) == NONE);
+   w.GameEnded();
+   CHECK(Quiet(w, nullptr, t0 + seconds(30), true) == Post(held));
+   CHECK_MSG(Quiet(w, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Warned(Over(), 1, held)), t0 + seconds(31), true) == NONE,
+      "the settling [OK] does not replace the end's [!]");
+   // A warning that arrived between the last frame and the script's game_start is before the game.
+   StatusNotifier b(t0);
+   CHECK(Quiet(b, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
+   b.GameStarted(1);
+   const std::string waiting = "[!] Scorbit: no data, ok - waiting for this table's first scores";
+   CHECK(Quiet(b, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", Warned(InGame(), 1, waiting)), t0 + seconds(10), true) == NONE);
+   b.GameEnded();
+   CHECK_MSG(Quiet(b, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Warned(Over(), 1, waiting)), t0 + seconds(30), true) == NONE,
+      "counted at game_start from the latest record, it is not reported as during the game");
    // The daemon's "not recorded" after a held authored game posts as a transition.
    StatusNotifier m(t0);
    CHECK(Quiet(m, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
-   m.GameStarted();
+   m.GameStarted(0);
    m.GameEnded();
    CHECK(Quiet(m, nullptr, t0 + seconds(10), true) == NONE);
    const std::string notRecorded = "[!] Scorbit: no data, ok - this game was not recorded";
@@ -393,7 +420,7 @@ void TestEndSummaryCanBeTakenDown()
    const Clock::time_point t0 = Clock::now();
    StatusNotifier n(t0);
    CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
-   n.GameStarted();
+   n.GameStarted(0);
    const std::string offline = "[!] Scorbit: tracking, offline - x";
    CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OFFLINE, "x", Warned(InGame(), 1, offline)), t0 + seconds(10), true) == NONE);
    auto lost = Lost(t0 + seconds(20));
@@ -402,7 +429,7 @@ void TestEndSummaryCanBeTakenDown()
    n.GameEnded();
    const std::string summary = "[!] Scorbit, during the game: tracking, offline - x";
    CHECK_MSG(Quiet(n, nullptr, t0 + seconds(22), true) == Post(summary), "ended inside the grace: the summary posts with nothing current");
-   n.GameStarted();
+   n.GameStarted(0);
    CHECK_MSG(Quiet(n, nullptr, t0 + seconds(23), true) == Expire(summary), "and the next game can take it down");
 }
 

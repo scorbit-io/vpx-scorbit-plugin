@@ -309,11 +309,14 @@ void VpxSessionSource::ScriptCommit()
    // A batch may hold game_start only first and game_end only last, and at most MAX_GAME_OPS,
    // so a commit is cut before each start, after each end, and at the size bound.
    std::vector<GamePost> posts;
+   // The notifier's game boundaries on an authored table (docs/status-notices.md). The
+   // latest record is taken first, so a warning that arrived since the last frame counts
+   // as before the game, not during it.
+   TakeStatus();
    for (Wire::GameOp& op : ops)
    {
-      // The notifier's game boundaries on an authored table (docs/status-notices.md).
       if (op.kind == Wire::GAME_START)
-         m_notifier.GameStarted();
+         m_notifier.GameStarted(m_scriptStatus.history.warnings);
       else if (op.kind == Wire::GAME_END)
          m_notifier.GameEnded();
       if (posts.empty() || posts.back().batch.ops.size() == Wire::MAX_GAME_OPS

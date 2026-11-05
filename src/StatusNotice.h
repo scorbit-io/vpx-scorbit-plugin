@@ -98,8 +98,9 @@ public:
    void NewTable();
    // The table ended: nothing renders after it, so the game ends without a notice.
    void TableEnded();
-   // The script's game_start and game_end, as the session source commits them.
-   void GameStarted();
+   // The script's game_start and game_end, as the session source commits them. warningsNow is
+   // the latest record's count, which may be ahead of the last frame's.
+   void GameStarted(uint32_t warningsNow);
    void GameEnded();
 
    // "[OK] Scorbit: tracking, ok", plus " - <support text>" when there is one. The leading
@@ -122,6 +123,7 @@ private:
    bool m_inGame = false;              // as of the last frame
    bool m_authoredGame = false;        // GameStarted, until GameEnded or the table ends
    uint32_t m_authoredGames = 0;       // GameStarted calls, counted like the worker's ROM games
+   uint32_t m_authoredStartWarnings = 0;  // the warning count when the last authored game began
    bool m_authoredLast = false;        // the kind the last frame saw, so a switch does not read as a start
    uint32_t m_seenStarts = 0;          // the start count as of the last frame
    uint32_t m_seenWarnings = 0;        // the warning count as of the last frame

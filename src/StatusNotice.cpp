@@ -108,10 +108,11 @@ void StatusNotifier::TableEnded()
    m_current.history.romGameEndsAt = { };
 }
 
-void StatusNotifier::GameStarted()
+void StatusNotifier::GameStarted(uint32_t warningsNow)
 {
    m_authoredGame = true;
    m_authoredGames++;
+   m_authoredStartWarnings = warningsNow;
 }
 
 void StatusNotifier::GameEnded()
@@ -168,9 +169,9 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
    const bool ended = (wasInGame || startedSince) && !inGame;
    if (started)
    {
-      // The worker marks a ROM game's start on the Status that starts it; a frame is too
-      // coarse, as a table-load warning and the tracking can arrive between two.
-      m_warningsAtStart = authored ? m_seenWarnings : h.warningsAtGameStart;
+      // Marked at the start itself, not at a frame: a table-load warning and the tracking, or
+      // a warning and the script's game_start, can arrive between two frames.
+      m_warningsAtStart = authored ? m_authoredStartWarnings : h.warningsAtGameStart;
       m_lostInGame = false;
       m_afterGame = false;
    }
@@ -216,15 +217,17 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
       if (action.kind == NoticeAction::Kind::Post)
          m_postedAt = now;
       m_lostInGame = false;
-      m_afterGame = true;
+      // A ROM game's end is the daemon's own no game, already current here.
+      m_afterGame = authored;
       return action;
    }
 
    if (want.empty())
       return { };
    // After a script's game_end the daemon still says tracking until it has taken the batch,
-   // then no game: that settling is not news. Any [!] is.
-   if (m_afterGame && want.starts_with("[OK]") && m_posted.starts_with("[OK]"))
+   // then no game: that settling is not news, and must not replace a [!] the end posted.
+   // Any [!] is news.
+   if (m_afterGame && want.starts_with("[OK]"))
    {
       // One settling change is consumed; what changes after it is news again.
       if (want != m_posted)
