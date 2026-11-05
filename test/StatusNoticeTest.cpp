@@ -261,6 +261,8 @@ void TestNoWarningNoEndNotice()
    CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(10)) == NONE);
    CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(60)) == NONE);
    CHECK(Quiet(n, nullptr, t0 + seconds(61)) == NONE);
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame(2)), t0 + seconds(62)) == NONE,
+      "a game right after one that ended quietly has nothing to take down (seen live: a spurious take-down)");
 }
 
 void TestNoDataNeverStartsAGame()

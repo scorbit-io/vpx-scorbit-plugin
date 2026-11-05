@@ -190,7 +190,10 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
       else if (h.warnings != m_warningsAtStart && !h.lastWarning.empty())
          action = { NoticeAction::Kind::Post, DescribeEarlier(h.lastWarning) };
       m_posted = want;
-      m_postedAt = now;
+      // Only a post is on screen to take down: a game starting right after one that ended
+      // quietly must not expire a notice that was never there.
+      if (action.kind == NoticeAction::Kind::Post)
+         m_postedAt = now;
       return action;
    }
 
