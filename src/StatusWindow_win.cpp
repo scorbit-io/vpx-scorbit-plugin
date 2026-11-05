@@ -35,6 +35,7 @@ constexpr wchar_t CLASS_NAME[] = L"ScorbitStatusLight";
 // The caption beside the light while the cursor hovers over it (docs/status-notices.md, "Hover").
 constexpr double CAPTION_GAP_PT = 8;
 constexpr double CAPTION_MAX_WIDTH_PT = 360;
+constexpr double CAPTION_MAX_HEIGHT_PT = 240;
 constexpr double CAPTION_PAD_X_PT = 8;
 constexpr double CAPTION_PAD_Y_PT = 5;
 constexpr double CAPTION_CORNER_PT = 6;
@@ -265,10 +266,14 @@ bool DrawCaption(const std::string& text, double scale, BYTE alpha)
    if (dc != nullptr && font != nullptr)
    {
       const HGDIOBJ previousFont = SelectObject(dc, font);
-      RECT measure { 0, 0, static_cast<LONG>(std::lround(CAPTION_MAX_WIDTH_PT * scale)), 0 };
+      // Measured within the caption's bounds: a single word wider than them, or a text of
+      // many lines, is clipped at the edge rather than growing the window past the monitor.
+      const LONG maxWidth = static_cast<LONG>(std::lround(CAPTION_MAX_WIDTH_PT * scale));
+      const LONG maxHeight = static_cast<LONG>(std::lround(CAPTION_MAX_HEIGHT_PT * scale));
+      RECT measure { 0, 0, maxWidth, 0 };
       DrawTextW(dc, wide.c_str(), -1, &measure, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_LEFT | DT_TOP);
-      const int width = std::max<int>(1, measure.right - measure.left) + 2 * padX;
-      const int height = std::max<int>(1, measure.bottom - measure.top) + 2 * padY;
+      const int width = std::clamp<int>(measure.right - measure.left, 1, maxWidth) + 2 * padX;
+      const int height = std::clamp<int>(measure.bottom - measure.top, 1, maxHeight) + 2 * padY;
       BITMAPINFO info { };
       info.bmiHeader.biSize = sizeof(info.bmiHeader);
       info.bmiHeader.biWidth = width;
@@ -353,7 +358,10 @@ void ShowCaption(const std::string& text)
    const int gap = static_cast<int>(std::lround(CAPTION_GAP_PT * drawnScale));
    const bool lightOnRight = centre.x > (area.left + area.right) / 2;
    const int x = lightOnRight ? drawnAt.x - gap - captionSize.cx : drawnAt.x + frame.size + gap;
-   const int y = std::clamp<int>(centre.y - captionSize.cy / 2, area.top, area.bottom - captionSize.cy);
+   // Level with the light, kept on the monitor; the bounds stay ordered even for a caption
+   // taller than it.
+   const int lowest = std::max<int>(area.top, area.bottom - captionSize.cy);
+   const int y = std::clamp<int>(centre.y - captionSize.cy / 2, area.top, lowest);
    SetWindowPos(captionWindow, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
    captionShown = true;
 }
