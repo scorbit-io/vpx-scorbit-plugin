@@ -75,6 +75,8 @@ ROM games started (so a game that began and ended between two frames is still se
 table kind it also counts the `[!]` Statuses it has received and keeps the last one's text. The
 notifier notes that count when a game starts, ROM or authored; if it has moved by the game's end,
 the last `[!]` text is the earlier failure to report, even when only an `[OK]` reached a frame.
+These fields last for the table, not for a session: the worker keeps them itself and copies them into
+each record, so the handshake's reset of the status record on a reconnect does not clear them.
 
 ## Design
 
@@ -166,8 +168,9 @@ Rejected:
    - The ROM game is followed in `SocketWorker`, on every Status: the 2-minute bound on a lost
      connection, a `no game` within 10 s of a reconnect deferred and then taken (or cancelled by
      `tracking` or `no data`), and the fields added to the status record. `test/SocketWorkerTest.cpp`
-     covers each, including `tracking` and `no game` sent back to back with no frame between, and
-     `[!]` then `[OK]` back to back during an authored game.
+     covers each, including `tracking` and `no game` sent back to back with no frame between,
+     `[!]` then `[OK]` back to back during an authored game, and `[!]`, a reconnect, `[OK]`, then
+     `game_end`.
    - `VpxSessionSource` must tell the notifier when the table ends. Today `OnGameEnd` does not, and
      the notifier is called only from the per-frame callback, which stops with the table. The table
      end clears the game state without posting, since nothing renders after it, so the next table
