@@ -138,6 +138,9 @@ struct SocketWorkerConfig
    bool authoredTables = false;
    // Where player pictures are copied; empty means DefaultPictureDirectory().
    std::string pictureDir;
+   // The ROM game's bounds (docs/status-notices.md), as StatusNotifier's constants; tests shorten them.
+   int noGameDeferMs = static_cast<int>(std::chrono::milliseconds(StatusNotifier::NO_GAME_DEFERRED).count());
+   int romGameLostMs = static_cast<int>(std::chrono::milliseconds(StatusNotifier::ROM_GAME_LOST_AFTER).count());
 };
 
 class SocketWorker final
@@ -240,6 +243,8 @@ private:
    bool AnswerNvRam(const Wire::Message& msg);
    bool AnswerOverlay(const Wire::Message& msg);
    bool AnswerStatus(const Wire::Message& msg);
+   // Applies a Status to m_history: the ROM game's start and end, and the [!] count.
+   void FollowGame(const Wire::Status& status, Clock::time_point now);
    bool AnswerTopScores(const Wire::Message& msg);
    bool AnswerPlayers(const Wire::Message& msg);
    bool AnswerPlayerPicture(const Wire::Message& msg);
@@ -324,6 +329,14 @@ private:
    Clock::time_point m_lastActivity { };
    std::string m_lastOnce;
    StatusRecord m_statusRecord;          // what was last posted to m_status
+   // Kept here, not in the record, so the handshake's fresh record carries it on; copied into
+   // every record posted. Lasts for the table: a new table ends its ROM game.
+   StatusHistory m_history;
+   // The table the history's ROM game belongs to, across sessions: Connect() forgets m_declared,
+   // so a table changed during an outage is told apart here.
+   DeclareSnapshot m_historyTable;
+   bool m_haveHistoryTable = false;
+   Clock::time_point m_sessionStart { };  // this session's HelloAck
    // Read-backs. Requests the script queued and not yet sent, kept until their table is declared;
    // and those sent, by id, with the epoch they were asked under.
    std::deque<TopScoresAsk> m_asks;

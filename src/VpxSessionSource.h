@@ -43,9 +43,10 @@ namespace Scorbit
 class VpxSessionSource final : public ISessionSource, public IOverlayTarget
 {
 public:
-   // showStatus reads [Plugin.Scorbit] ShowStatus; it is read every frame, so a change applies at once.
+   // showStatus and statusNotices read [Plugin.Scorbit] ShowStatus and StatusNotices; they are
+   // read every frame, so a change applies at once.
    VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
-      int (*showStatus)());
+      int (*showStatus)(), int (*statusNotices)());
    ~VpxSessionSource() override;
 
    VpxSessionSource(const VpxSessionSource&) = delete;
@@ -155,6 +156,7 @@ private:
    DmdTap& m_tap;
    DmdOverlay& m_overlay;
    int (*const m_showStatus)();
+   int (*const m_statusNotices)();
    const unsigned int m_gameStartMsgId;
    const unsigned int m_gameEndMsgId;
    const unsigned int m_prepareFrameMsgId;

@@ -2387,14 +2387,14 @@ void TestReadBacksWithA12Daemon()
       CHECK(record.status.sessionState == Wire::SESSION_HIDDEN && record.status.hasAuthStatus
          && record.status.authStatus == Wire::AUTH_PAIRED);
       StatusNotifier notifier(std::chrono::steady_clock::now());
-      CHECK_MSG(notifier.Frame(std::make_unique<StatusRecord>(record), true, std::chrono::steady_clock::now()).empty(),
-         "hidden posts no notification");
+      CHECK_MSG(notifier.Frame(std::make_unique<StatusRecord>(record), true, NOTICES_ALWAYS, false, std::chrono::steady_clock::now()).kind
+         == NoticeAction::Kind::None, "hidden posts no notification");
       Wire::Status authOnly = record.status;
       authOnly.authStatus = Wire::AUTH_FAILED;
       CHECK(DaemonRequest(peer, Wire::TYPE_STATUS, 530, Wire::Encode(authOnly)));
       CHECK(AwaitStatus(latch, [](const StatusRecord& r) { return r.status.authStatus == Wire::AUTH_FAILED; }, record));
-      CHECK_MSG(notifier.Frame(std::make_unique<StatusRecord>(record), true, std::chrono::steady_clock::now()).empty(),
-         "an auth change while hidden still posts nothing");
+      CHECK_MSG(notifier.Frame(std::make_unique<StatusRecord>(record), true, NOTICES_ALWAYS, false, std::chrono::steady_clock::now()).kind
+         == NoticeAction::Kind::None, "an auth change while hidden still posts nothing");
       CHECK(peer.Send(Wire::TYPE_STATUS, 0, 531, ScorbitTest::Unhex("00" "00" "0000" "06")));
       CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS));
       CHECK_MSG(ErrorCode(msg) == Wire::ERR_MALFORMED, "auth_status 6");
@@ -2805,6 +2805,162 @@ void TestPictureDirectoryDefault()
    CHECK(dir.filename() == "pictures" && dir.parent_path().filename() == "scorbit-vpx");
 }
 
+// The ROM game and the [!] count, followed on every Status so nothing is lost to the latch
+// (docs/status-notices.md): a game that begins and ends between frames, a [!] an [OK]
+// overtakes, a no game deferred after a reconnect, and the bound on a lost connection.
+void TestStatusFollowsTheRomGame()
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   {
+      FrameSnapshot frame;
+      Fill(frame, 1, 1, 128, 32, 4);
+      source.Set(MakeDeclare("tom_13", 128, 32, 4, 1), frame);
+   }
+   Wire::Message msg;
+   uint32_t seq = 700;
+   const auto status = [&](uint8_t session, uint8_t system, const std::string& text)
+   {
+      CHECK(peer.Send(Wire::TYPE_STATUS, 0, seq, Wire::Encode(Wire::Status { session, system, text })));
+      CHECK(peer.ReadOfType(Wire::TYPE_STATUS, msg, WAIT_MS) && msg.header.seq == seq && !msg.header.IsError());
+      seq++;
+   };
+   StatusRecord r;
+
+   {
+      StatusLatch latch;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.noGameDeferMs = 400;  // the no game deferral, shortened; the lost bound stays at 2 minutes
+      SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, &latch);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+      Wire::Hello hello;
+      Wire::Declare declare;
+      CHECK(Handshake(peer, hello, declare));
+      // The deferral window follows every handshake, this first one included.
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
+      CHECK(!r.history.romGame && r.history.romGames == 0 && r.history.warnings == 0);
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame; }, r));
+      CHECK(r.history.romGames == 1);
+      status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OFFLINE, "API unreachable");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.warnings == 1; }, r));
+      CHECK_MSG(r.history.romGame && r.history.lastWarning == "[!] Scorbit: no data, offline - API unreachable", "no data continues the game");
+      CHECK_MSG(r.history.warningsAtGameStart == 0, "the game began before that warning");
+      status(Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_HIDDEN; }, r));
+      CHECK_MSG(r.history.warnings == 1 && r.history.romGame, "hidden is neither a warning nor a game change");
+
+      // Back to back, with no frame between: the end is still seen...
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return !x.history.romGame; }, r));
+      CHECK(r.history.romGames == 1);
+      // ...as is a whole game...
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGames == 2 && !x.history.romGame; }, r));
+      // ...and a [!] an [OK] overtook.
+      status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "waiting");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.warnings == 2 && x.status.sessionState == Wire::SESSION_NONE; }, r));
+      CHECK(r.history.lastWarning == "[!] Scorbit: no data, ok - waiting");
+
+      // A reconnect inside the lost bound keeps the game and the counts; its first no game is deferred.
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame && x.history.romGames == 3; }, r));
+      peer.CloseClient();
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.haveStatus; }, r));
+      CHECK_MSG(r.history.romGame && r.history.romGames == 3 && r.history.warnings == 2, "the history outlives the session");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
+      CHECK_MSG(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { }, "no game just after a reconnect is deferred");
+      status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NO_DATA; }, r));
+      CHECK_MSG(r.history.romGame && r.history.romGameEndsAt == std::chrono::steady_clock::time_point { }, "no data cancels the deferral");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NONE; }, r));
+      CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
+      // The session drops with the deferral pending: the next session starts without it, and
+      // its own first no game is deferred afresh.
+      peer.CloseClient();
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.haveStatus; }, r));
+      CHECK_MSG(r.history.romGame && r.history.romGameEndsAt == std::chrono::steady_clock::time_point { }, "a deferral does not outlive its session");
+      status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
+      CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NO_DATA; }, r));
+      CHECK_MSG(!r.history.romGame && r.history.romGames == 3, "the deferred end took effect when its time came; no data starts nothing");
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGames == 4; }, r));
+      peer.CloseClient();
+   }
+
+   // A reconnect past the lost bound ends the game at the handshake.
+   {
+      StatusLatch latch;
+      SocketWorkerConfig cfg = MakeConfig(peer);
+      cfg.romGameLostMs = 100;
+      SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, &latch);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+      Wire::Hello hello;
+      Wire::Declare declare;
+      CHECK(Handshake(peer, hello, declare));
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame; }, r));
+      peer.CloseClient();
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.history.romGame; }, r));
+      CHECK_MSG(r.history.romGames == 1, "over, not restarted");
+      peer.CloseClient();
+   }
+
+   // A table changed during an outage: the first Declare of the new session is another
+   // machine's, whose game has not started, even inside the lost bound.
+   {
+      StatusLatch latch;
+      SocketWorker worker(source, MakeConfig(peer), Quiet(), nullptr, nullptr, &latch);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+      Wire::Hello hello;
+      Wire::Declare declare;
+      CHECK(Handshake(peer, hello, declare));
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame; }, r));
+      peer.CloseClient();
+      {
+         FrameSnapshot frame;
+         Fill(frame, 1, 1, 128, 32, 4);
+         source.Set(MakeDeclare("jupk_513", 128, 32, 4, 1), frame);
+      }
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(declare.romId == "jupk_513");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.history.romGame; }, r));
+      CHECK_MSG(r.history.romGames == 1, "the old table's game is over; the new table has none");
+      peer.CloseClient();
+   }
+}
+
 int main()
 {
    TestSession();
@@ -2821,6 +2977,7 @@ int main()
    TestWriteOnAHostWithoutWriteSupport();
    TestMemoryReadWithoutAnApiThread();
    TestOverlayAndStatusOverTheSocket();
+   TestStatusFollowsTheRomGame();
    TestRefusedHelloReason();
    TestAuthoredTableWithAuthoredDaemon();
    TestGamesCommittedBeforeConnecting();
