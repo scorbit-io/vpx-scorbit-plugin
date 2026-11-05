@@ -64,15 +64,17 @@ that time, not only when the table ends. An authored game lost that way still en
 
 **A reconnect, on a ROM table.** A restarted daemon says `no game` until it has read the machine
 again. So a `no game` within 10 s of a reconnect is deferred, not taken at once: a `tracking` within
-those 10 s continues the game, and otherwise the game ends when they are up. A game that really
+those 10 s continues the game, as does a `no data`, and otherwise the game ends when they are up. A game that really
 ended during the outage therefore ends 10 s late, not never.
 
 **Every Status counts.** The worker sees each Status; the notifier sees only the latest record left
 in the latch when a frame renders, and two Statuses can arrive between frames (`tracking` then
 `no game`). So the ROM game is followed in the worker, which applies the rules above to every
-Status and puts the result in the status record: whether a ROM game is in progress, a count of ROM
-games started (so a game that began and ended between two frames is still seen), and the last
-`[!]` text seen during the current or last game.
+Status and puts the result in the status record: whether a ROM game is in progress, and a count of
+ROM games started (so a game that began and ended between two frames is still seen). For every
+table kind it also counts the `[!]` Statuses it has received and keeps the last one's text. The
+notifier notes that count when a game starts, ROM or authored; if it has moved by the game's end,
+the last `[!]` text is the earlier failure to report, even when only an `[OK]` reached a frame.
 
 ## Design
 
@@ -162,9 +164,10 @@ Rejected:
    - The notifier learns an authored game's boundaries from the script's `game_start` and
      `game_end` as `VpxSessionSource` commits them, and the table kind from its Declare.
    - The ROM game is followed in `SocketWorker`, on every Status: the 2-minute bound on a lost
-     connection, a `no game` within 10 s of a reconnect deferred and then taken, and the three
-     fields added to the status record. `test/SocketWorkerTest.cpp` covers each, including
-     `tracking` and `no game` sent back to back with no frame between.
+     connection, a `no game` within 10 s of a reconnect deferred and then taken (or cancelled by
+     `tracking` or `no data`), and the fields added to the status record. `test/SocketWorkerTest.cpp`
+     covers each, including `tracking` and `no game` sent back to back with no frame between, and
+     `[!]` then `[OK]` back to back during an authored game.
    - `VpxSessionSource` must tell the notifier when the table ends. Today `OnGameEnd` does not, and
      the notifier is called only from the per-frame callback, which stops with the table. The table
      end clears the game state without posting, since nothing renders after it, so the next table
