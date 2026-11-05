@@ -615,7 +615,8 @@ void SocketWorker::PostStatus()
 
 void SocketWorker::FollowGame(const Wire::Status& status, Clock::time_point now)
 {
-   if (StatusNotifier::Marker(status) == "[!]")
+   // Hidden carries no indication at all, whatever its system state says.
+   if (status.sessionState != Wire::SESSION_HIDDEN && StatusNotifier::Marker(status) == "[!]")
    {
       m_history.warnings++;
       m_history.lastWarning = StatusNotifier::Describe(status);
@@ -633,6 +634,7 @@ void SocketWorker::FollowGame(const Wire::Status& status, Clock::time_point now)
       {
          m_history.romGame = true;
          m_history.romGames++;
+         m_history.warningsAtGameStart = m_history.warnings;
       }
       m_history.romGameEndsAt = { };
       break;

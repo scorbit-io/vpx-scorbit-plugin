@@ -30,8 +30,9 @@ struct StatusHistory
    // Set while a no game that arrived within 10 s of a reconnect is deferred: the game ends
    // then unless a tracking or no data arrives first.
    std::chrono::steady_clock::time_point romGameEndsAt { };
-   uint32_t warnings = 0;     // [!] Statuses received
+   uint32_t warnings = 0;     // [!] Statuses received; a hidden Status is not one
    std::string lastWarning;   // the last one, described
+   uint32_t warningsAtGameStart = 0;  // warnings when the current or last ROM game started
 };
 
 // The whole state the API thread shows, so the latest one record is enough.
@@ -125,6 +126,9 @@ private:
    uint32_t m_seenStarts = 0;          // the start count as of the last frame
    uint32_t m_seenWarnings = 0;        // the warning count as of the last frame
    uint32_t m_warningsAtStart = 0;     // the warning count when the current game began
+   bool m_lostInGame = false;          // the connection went, past the grace, during the game
+   std::string m_lostText;
+   bool m_afterGame = false;           // until the next post or game: the daemon's own game end is not news
 };
 
 }

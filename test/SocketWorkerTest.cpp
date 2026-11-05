@@ -2857,6 +2857,10 @@ void TestStatusFollowsTheRomGame()
       status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OFFLINE, "API unreachable");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.warnings == 1; }, r));
       CHECK_MSG(r.history.romGame && r.history.lastWarning == "[!] Scorbit: no data, offline - API unreachable", "no data continues the game");
+      CHECK_MSG(r.history.warningsAtGameStart == 0, "the game began before that warning");
+      status(Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_HIDDEN; }, r));
+      CHECK_MSG(r.history.warnings == 1 && r.history.romGame, "hidden is neither a warning nor a game change");
 
       // Back to back, with no frame between: the end is still seen...
       status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");

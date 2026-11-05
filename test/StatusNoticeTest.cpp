@@ -340,6 +340,68 @@ void TestGameBetweenFrames()
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Warned(Over(), 1, offline)), t0 + seconds(30))
       == Post("[!] Scorbit, during the game: tracking, offline - x"), "a game that began and ended between frames still gets its notice");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over(2)), t0 + seconds(60)) == NONE, "one with nothing wrong gets none");
+   // A table-load warning and the tracking that followed it arrived between two frames.
+   StatusHistory loadWarned = Warned(Over(3), 2, "[!] Scorbit: no data, ok - waiting for this table's first scores");
+   loadWarned.warningsAtGameStart = 2;
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", loadWarned), t0 + seconds(90)) == NONE,
+      "a warning from before the game is not reported as during it");
+}
+
+void TestLostDuringGameIsReported()
+{
+   const Clock::time_point t0 = Clock::now();
+   StatusNotifier n(t0);
+   CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0) == Post(NO_GAME_OK));
+   CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(10)) == NONE);
+   auto lost = Lost(t0 + seconds(30));
+   lost->history = InGame();
+   CHECK(Quiet(n, std::move(lost), t0 + seconds(31)) == NONE);
+   CHECK_MSG(Quiet(n, nullptr, t0 + seconds(40)) == NONE, "past the grace, still quiet in the game");
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(50)) == NONE, "reconnected within the bound");
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(60))
+      == Post("[!] Scorbit, during the game: no data, no connection to the Scorbit daemon"), "the outage is reported at the end");
+}
+
+void TestAuthoredEndSettles()
+{
+   const Clock::time_point t0 = Clock::now();
+   StatusNotifier n(t0);
+   CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
+   n.GameStarted();
+   CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(10), true) == NONE);
+   n.GameEnded();
+   CHECK_MSG(Quiet(n, nullptr, t0 + seconds(30), true) == NONE, "a clean game ends with no notice");
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(31), true) == NONE,
+      "the daemon's own game end, arriving after the script's, is not news");
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_UNPAIRED, "", Warned(Over(), 1, "x")), t0 + seconds(32), true)
+      == Post("[!] Scorbit: no game, not paired"), "a [!] after it is");
+   // The daemon's "not recorded" after a held authored game posts as a transition.
+   StatusNotifier m(t0);
+   CHECK(Quiet(m, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
+   m.GameStarted();
+   m.GameEnded();
+   CHECK(Quiet(m, nullptr, t0 + seconds(10), true) == NONE);
+   const std::string notRecorded = "[!] Scorbit: no data, ok - this game was not recorded";
+   CHECK(Quiet(m, Rom(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "this game was not recorded", Warned({ }, 1, notRecorded)), t0 + seconds(11), true)
+      == Post(notRecorded));
+}
+
+void TestEndSummaryCanBeTakenDown()
+{
+   const Clock::time_point t0 = Clock::now();
+   StatusNotifier n(t0);
+   CHECK(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", { }), t0, true) == Post(NO_GAME_OK));
+   n.GameStarted();
+   const std::string offline = "[!] Scorbit: tracking, offline - x";
+   CHECK(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OFFLINE, "x", Warned(InGame(), 1, offline)), t0 + seconds(10), true) == NONE);
+   auto lost = Lost(t0 + seconds(20));
+   lost->history = Warned(InGame(), 1, offline);
+   CHECK(Quiet(n, std::move(lost), t0 + seconds(21), true) == NONE);
+   n.GameEnded();
+   const std::string summary = "[!] Scorbit, during the game: tracking, offline - x";
+   CHECK_MSG(Quiet(n, nullptr, t0 + seconds(22), true) == Post(summary), "ended inside the grace: the summary posts with nothing current");
+   n.GameStarted();
+   CHECK_MSG(Quiet(n, nullptr, t0 + seconds(23), true) == Expire(summary), "and the next game can take it down");
 }
 
 void TestSettings()
@@ -399,6 +461,9 @@ int main()
    TestRomGameLostBound();
    TestAuthoredGameFollowsTheScript();
    TestGameBetweenFrames();
+   TestLostDuringGameIsReported();
+   TestAuthoredEndSettles();
+   TestEndSummaryCanBeTakenDown();
    TestSettings();
    TestTableEndedClearsTheGame();
    TestDescribeEarlier();

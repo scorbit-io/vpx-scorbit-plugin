@@ -94,14 +94,18 @@ std::string StatusNotifier::DescribeEarlier(const std::string& described)
 void StatusNotifier::NewTable()
 {
    m_posted.clear();
-   m_inGame = false;
-   m_authoredGame = false;
+   TableEnded();
 }
 
 void StatusNotifier::TableEnded()
 {
    m_inGame = false;
    m_authoredGame = false;
+   m_lostInGame = false;
+   m_afterGame = false;
+   // The worker ends the old table's game on its next Declare; a frame before that must not.
+   m_current.history.romGame = false;
+   m_current.history.romGameEndsAt = { };
 }
 
 void StatusNotifier::GameStarted()
@@ -163,7 +167,13 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
    const bool started = !wasInGame && (inGame || startedSince);
    const bool ended = (wasInGame || startedSince) && !inGame;
    if (started)
-      m_warningsAtStart = m_seenWarnings;
+   {
+      // The worker marks a ROM game's start on the Status that starts it; a frame is too
+      // coarse, as a table-load warning and the tracking can arrive between two.
+      m_warningsAtStart = authored ? m_seenWarnings : h.warningsAtGameStart;
+      m_lostInGame = false;
+      m_afterGame = false;
+   }
    m_seenWarnings = h.warnings;
 
    const bool hidden = m_current.inSession && m_current.haveStatus && m_current.status.sessionState == Wire::SESSION_HIDDEN;
@@ -174,12 +184,20 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
    }
 
    NoticeAction action;
-   if (started && inGame && !m_posted.empty() && now - m_postedAt < NOTICE_LIFETIME)
-      action = { NoticeAction::Kind::Expire, m_posted };
-   if (inGame)
-      return action;
-
    const std::string want = Want(now);
+   if (inGame)
+   {
+      if (started && !m_posted.empty() && now - m_postedAt < NOTICE_LIFETIME)
+         action = { NoticeAction::Kind::Expire, m_posted };
+      // The plugin's own [!], which no daemon Status counts: reported at the end if it recovers.
+      if (!m_current.inSession && want.starts_with("[!]"))
+      {
+         m_lostInGame = true;
+         m_lostText = want;
+      }
+      return action;
+   }
+
    if (ended)
    {
       // One notice if anything went wrong during the game: the current state when it is
@@ -189,20 +207,33 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
          action = { NoticeAction::Kind::Post, want };
       else if (h.warnings != m_warningsAtStart && !h.lastWarning.empty())
          action = { NoticeAction::Kind::Post, DescribeEarlier(h.lastWarning) };
-      m_posted = want;
+      else if (m_lostInGame)
+         action = { NoticeAction::Kind::Post, DescribeEarlier(m_lostText) };
+      // With nothing current to acknowledge, the summary itself is what a game may take down.
+      m_posted = want.empty() ? action.text : want;
       // Only a post is on screen to take down: a game starting right after one that ended
       // quietly must not expire a notice that was never there.
       if (action.kind == NoticeAction::Kind::Post)
          m_postedAt = now;
+      m_lostInGame = false;
+      m_afterGame = true;
       return action;
    }
 
    if (want.empty())
       return { };
+   // After a script's game_end the daemon still says tracking until it has taken the batch,
+   // then no game: that settling is not news. Any [!] is.
+   if (m_afterGame && want.starts_with("[OK]") && m_posted.starts_with("[OK]"))
+   {
+      m_posted = want;
+      return { };
+   }
    if (want == m_posted && !(want.starts_with("[!]") && now - m_postedAt >= REFRESH_EVERY))
       return { };
    m_posted = want;
    m_postedAt = now;
+   m_afterGame = false;
    return { NoticeAction::Kind::Post, want };
 }
 
