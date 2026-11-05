@@ -158,6 +158,8 @@ void TestCaptionIsTheDescribedState()
    offline.status.supportText = "Scorbit API unreachable";
    CHECK(CaptionFor(offline, T0) == "[!] Scorbit: no data, offline - Scorbit API unreachable");
    CHECK_MSG(CaptionFor(InSession(Wire::SESSION_HIDDEN, Wire::SYSTEM_OK), T0).empty(), "hidden shows no caption");
+   CHECK_MSG(CaptionFor(WithAuth(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, Wire::AUTH_FAILED), T0) == "[!] Scorbit: tracking, authentication failed",
+      "an authentication-only problem reads as the light shows it");
 }
 
 // The hover rule: a moving cursor over the light, and nothing after 3 s at rest.
