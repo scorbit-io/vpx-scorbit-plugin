@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -31,6 +32,13 @@ constexpr double INSET_PT = 16;
 // every byte value would redraw on every tick.
 constexpr int RING_STEPS = 16;
 constexpr wchar_t CLASS_NAME[] = L"ScorbitStatusLight";
+// The caption beside the light while the cursor hovers over it (docs/status-notices.md, "Hover").
+constexpr double CAPTION_GAP_PT = 8;
+constexpr double CAPTION_MAX_WIDTH_PT = 360;
+constexpr double CAPTION_PAD_X_PT = 8;
+constexpr double CAPTION_PAD_Y_PT = 5;
+constexpr double CAPTION_CORNER_PT = 6;
+constexpr double CAPTION_FONT_PT = 12;
 
 HWND window = nullptr;
 ATOM windowClass = 0;
@@ -53,6 +61,16 @@ double drawnScale = 0;
 POINT drawnAt { };
 BYTE drawnAlpha = 0;
 LightFrame frame;
+
+// The caption: a second window of the same kind, drawn again only when its text or scale changes
+// and moved with the light.
+HWND captionWindow = nullptr;
+HoverTracker hover;
+std::string drawnCaption;
+double drawnCaptionScale = 0;
+BYTE drawnCaptionAlpha = 0;
+SIZE captionSize { };
+bool captionShown = false;
 
 // Kept between frames and remade only when the frame's size changes.
 HDC memory = nullptr;
@@ -199,6 +217,147 @@ void Draw(bool force)
    ReleaseDC(nullptr, screen);
 }
 
+void HideCaption()
+{
+   if (captionWindow != nullptr && captionShown)
+      ShowWindow(captionWindow, SW_HIDE);
+   captionShown = false;
+}
+
+// UTF-8, as the wire carries it; bytes that are not UTF-8 are read in the system code page
+// rather than dropped.
+std::wstring Widen(const std::string& text)
+{
+   const int length = static_cast<int>(text.size());
+   UINT page = CP_UTF8;
+   int n = MultiByteToWideChar(page, MB_ERR_INVALID_CHARS, text.data(), length, nullptr, 0);
+   if (n <= 0)
+   {
+      page = CP_ACP;
+      n = MultiByteToWideChar(page, 0, text.data(), length, nullptr, 0);
+   }
+   if (n <= 0)
+      return L"";
+   std::wstring out(static_cast<size_t>(n), L'\0');
+   MultiByteToWideChar(page, 0, text.data(), length, out.data(), n);
+   return out;
+}
+
+// The caption's pixels: GDI draws the text in white on black, which gives each pixel its text
+// coverage but no alpha, so the alpha is set here, over black at the light's background opacity,
+// with rounded corners. Grayscale antialiasing, since ClearType's colour fringes have no alpha.
+bool DrawCaption(const std::string& text, double scale, BYTE alpha)
+{
+   const std::wstring wide = Widen(text);
+   const HDC screen = GetDC(nullptr);
+   if (screen == nullptr)
+      return false;
+   bool ok = false;
+   const int dpi = static_cast<int>(std::lround(96 * scale));
+   HFONT font = CreateFontW(-MulDiv(static_cast<int>(CAPTION_FONT_PT), dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+      OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+   const int padX = static_cast<int>(std::lround(CAPTION_PAD_X_PT * scale));
+   const int padY = static_cast<int>(std::lround(CAPTION_PAD_Y_PT * scale));
+   const int corner = static_cast<int>(std::lround(CAPTION_CORNER_PT * scale));
+   HDC dc = CreateCompatibleDC(screen);
+   HBITMAP dib = nullptr;
+   void* pixels = nullptr;
+   if (dc != nullptr && font != nullptr)
+   {
+      const HGDIOBJ previousFont = SelectObject(dc, font);
+      RECT measure { 0, 0, static_cast<LONG>(std::lround(CAPTION_MAX_WIDTH_PT * scale)), 0 };
+      DrawTextW(dc, wide.c_str(), -1, &measure, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_LEFT | DT_TOP);
+      const int width = std::max<int>(1, measure.right - measure.left) + 2 * padX;
+      const int height = std::max<int>(1, measure.bottom - measure.top) + 2 * padY;
+      BITMAPINFO info { };
+      info.bmiHeader.biSize = sizeof(info.bmiHeader);
+      info.bmiHeader.biWidth = width;
+      info.bmiHeader.biHeight = -height;
+      info.bmiHeader.biPlanes = 1;
+      info.bmiHeader.biBitCount = 32;
+      info.bmiHeader.biCompression = BI_RGB;
+      dib = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+      if (dib != nullptr && pixels != nullptr)
+      {
+         const HGDIOBJ previousBitmap = SelectObject(dc, dib);
+         std::memset(pixels, 0, static_cast<size_t>(width) * height * 4);
+         SetBkMode(dc, TRANSPARENT);
+         SetTextColor(dc, RGB(255, 255, 255));
+         RECT box { padX, padY, width - padX, height - padY };
+         DrawTextW(dc, wide.c_str(), -1, &box, DT_WORDBREAK | DT_NOPREFIX | DT_LEFT | DT_TOP);
+         GdiFlush();
+         uint32_t* px = static_cast<uint32_t*>(pixels);
+         for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+               uint32_t& p = px[static_cast<size_t>(y) * width + x];
+               // Outside a corner's quarter circle: nothing.
+               const int cx = x < corner ? corner - 1 - x : x >= width - corner ? x - (width - corner) : -1;
+               const int cy = y < corner ? corner - 1 - y : y >= height - corner ? y - (height - corner) : -1;
+               if (cx >= 0 && cy >= 0 && (cx + 1) * (cx + 1) + (cy + 1) * (cy + 1) > corner * corner)
+               {
+                  p = 0;
+                  continue;
+               }
+               const uint32_t coverage = ((p & 0xFF) + ((p >> 8) & 0xFF) + ((p >> 16) & 0xFF)) / 3;
+               const uint32_t a = coverage + LightGeometry::BACKGROUND_ALPHA * (255 - coverage) / 255;
+               p = (a << 24) | (coverage << 16) | (coverage << 8) | coverage; // premultiplied white over black
+            }
+         SIZE extent { width, height };
+         POINT origin { 0, 0 };
+         BLENDFUNCTION blend { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+         // Drawn at the origin; placed by SetWindowPos afterwards, which a layered window keeps.
+         if (UpdateLayeredWindow(captionWindow, screen, nullptr, &extent, dc, &origin, 0, &blend, ULW_ALPHA))
+         {
+            captionSize = extent;
+            ok = true;
+         }
+         SelectObject(dc, previousBitmap);
+      }
+      SelectObject(dc, previousFont);
+   }
+   if (dib != nullptr)
+      DeleteObject(dib);
+   if (dc != nullptr)
+      DeleteDC(dc);
+   if (font != nullptr)
+      DeleteObject(font);
+   ReleaseDC(nullptr, screen);
+   return ok;
+}
+
+// Beside the light on the side toward the monitor's centre, level with it, at its opacity.
+void ShowCaption(const std::string& text)
+{
+   if (captionWindow == nullptr)
+   {
+      captionWindow = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, CLASS_NAME, L"",
+         WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, ThisModule(), nullptr);
+      if (captionWindow == nullptr)
+         return;
+   }
+   if (text != drawnCaption || drawnScale != drawnCaptionScale || shownAlpha != drawnCaptionAlpha)
+   {
+      if (!DrawCaption(text, drawnScale, shownAlpha))
+         return;
+      drawnCaption = text;
+      drawnCaptionScale = drawnScale;
+      drawnCaptionAlpha = shownAlpha;
+   }
+   MONITORINFO monitor { };
+   monitor.cbSize = sizeof(monitor);
+   const POINT centre { drawnAt.x + frame.size / 2, drawnAt.y + frame.size / 2 };
+   if (!GetMonitorInfoW(MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST), &monitor))
+      return;
+   const RECT& area = monitor.rcMonitor;
+   const int gap = static_cast<int>(std::lround(CAPTION_GAP_PT * drawnScale));
+   const bool lightOnRight = centre.x > (area.left + area.right) / 2;
+   const int x = lightOnRight ? drawnAt.x - gap - captionSize.cx : drawnAt.x + frame.size + gap;
+   const int y = std::clamp<int>(centre.y - captionSize.cy / 2, area.top, area.bottom - captionSize.cy);
+   SetWindowPos(captionWindow, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+   captionShown = true;
+}
+
 // Shown only while VPX is the application in front, so it never sits over another one.
 void FollowForeground()
 {
@@ -207,6 +366,7 @@ void FollowForeground()
    {
       if (inFront)
          ShowWindow(window, SW_HIDE);
+      HideCaption();
       inFront = false;
       lastFront = nullptr;
       return;
@@ -260,6 +420,12 @@ void Hide()
       DestroyWindow(window);
    }
    window = nullptr;
+   if (captionWindow != nullptr)
+      DestroyWindow(captionWindow);
+   captionWindow = nullptr;
+   captionShown = false;
+   drawnCaption.clear();
+   drawnCaptionScale = 0;
    if (windowClass != 0)
       UnregisterClassW(CLASS_NAME, ThisModule());
    windowClass = 0;
@@ -295,7 +461,7 @@ bool Show()
 
 }
 
-bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash, const std::string& /*caption, SB-6351*/)
+bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash, const std::string& caption)
 {
    if (corner < 1 || corner > 4 || !view.visible)
    {
@@ -327,6 +493,19 @@ bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool 
    shownAlpha = static_cast<BYTE>(std::lround(std::clamp(opacity, 0.0, 1.0) * 255));
    FollowForeground();
    Draw(false);
+   // Hover: the cursor's position read with no input of our own, so the light stays
+   // click-through; a hidden cursor (VPX hides it on a press) shows nothing.
+   POINT cursor { };
+   CURSORINFO cursorInfo { };
+   cursorInfo.cbSize = sizeof(cursorInfo);
+   const bool haveCursor = GetCursorPos(&cursor) != FALSE;
+   const bool hidden = GetCursorInfo(&cursorInfo) != FALSE && (cursorInfo.flags & CURSOR_SHOWING) == 0;
+   const bool over = haveCursor && inFront && drawn && cursor.x >= drawnAt.x && cursor.x < drawnAt.x + frame.size
+      && cursor.y >= drawnAt.y && cursor.y < drawnAt.y + frame.size;
+   if (hover.Tick(cursor.x, cursor.y, over, hidden, now) && !caption.empty())
+      ShowCaption(caption);
+   else
+      HideCaption();
    return appeared;
 }
 
