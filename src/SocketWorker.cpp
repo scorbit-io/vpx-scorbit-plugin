@@ -615,6 +615,8 @@ void SocketWorker::PostStatus()
 
 void SocketWorker::FollowGame(const Wire::Status& status, Clock::time_point now)
 {
+   // A warning on the Status that starts a game belongs to the game.
+   const uint32_t warningsBefore = m_history.warnings;
    // Hidden carries no indication at all, whatever its system state says.
    if (status.sessionState != Wire::SESSION_HIDDEN && StatusNotifier::Marker(status) == "[!]")
    {
@@ -634,7 +636,7 @@ void SocketWorker::FollowGame(const Wire::Status& status, Clock::time_point now)
       {
          m_history.romGame = true;
          m_history.romGames++;
-         m_history.warningsAtGameStart = m_history.warnings;
+         m_history.warningsAtGameStart = warningsBefore;
       }
       m_history.romGameEndsAt = { };
       break;
@@ -1016,7 +1018,10 @@ bool SocketWorker::Handshake()
    if (m_history.romGame && !m_statusRecord.inSession
       && m_sessionStart - m_statusRecord.since >= std::chrono::milliseconds(m_config.romGameLostMs))
       m_history.romGame = false;
-   // A deferral is the old session's; this one's first no game gets its own.
+   // A deferral is the old session's; one that ran out meanwhile ended the game then, and
+   // otherwise this session's first no game gets its own.
+   if (m_history.romGameEndsAt != Clock::time_point { } && m_sessionStart >= m_history.romGameEndsAt)
+      m_history.romGame = false;
    m_history.romGameEndsAt = { };
    m_statusRecord = { };
    m_statusRecord.inSession = true;
