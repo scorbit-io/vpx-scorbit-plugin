@@ -49,7 +49,9 @@ posted. A daemon that is gone for good is told within that time, not only when t
 
 1. **Outside a game, no change.** The current state is posted at table load and on each change.
 2. **In a game, no notices.** A change made during a game is not posted then; the light shows it
-   if it is up.
+   if it is up. A notice already on screen when the game starts is taken down. VPX gives each notice
+   a fixed lifetime (5 s here), and updating the plugin's own notice with a length of 0 expires it at
+   once (`NotificationOverlay::PushNotification` reuses the handle and resets its disappear time).
 3. **At the end of a game, one notice if anything went wrong during it.** The plugin remembers the
    last `[!]` text seen during the game. At game end it posts the current state if that is `[!]`.
    Otherwise, if a `[!]` state came up during the game, it posts that one, marked as earlier
@@ -94,6 +96,12 @@ connection. The window stays click-through and non-activating, so focus is never
 cursor is over the light, a second window of the same kind shows the support text beside it, on the
 side toward the centre of the screen.
 
+**The caption needs a moving cursor.** A position alone is not enough: VPX hides the cursor on the
+next button press without moving it, so a cursor left resting on the light would keep the caption
+up over play. The caption shows only when the cursor has moved within the last 3 s and is over the
+light. It goes after 3 s without movement, and comes back only on fresh movement. Where the platform
+reports cursor visibility cheaply (`GetCursorInfo` on Windows), a hidden cursor also takes it down.
+
 **Hover is a desktop gesture, not a channel.** VPX hides the cursor when play starts. It shows it
 again when the mouse moves over the playfield, and hides it on the next button press
 (`Player::Player`, the `SDL_EVENT_MOUSE_MOTION` case in `player.cpp`, `InputManager.cpp`). VPX does
@@ -103,18 +111,27 @@ explains the light; it never carries anything a player must see.
 
 Rejected:
 
-- **A modifier key to reveal the text.** That needs a global key hook: an event tap (behind the
-  Accessibility permission) on macOS, a low-level keyboard hook on Windows, a key grab on X11. Each
-  is intrusive for a plugin running inside VPX.
+- **A modifier key to reveal the text.** Modifier state can be polled on the same tick, with no
+  hook (`GetAsyncKeyState`, `CGEventSourceFlagsState`, the mask from `xcb_query_pointer`). But VPX's
+  default bindings already use the modifiers as game controls: Shift for the flippers, Ctrl for
+  magna-save and the menu, Left Alt for the lockbar (`InputManager.cpp`). A modifier reveal would
+  fire during play.
 - **A caption shown on each change.** It would be wider than the corner the user cleared for the
   light, so it would cover game content the light does not.
 
 ## Work
 
-1. The notice rules and `StatusNotices`, on every platform. All of it is in `StatusNotifier`, so
-   `test/StatusNoticeTest.cpp` covers it with no VPX: no notices in a game, the end-of-game notice
-   (current and earlier), the 2-minute bound on a lost connection, the repeat outside a game only,
-   and each setting value.
+1. The notice rules and `StatusNotices`, on every platform.
+   - The rules live in `StatusNotifier`, so `test/StatusNoticeTest.cpp` covers them with no VPX: no
+     notices in a game, taking down a notice on screen at game start, the end-of-game notice
+     (current and earlier), the 2-minute bound on a lost connection, the repeat outside a game only,
+     and each setting value.
+   - `VpxSessionSource` must tell the notifier when the table ends. Today `OnGameEnd` does not, and
+     the notifier is called only from the per-frame callback, which stops with the table. The table
+     end clears the game state without posting, since nothing renders after it, so the next table
+     starts outside a game. The notifier's table-end call is unit tested with the rest; the wiring
+     itself needs VPX, so the live check ends a table mid-game and loads another.
 2. The hover caption, one change per platform: macOS, Windows, X11. Each needs a live check that
    cursor polling finds the light while VPX plays and that the caption takes no focus, using the same
-   five-minute session as `docs/status-window.md`.
+   five-minute session as `docs/status-window.md`. The check includes resting the cursor on the light
+   and pressing a flipper: the caption goes within 3 s.
