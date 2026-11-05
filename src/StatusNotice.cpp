@@ -48,6 +48,21 @@ bool KnownSystem(uint8_t value)
    return value <= Wire::SYSTEM_DEGRADED;
 }
 
+// A protocol 1.2 daemon's authentication state, when it alone says something is wrong; the
+// light reads it the same way (StatusLight.cpp), so the words match the colours.
+const char* AuthProblem(const Wire::Status& status)
+{
+   if (!status.hasAuthStatus)
+      return nullptr;
+   switch (status.authStatus)
+   {
+   case Wire::AUTH_NOT_AUTHENTICATED: return "not authenticated";
+   case Wire::AUTH_FAILED: return "authentication failed";
+   case Wire::AUTH_UNPAIRED: return status.systemState == Wire::SYSTEM_OK ? "not paired" : nullptr;
+   default: return nullptr;
+   }
+}
+
 }
 
 // ASCII, because the notification font has no symbol glyphs we can rely on (SB-6003).
@@ -55,7 +70,7 @@ std::string StatusNotifier::Marker(const Wire::Status& status)
 {
    if (!KnownSession(status.sessionState) || !KnownSystem(status.systemState))
       return "[?]";
-   if (status.sessionState == Wire::SESSION_NO_DATA || status.systemState != Wire::SYSTEM_OK)
+   if (status.sessionState == Wire::SESSION_NO_DATA || status.systemState != Wire::SYSTEM_OK || AuthProblem(status) != nullptr)
       return "[!]";
    return "[OK]";
 }
@@ -70,8 +85,9 @@ std::string StatusNotifier::Describe(const Wire::Status& status)
    // Hidden is never posted, so it carries no marker.
    if (status.sessionState == Wire::SESSION_HIDDEN)
       return "Scorbit: hidden" + (status.supportText.empty() ? std::string() : " - " + status.supportText);
+   const char* auth = AuthProblem(status);
    std::string text = Marker(status) + " Scorbit: " + SessionName(status.sessionState) + ", "
-      + SystemName(status.systemState);
+      + (auth != nullptr ? std::string(auth) : SystemName(status.systemState));
    if (!status.supportText.empty())
       text += " - " + status.supportText;
    return text;

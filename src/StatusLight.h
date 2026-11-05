@@ -10,7 +10,9 @@
 
 #include "StatusNotice.h"
 
+#include <chrono>
 #include <cstdint>
+#include <string>
 
 namespace Scorbit
 {
@@ -75,5 +77,29 @@ inline constexpr size_t RING_SEGMENTS = 30;
 // or a loss younger than the notifications' grace, keeps what is shown, as the notifier does:
 // a quick reconnect into the same state is not a transition.
 LightView LightFor(const StatusRecord& record, StatusNotifier::Clock::time_point now, const LightView& shown);
+
+// The caption the light shows beside itself while the cursor hovers over it
+// (docs/status-notices.md, "Hover"): the state as the notifier describes it, or the
+// no-connection line, or empty while there is nothing to say.
+std::string CaptionFor(const StatusRecord& record, StatusNotifier::Clock::time_point now);
+
+// The hover rule, apart from any window so it is tested on every platform: the caption shows
+// only while the cursor has moved within SETTLE and is over the light. VPX hides the cursor on a
+// button press without moving it, so a cursor left resting on the light shows nothing for long.
+class HoverTracker final
+{
+public:
+   using Clock = StatusNotifier::Clock;
+   static constexpr std::chrono::seconds SETTLE { 3 };
+
+   // Called on the tick that drives the light, with the cursor's position in any consistent
+   // units, whether it is over the light, and whether the platform reports it hidden.
+   bool Tick(double x, double y, bool over, bool hidden, Clock::time_point now);
+
+private:
+   bool m_have = false;
+   double m_x = 0, m_y = 0;
+   Clock::time_point m_movedAt { };
+};
 
 }

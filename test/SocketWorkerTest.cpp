@@ -2805,6 +2805,16 @@ void TestPictureDirectoryDefault()
    CHECK(dir.filename() == "pictures" && dir.parent_path().filename() == "scorbit-vpx");
 }
 
+// Waits, answering the worker's idle pings meanwhile so it keeps the session: silence past the
+// pong timeout would read as a dead daemon.
+void Idle(ScorbitTest::TestPeer& peer, int ms)
+{
+   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+   Wire::Message msg;
+   while (std::chrono::steady_clock::now() < until)
+      peer.ReadOfType(0xFFFF, msg, 200);
+}
+
 // The ROM game and the [!] count, followed on every Status so nothing is lost to the latch
 // (docs/status-notices.md): a game that begins and ends between frames, a [!] an [OK]
 // overtakes, a no game deferred after a reconnect, and the bound on a lost connection.
@@ -2838,9 +2848,10 @@ void TestStatusFollowsTheRomGame()
    {
       StatusLatch latch;
       SocketWorkerConfig cfg = MakeConfig(peer);
-      // The no game deferral, shortened but longer than a reconnect (about 1 s), so a drop with a
-      // deferral pending comes back before it runs out; the lost bound stays at 2 minutes.
-      cfg.noGameDeferMs = 1500;
+      // The no game deferral, shortened but well longer than a reconnect (about 1 s here, more
+      // on a loaded CI runner), so a drop with a deferral pending comes back before it runs
+      // out; the lost bound stays at 2 minutes.
+      cfg.noGameDeferMs = 4000;
       SocketWorker worker(source, cfg, Quiet(), nullptr, nullptr, &latch);
       worker.Start();
       CHECK(peer.Accept(WAIT_MS));
@@ -2848,7 +2859,7 @@ void TestStatusFollowsTheRomGame()
       Wire::Declare declare;
       CHECK(Handshake(peer, hello, declare));
       // The deferral window follows every handshake, this first one included.
-      std::this_thread::sleep_for(std::chrono::milliseconds(1700));
+      Idle(peer, 4200);
 
       status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
@@ -2906,7 +2917,7 @@ void TestStatusFollowsTheRomGame()
       status(Wire::SESSION_NONE, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.haveStatus; }, r));
       CHECK(r.history.romGame && r.history.romGameEndsAt != std::chrono::steady_clock::time_point { });
-      std::this_thread::sleep_for(std::chrono::milliseconds(1700));
+      Idle(peer, 4200);
       status(Wire::SESSION_NO_DATA, Wire::SYSTEM_OK, "");
       CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.status.sessionState == Wire::SESSION_NO_DATA; }, r));
       CHECK_MSG(!r.history.romGame && r.history.romGames == 3, "the deferred end took effect when its time came; no data starts nothing");

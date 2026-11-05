@@ -173,6 +173,22 @@ void TestDescribe()
    CHECK(StatusNotifier::Describe({ Wire::SESSION_NONE, Wire::SYSTEM_UNPAIRED, "" }) == "[!] Scorbit: no game, not paired");
    CHECK(StatusNotifier::Describe({ 9, 7, "" }) == "[?] Scorbit: unknown (9), unknown (7)");
    CHECK(StatusNotifier::Describe({ Wire::SESSION_HIDDEN, Wire::SYSTEM_OFFLINE, "" }) == "Scorbit: hidden");
+
+   // A protocol 1.2 daemon's authentication state, when it alone is the problem, as the light shows it.
+   Wire::Status auth { Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "" };
+   auth.hasAuthStatus = true;
+   auth.authStatus = Wire::AUTH_FAILED;
+   CHECK(StatusNotifier::Describe(auth) == "[!] Scorbit: tracking, authentication failed");
+   CHECK(StatusNotifier::Marker(auth) == "[!]");
+   auth.authStatus = Wire::AUTH_NOT_AUTHENTICATED;
+   CHECK(StatusNotifier::Describe(auth) == "[!] Scorbit: tracking, not authenticated");
+   auth.authStatus = Wire::AUTH_UNPAIRED;
+   CHECK(StatusNotifier::Describe(auth) == "[!] Scorbit: tracking, not paired");
+   auth.systemState = Wire::SYSTEM_OFFLINE;
+   CHECK_MSG(StatusNotifier::Describe(auth) == "[!] Scorbit: tracking, offline", "the system state, when it says something itself");
+   auth.systemState = Wire::SYSTEM_OK;
+   auth.authStatus = Wire::AUTH_PAIRED;
+   CHECK(StatusNotifier::Describe(auth) == "[OK] Scorbit: tracking, ok");
 }
 
 // Working and not working differ in shape, not only in words.

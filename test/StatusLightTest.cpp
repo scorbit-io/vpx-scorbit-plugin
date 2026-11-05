@@ -139,6 +139,43 @@ void TestNoDaemonAfterTheGrace()
    CHECK_MSG(LightFor(waiting, T0, none) == none, "a session awaiting its first Status keeps the light");
 }
 
+// The caption the light shows on hover: the notifier's own description, or nothing while there is
+// nothing to say.
+void TestCaptionIsTheDescribedState()
+{
+   StatusRecord lost;
+   lost.since = T0;
+   CHECK(CaptionFor(lost, T0 + milliseconds(4999)).empty());
+   CHECK(CaptionFor(lost, T0 + seconds(5)) == "[!] Scorbit: no data, no connection to the Scorbit daemon");
+   lost.reason = "busy: another VPX is connected";
+   CHECK(CaptionFor(lost, T0 + seconds(5)) == "[!] Scorbit: no data, no connection to the Scorbit daemon - busy: another VPX is connected");
+
+   StatusRecord waiting;
+   waiting.inSession = true;
+   CHECK_MSG(CaptionFor(waiting, T0).empty(), "a session awaiting its first Status says nothing");
+   CHECK(CaptionFor(InSession(Wire::SESSION_TRACKING, Wire::SYSTEM_OK), T0) == "[OK] Scorbit: tracking, ok");
+   StatusRecord offline = InSession(Wire::SESSION_NO_DATA, Wire::SYSTEM_OFFLINE);
+   offline.status.supportText = "Scorbit API unreachable";
+   CHECK(CaptionFor(offline, T0) == "[!] Scorbit: no data, offline - Scorbit API unreachable");
+   CHECK_MSG(CaptionFor(InSession(Wire::SESSION_HIDDEN, Wire::SYSTEM_OK), T0).empty(), "hidden shows no caption");
+   CHECK_MSG(CaptionFor(WithAuth(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, Wire::AUTH_FAILED), T0) == "[!] Scorbit: tracking, authentication failed",
+      "an authentication-only problem reads as the light shows it");
+}
+
+// The hover rule: a moving cursor over the light, and nothing after 3 s at rest.
+void TestHoverNeedsAMovingCursor()
+{
+   HoverTracker h;
+   CHECK_MSG(h.Tick(10, 10, true, false, T0), "the first position counts as a move");
+   CHECK(h.Tick(10, 10, true, false, T0 + milliseconds(2999)));
+   CHECK_MSG(!h.Tick(10, 10, true, false, T0 + seconds(3)), "at rest for 3 s: gone, as when VPX hid the cursor on a press");
+   CHECK_MSG(!h.Tick(10, 10, true, false, T0 + seconds(30)), "and stays gone");
+   CHECK_MSG(h.Tick(11, 10, true, false, T0 + seconds(31)), "fresh movement brings it back");
+   CHECK_MSG(!h.Tick(12, 10, false, false, T0 + seconds(32)), "moving, but not over the light");
+   CHECK_MSG(!h.Tick(13, 10, true, true, T0 + seconds(33)), "over the light, but the cursor is hidden");
+   CHECK_MSG(h.Tick(13, 10, true, false, T0 + seconds(34)), "shown again once visible, within the window of that move");
+}
+
 }
 
 int main()
@@ -150,5 +187,7 @@ int main()
    TestUnknownValues();
    TestHiddenShowsNothing();
    TestNoDaemonAfterTheGrace();
+   TestCaptionIsTheDescribedState();
+   TestHoverNeedsAMovingCursor();
    return ScorbitTest::Summary("status_light_test");
 }
