@@ -373,6 +373,8 @@ void TestAuthoredEndSettles()
    CHECK_MSG(Quiet(n, nullptr, t0 + seconds(30), true) == NONE, "a clean game ends with no notice");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(31), true) == NONE,
       "the daemon's own game end, arriving after the script's, is not news");
+   CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "free play", Over()), t0 + seconds(32), true)
+      == Post("[OK] Scorbit: no game, ok - free play"), "once settled, an [OK] change outside a game posts again");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_UNPAIRED, "", Warned(Over(), 1, "x")), t0 + seconds(32), true)
       == Post("[!] Scorbit: no game, not paired"), "a [!] after it is");
    // The daemon's "not recorded" after a held authored game posts as a transition.

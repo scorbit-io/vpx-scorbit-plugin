@@ -226,7 +226,12 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
    // then no game: that settling is not news. Any [!] is.
    if (m_afterGame && want.starts_with("[OK]") && m_posted.starts_with("[OK]"))
    {
-      m_posted = want;
+      // One settling change is consumed; what changes after it is news again.
+      if (want != m_posted)
+      {
+         m_posted = want;
+         m_afterGame = false;
+      }
       return { };
    }
    if (want == m_posted && !(want.starts_with("[!]") && now - m_postedAt >= REFRESH_EVERY))
