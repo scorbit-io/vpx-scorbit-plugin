@@ -1184,10 +1184,18 @@ bool SocketWorker::MaybeDeclare()
       EndReadBacks(false);
       DropOpenGame();
       DiscardQueuedReplay();
-      // Another machine: its ROM game, if any, has not started.
+   }
+   // Another machine, whether declared in this session or before an outage: its ROM game, if
+   // any, has not started.
+   if (m_haveHistoryTable && (now.epoch != m_historyTable.epoch || Wire::NewIdentity(m_historyTable.declare, now.declare))
+      && m_history.romGame)
+   {
       m_history.romGame = false;
       m_history.romGameEndsAt = { };
+      PostStatus();  // the API thread learns the game is over now, not at the next Status
    }
+   m_historyTable = now;
+   m_haveHistoryTable = true;
    // Queued under the same epoch, they were asked of the old identity. Across an epoch they sort
    // themselves: the old one's are answered lost when taken, the new one's belong to this table.
    if (newTable && sameEpoch)

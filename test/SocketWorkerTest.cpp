@@ -2919,6 +2919,32 @@ void TestStatusFollowsTheRomGame()
       CHECK_MSG(r.history.romGames == 1, "over, not restarted");
       peer.CloseClient();
    }
+
+   // A table changed during an outage: the first Declare of the new session is another
+   // machine's, whose game has not started, even inside the lost bound.
+   {
+      StatusLatch latch;
+      SocketWorker worker(source, MakeConfig(peer), Quiet(), nullptr, nullptr, &latch);
+      worker.Start();
+      CHECK(peer.Accept(WAIT_MS));
+      Wire::Hello hello;
+      Wire::Declare declare;
+      CHECK(Handshake(peer, hello, declare));
+      status(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.history.romGame; }, r));
+      peer.CloseClient();
+      {
+         FrameSnapshot frame;
+         Fill(frame, 1, 1, 128, 32, 4);
+         source.Set(MakeDeclare("jupk_513", 128, 32, 4, 1), frame);
+      }
+      CHECK_MSG(peer.Accept(WAIT_MS), "the worker reconnects");
+      CHECK(Handshake(peer, hello, declare));
+      CHECK(declare.romId == "jupk_513");
+      CHECK(AwaitStatus(latch, [](const StatusRecord& x) { return x.inSession && !x.history.romGame; }, r));
+      CHECK_MSG(r.history.romGames == 1, "the old table's game is over; the new table has none");
+      peer.CloseClient();
+   }
 }
 
 int main()

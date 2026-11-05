@@ -332,6 +332,10 @@ private:
    // Kept here, not in the record, so the handshake's fresh record carries it on; copied into
    // every record posted. Lasts for the table: a new table ends its ROM game.
    StatusHistory m_history;
+   // The table the history's ROM game belongs to, across sessions: Connect() forgets m_declared,
+   // so a table changed during an outage is told apart here.
+   DeclareSnapshot m_historyTable;
+   bool m_haveHistoryTable = false;
    Clock::time_point m_sessionStart { };  // this session's HelloAck
    // Read-backs. Requests the script queued and not yet sent, kept until their table is declared;
    // and those sent, by id, with the epoch they were asked under.
