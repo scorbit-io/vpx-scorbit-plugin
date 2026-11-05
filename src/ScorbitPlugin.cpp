@@ -91,13 +91,15 @@ static void ApplyStatusWindow()
    if (vpxSession == nullptr)
       return;
    // Followed while hidden too, so the light never comes back showing a stale state.
-   statusLight = LightFor(vpxSession->ScriptStatus(), std::chrono::steady_clock::now(), statusLight);
+   const auto now = std::chrono::steady_clock::now();
+   const StatusRecord& record = vpxSession->ScriptStatus();
+   statusLight = LightFor(record, now, statusLight);
    const int corner = (vpxSession->PlayerRunning() && setShowStatus_Get()) ? setStatusCorner_Get() : 0;
    // The worker counts claims as they are made, so one is never mistaken for one made before.
    const uint32_t claims = vpxSession->ScriptReadBack().Claims();
    const bool claimed = claims != statusClaims && corner != 0;
    statusClaims = claims;
-   if (UpdateStatusWindow(corner, statusLight, setStatusOpacity_Get() / 100.0, claimed))
+   if (UpdateStatusWindow(corner, statusLight, setStatusOpacity_Get() / 100.0, claimed, CaptionFor(record, now)))
       LOGI("Status light: corner "s + std::to_string(corner));
    else if (const char* why = corner != 0 && !statusUnavailableLogged ? StatusWindowUnavailable() : nullptr)
    {
@@ -257,7 +259,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    RemoveQuitHook();
    // The tick stops first, so nothing rebuilds the light after its last flush.
    logDrainActive = false;
-   UpdateStatusWindow(0, { }, 1, false);
+   UpdateStatusWindow(0, { }, 1, false, { });
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
    // Detach first: unsubscribing the controllers below would otherwise withdraw it

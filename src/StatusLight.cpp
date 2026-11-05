@@ -92,4 +92,25 @@ LightView LightFor(const StatusRecord& record, StatusNotifier::Clock::time_point
    return view;
 }
 
+std::string CaptionFor(const StatusRecord& record, StatusNotifier::Clock::time_point now)
+{
+   if (!record.inSession)
+      return now - record.since < StatusNotifier::NO_SESSION_AFTER ? std::string() : StatusNotifier::DescribeNoSession(record.reason);
+   if (!record.haveStatus || record.status.sessionState == Wire::SESSION_HIDDEN)
+      return { };
+   return StatusNotifier::Describe(record.status);
+}
+
+bool HoverTracker::Tick(double x, double y, bool over, bool hidden, Clock::time_point now)
+{
+   if (!m_have || x != m_x || y != m_y)
+   {
+      m_have = true;
+      m_x = x;
+      m_y = y;
+      m_movedAt = now;
+   }
+   return over && !hidden && now - m_movedAt < SETTLE;
+}
+
 }

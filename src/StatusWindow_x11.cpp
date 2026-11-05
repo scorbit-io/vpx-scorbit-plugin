@@ -754,7 +754,7 @@ bool Show()
 
 }
 
-bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash)
+bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash, const std::string& /*caption, SB-6352*/)
 {
    if (corner < 1 || corner > 4 || !view.visible)
    {
