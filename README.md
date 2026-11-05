@@ -86,7 +86,8 @@ Enable = 1
 
 | Key | Meaning |
 |---|---|
-| `ShowStatus` | Show Scorbit status notifications during play, default on. Off posts none, with or without a daemon. |
+| `ShowStatus` | Show Scorbit status notifications and the status light, default on. Off posts none, with or without a daemon. |
+| `StatusNotices` | When the notifications may cover the playfield: 0 never (the status light only), 1 outside a game, plus one at the end of a game that had a warning (default), 2 always, on every change. See "Status" below. |
 | `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
@@ -200,6 +201,13 @@ and shows a VPX notification when it changes, repeated every 60 seconds while a
 warning (`[!]`) lasts. Without a daemon session for 5
 seconds, the plugin says so itself, with the daemon's reason when it refused the
 connection. `ShowStatus = 0` turns all of it off.
+
+While a game is in progress nothing is posted, so a change mid-game shows on the status
+light only: a notice still on screen when the game starts is taken down, and when the game
+ends one notice says what went wrong during it, if anything did. A ROM game runs from the
+daemon's `tracking` to its `no game`; an authored table's from its script's `game_start`
+to its `game_end`. `StatusNotices = 2` posts on every change as before, and `0` posts
+nothing. The rules are in `docs/status-notices.md`.
 
 ## Table scripts
 

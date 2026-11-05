@@ -25,16 +25,17 @@ namespace Scorbit
 // Beyond this the worker is producing log lines faster than the API thread
 // drains them, which only happens if VPX has stopped ticking; keep the newest.
 static constexpr size_t LOG_QUEUE_LIMIT = 256;
-static constexpr int NOTICE_MS = 5000;
+static constexpr int NOTICE_MS = static_cast<int>(std::chrono::milliseconds(StatusNotifier::NOTICE_LIFETIME).count());
 
 VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
-   int (*showStatus)())
+   int (*showStatus)(), int (*statusNotices)())
    : m_msgApi(msgApi)
    , m_endpointId(endpointId)
    , m_vpxApi(vpxApi)
    , m_tap(tap)
    , m_overlay(overlay)
    , m_showStatus(showStatus)
+   , m_statusNotices(statusNotices)
    , m_gameStartMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_START))
    , m_gameEndMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_END))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
@@ -119,6 +120,8 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    self->m_loggedDroppedOps = false;
    self->m_loggedIgnoredCall = false;
    self->m_loggedQueueDrop = false;
+   // Nothing renders after this, so the game ends without a notice (docs/status-notices.md).
+   self->m_notifier.TableEnded();
    self->m_epoch++;
    self->NewEpoch();
    self->UpdateDeclare();
@@ -201,13 +204,22 @@ void VpxSessionSource::PostStatusNotice()
 {
    const auto now = std::chrono::steady_clock::now();
    const bool show = m_showStatus == nullptr || m_showStatus() != 0;
+   const int notices = m_statusNotices == nullptr ? NOTICES_OUTSIDE_GAME : m_statusNotices();
    TakeStatus();
-   const std::string text = m_notifier.Frame(std::move(m_statusPending), show, now);
-   if (text.empty() || m_vpxApi == nullptr)
+   const NoticeAction action = m_notifier.Frame(std::move(m_statusPending), show, notices, AuthoredReady(), now);
+   if (action.kind == NoticeAction::Kind::None || m_vpxApi == nullptr)
       return;
-   LOGI("Status notice: "s + text);
+   if (action.kind == NoticeAction::Kind::Expire)
+   {
+      // Taken down for the game: a length of 0 expires ours at once (NotificationOverlay reuses
+      // the handle and resets its disappear time).
+      LOGI("Status notice taken down for the game"s);
+      m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      return;
+   }
+   LOGI("Status notice: "s + action.text);
    // Updates ours in place while VPX still shows it, else posts a new one (vpinball #4228).
-   m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, text.c_str(), NOTICE_MS);
+   m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), NOTICE_MS);
 }
 
 void VpxSessionSource::DeclareMachine(const std::string& machineId)
@@ -299,6 +311,11 @@ void VpxSessionSource::ScriptCommit()
    std::vector<GamePost> posts;
    for (Wire::GameOp& op : ops)
    {
+      // The notifier's game boundaries on an authored table (docs/status-notices.md).
+      if (op.kind == Wire::GAME_START)
+         m_notifier.GameStarted();
+      else if (op.kind == Wire::GAME_END)
+         m_notifier.GameEnded();
       if (posts.empty() || posts.back().batch.ops.size() == Wire::MAX_GAME_OPS
          || (op.kind == Wire::GAME_START && !posts.back().batch.ops.empty())
          || posts.back().batch.ops.back().kind == Wire::GAME_END)

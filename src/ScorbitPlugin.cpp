@@ -68,6 +68,9 @@ MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
 // Off by default: no corner of a full-bleed table is guaranteed free (docs/status-window.md).
 MSGPI_INT_VAL_SETTING(setStatusCorner, "StatusCorner", "Status light corner",
    "Show the status light in this screen corner, 0 off, 1 top left, 2 top right, 3 bottom left, 4 bottom right", true, 0, 4, 0);
+// 1: a notice would cover the playfield mid-game, where nothing is actionable (docs/status-notices.md).
+MSGPI_INT_VAL_SETTING(setStatusNotices, "StatusNotices", "Status notices",
+   "Show status notices: 0 never (the status light only), 1 outside a game, plus one at the end of a game that had a warning, 2 always", true, 0, 2, 1);
 MSGPI_INT_VAL_SETTING(setStatusOpacity, "StatusOpacity", "Status light opacity",
    "How strongly the status light draws, in percent", true, 10, 100, 100);
 
@@ -189,6 +192,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setSocketPath);
    msgApi->RegisterSetting(endpointId, &setShowStatus);
    msgApi->RegisterSetting(endpointId, &setStatusCorner);
+   msgApi->RegisterSetting(endpointId, &setStatusNotices);
    msgApi->RegisterSetting(endpointId, &setStatusOpacity);
 
    dmdTap = new DmdTap(msgApi, endpointId);
@@ -220,7 +224,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
    // The daemon listens and the plugin connects, so this starts whether or not
    // a daemon is running and retries once a second until one is.
-   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get);
+   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get, &setStatusNotices_Get);
    // Before the table script runs, which is when its CreateObject is resolved.
    const bool scriptBinding = RegisterScriptBinding(msgApi, endpointId, vpxSession);
    {

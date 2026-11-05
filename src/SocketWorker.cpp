@@ -314,7 +314,9 @@ void SocketWorker::Worker()
 
 void SocketWorker::Backoff()
 {
-   // Slice 1 retries at a flat one hertz; exponential backoff is slice 5.
+   // A flat one hertz. Any backoff added here must stay under 5 s: the daemon keeps an
+   // authored table's open game through 30 s without the plugin, and a reconnect inside that
+   // window continues it.
    for (int waited = 0; waited < RECONNECT_INTERVAL_MS && m_running; waited += POLL_SLICE_MS)
       std::this_thread::sleep_for(std::chrono::milliseconds(POLL_SLICE_MS));
 }
@@ -606,8 +608,53 @@ void SocketWorker::Disconnect()
 
 void SocketWorker::PostStatus()
 {
+   m_statusRecord.history = m_history;
    if (m_status != nullptr)
       m_status->Post(m_statusRecord);
+}
+
+void SocketWorker::FollowGame(const Wire::Status& status, Clock::time_point now)
+{
+   if (StatusNotifier::Marker(status) == "[!]")
+   {
+      m_history.warnings++;
+      m_history.lastWarning = StatusNotifier::Describe(status);
+   }
+   // A deferred end whose time has come took effect then, before this Status.
+   if (m_history.romGameEndsAt != Clock::time_point { } && now >= m_history.romGameEndsAt)
+   {
+      m_history.romGame = false;
+      m_history.romGameEndsAt = { };
+   }
+   switch (status.sessionState)
+   {
+   case Wire::SESSION_TRACKING:
+      if (!m_history.romGame)
+      {
+         m_history.romGame = true;
+         m_history.romGames++;
+      }
+      m_history.romGameEndsAt = { };
+      break;
+   case Wire::SESSION_NO_DATA:
+      // Continues a game, never starts one: the daemon says it at table load too.
+      m_history.romGameEndsAt = { };
+      break;
+   case Wire::SESSION_NONE:
+      if (!m_history.romGame)
+         break;
+      // A restarted daemon says no game until it has read the machine again.
+      if (now < m_sessionStart + std::chrono::milliseconds(m_config.noGameDeferMs))
+      {
+         if (m_history.romGameEndsAt == Clock::time_point { })
+            m_history.romGameEndsAt = m_sessionStart + std::chrono::milliseconds(m_config.noGameDeferMs);
+      }
+      else
+         m_history.romGame = false;
+      break;
+   default:
+      break;
+   }
 }
 
 void SocketWorker::NoSession(const std::string& reason)
@@ -962,6 +1009,14 @@ bool SocketWorker::Handshake()
       m_games.erase(m_games.begin(), m_games.begin() + static_cast<std::ptrdiff_t>(keepFrom));
    }
    // The daemon sends Status after the first Declare, on every connection.
+   m_sessionStart = Clock::now();
+   // A ROM game's end can only come from the daemon, so one lost for this long is over.
+   if (m_history.romGame && !m_statusRecord.inSession
+      && m_sessionStart - m_statusRecord.since >= std::chrono::milliseconds(m_config.romGameLostMs))
+   {
+      m_history.romGame = false;
+      m_history.romGameEndsAt = { };
+   }
    m_statusRecord = { };
    m_statusRecord.inSession = true;
    PostStatus();
@@ -1129,6 +1184,9 @@ bool SocketWorker::MaybeDeclare()
       EndReadBacks(false);
       DropOpenGame();
       DiscardQueuedReplay();
+      // Another machine: its ROM game, if any, has not started.
+      m_history.romGame = false;
+      m_history.romGameEndsAt = { };
    }
    // Queued under the same epoch, they were asked of the old identity. Across an epoch they sort
    // themselves: the old one's are answered lost when taken, the new one's belong to this table.
@@ -1470,6 +1528,7 @@ bool SocketWorker::AnswerStatus(const Wire::Message& msg)
          "a short payload, support_text over 256 bytes, or an unknown auth_status");
    }
    Log(LOG_LEVEL_INFO, "Socket: daemon status " + StatusNotifier::Describe(status));
+   FollowGame(status, Clock::now());
    m_statusRecord.haveStatus = true;
    m_statusRecord.status = std::move(status);
    PostStatus();
