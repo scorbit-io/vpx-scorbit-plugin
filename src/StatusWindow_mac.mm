@@ -214,13 +214,20 @@ static void ShowCaption(const std::string& text)
       captionField.font = [NSFont systemFontOfSize:12];
       captionField.textColor = [NSColor whiteColor];
       captionField.lineBreakMode = NSLineBreakByWordWrapping;
-      captionField.maximumNumberOfLines = 3;
+      // Wrapped, never cut: the support text may run to its 256-byte limit, and its last line
+      // can be the instruction. The panel stays within the screen below.
+      captionField.maximumNumberOfLines = 0;
       captionField.preferredMaxLayoutWidth = CAPTION_MAX_WIDTH;
       [captionPanel.contentView addSubview:captionField];
    }
    if (text != shownCaption)
    {
-      captionField.stringValue = Heap(text.c_str());
+      // The daemon's text is copied off the wire unvalidated; a byte sequence that is not
+      // UTF-8 is shown as Latin-1 rather than handed to AppKit as nil.
+      NSString* shown = Heap(text.c_str());
+      if (shown == nil)
+         shown = [[NSString alloc] initWithBytes:text.data() length:text.size() encoding:NSISOLatin1StringEncoding];
+      captionField.stringValue = shown != nil ? shown : Heap("");
       const NSSize size = captionField.fittingSize;
       captionField.frame = NSMakeRect(CAPTION_PAD_X, CAPTION_PAD_Y, size.width, size.height);
       [captionPanel setContentSize:NSMakeSize(size.width + 2 * CAPTION_PAD_X, size.height + 2 * CAPTION_PAD_Y)];
