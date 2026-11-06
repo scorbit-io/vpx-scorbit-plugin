@@ -369,8 +369,15 @@ private:
       x.xcb_create_gc(c, captionGc, caption, XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT, gcValues);
    }
 
-   // A premultiplied ARGB colour as the caption's visual takes it: without alpha at depth 24.
-   uint32_t Pixel(uint32_t argbColour) const { return argb ? argbColour : argbColour & 0xffffff; }
+   // A premultiplied ARGB colour as the caption's visual takes it, at the light's opacity as Put
+   // applies it: every channel scaled, then without alpha at depth 24.
+   uint32_t Pixel(uint32_t argbColour, uint8_t alpha = 255) const
+   {
+      uint32_t q = 0;
+      for (int shift = 0; shift < 32; shift += 8)
+         q |= (((argbColour >> shift & 0xff) * alpha + 127) / 255) << shift;
+      return argb ? q : q & 0xffffff;
+   }
 
    // The width of 8-bit text in the caption's font, with its ascent and descent. False when the
    // font is not open.
@@ -418,6 +425,13 @@ private:
    }
 
    // Greedy word wrap within the caption's width, measured by the server.
+   // Within the width, and within the 255 bytes one xcb_image_text_8 draws. Unmeasurable counts as fitting.
+   bool Fits(const std::string& line, int maxWidth)
+   {
+      int ascent = 0, descent = 0, width = 0;
+      return line.size() <= 255 && (!TextExtents(line, ascent, descent, width) || width <= maxWidth);
+   }
+
    std::vector<std::string> Wrap(const std::string& text, int maxWidth)
    {
       std::vector<std::string> lines;
@@ -437,6 +451,21 @@ private:
          }
          else
             line = candidate;
+         // A word too wide on its own is broken at the edge: the longest prefix that fits.
+         while (line.size() > 1 && !Fits(line, maxWidth))
+         {
+            size_t lo = 1, hi = line.size() - 1;
+            while (lo < hi)
+            {
+               const size_t mid = (lo + hi + 1) / 2;
+               if (Fits(line.substr(0, mid), maxWidth))
+                  lo = mid;
+               else
+                  hi = mid - 1;
+            }
+            lines.push_back(line.substr(0, lo));
+            line.erase(0, lo);
+         }
          if (end < text.size() && text[end] == '\n')
          {
             lines.push_back(line);
@@ -449,9 +478,9 @@ private:
       return lines;
    }
 
-   // Beside the light on the side toward the monitor's centre, level with it. Drawn again only
-   // when the text changes; the window is cleared and the lines written by the server.
-   void ShowCaption(const std::string& text, const Rect& lightAt)
+   // Beside the light on the side toward the monitor's centre, level with it, at the light's
+   // opacity. Drawn again only when the text or opacity changes; filled and written by the server.
+   void ShowCaption(const std::string& text, const Rect& lightAt, uint8_t alpha)
    {
       if (font == 0)
          return;
@@ -468,6 +497,14 @@ private:
          lineHeight = std::max(1, fontAscent + fontDescent);
          captionSize = { 0, 0, widest + 2 * padX, static_cast<int>(captionLines.size()) * lineHeight + 2 * padY };
          captionText = text;
+         captionDirty = true;
+      }
+      if (alpha != captionAlpha)
+      {
+         // Also the window's own background, which the server paints on an expose.
+         const uint32_t background[] = { Pixel(CAPTION_BACKGROUND, alpha) };
+         x.xcb_change_window_attributes(c, caption, XCB_CW_BACK_PIXEL, background);
+         captionAlpha = alpha;
          captionDirty = true;
       }
       const int gap = static_cast<int>(std::lround(CAPTION_GAP_PT * scale));
@@ -496,12 +533,13 @@ private:
       }
       if (captionDirty)
       {
-         const uint32_t fill[] = { Pixel(CAPTION_BACKGROUND) };
+         const uint32_t fill[] = { Pixel(CAPTION_BACKGROUND, alpha) };
          x.xcb_change_gc(c, captionGc, XCB_GC_FOREGROUND, fill);
          const xcb_rectangle_t whole { 0, 0, static_cast<uint16_t>(at.w), static_cast<uint16_t>(at.h) };
          x.xcb_poly_fill_rectangle(c, caption, captionGc, 1, &whole);
-         const uint32_t ink[] = { Pixel(CAPTION_TEXT) };
-         x.xcb_change_gc(c, captionGc, XCB_GC_FOREGROUND, ink);
+         // Image text fills each glyph's box with the background, so both follow the opacity.
+         const uint32_t ink[] = { Pixel(CAPTION_TEXT, alpha), Pixel(CAPTION_BACKGROUND, alpha) };
+         x.xcb_change_gc(c, captionGc, XCB_GC_FOREGROUND | XCB_GC_BACKGROUND, ink);
          int baseline = padY + fontAscent;
          for (const std::string& line : captionLines)
          {
@@ -521,7 +559,7 @@ private:
    }
 
    // The pointer's place, read with no input of our own, so both windows stay click-through.
-   void Hover(const std::string& text, const Rect& lightAt, Clock::time_point now)
+   void Hover(const std::string& text, const Rect& lightAt, uint8_t alpha, Clock::time_point now)
    {
       if (now < nextHover)
          return;
@@ -534,7 +572,7 @@ private:
       const bool over = px >= lightAt.x && px < lightAt.x + lightAt.w && py >= lightAt.y && py < lightAt.y + lightAt.h;
       // X has no cheap word on whether the cursor is hidden; the movement rule alone applies.
       if (hover.Tick(px, py, over, false, now) && !text.empty())
-         ShowCaption(text, lightAt);
+         ShowCaption(text, lightAt, alpha);
       else
          HideCaption();
    }
@@ -828,7 +866,7 @@ private:
          drawnAlpha = w.alpha;
          redraw = false;
       }
-      Hover(w.caption, placed, now);
+      Hover(w.caption, placed, w.alpha, now);
    }
 
    // Always cut to the disc. Without a compositor the server shows each pixel's colour as it is,
@@ -916,6 +954,7 @@ private:
    Rect captionSize, captionPlaced;
    bool captionMapped = false;
    bool captionDirty = true;
+   uint8_t captionAlpha = 255;   // as the window and GC were created
 
    bool inFront = false;
    bool frontStale = true;
