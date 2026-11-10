@@ -1266,10 +1266,11 @@ public:
       return result;
    }
 
-   void OverlayControl(bool enable, uint32_t durationMs) override
+   void OverlayControl(bool enable, uint32_t durationMs, bool forceTransition, bool disableTransition) override
    {
       std::lock_guard lock(m_mutex);
       m_controls.emplace_back(enable, durationMs);
+      m_transitionBits.push_back(static_cast<uint8_t>((forceTransition ? 1 : 0) | (disableTransition ? 2 : 0)));
    }
 
    void OverlayClear() override { m_clears++; }
@@ -1279,6 +1280,7 @@ public:
    std::mutex m_mutex;
    std::vector<std::vector<uint8_t>> m_uploads;
    std::vector<std::pair<bool, uint32_t>> m_controls;
+   std::vector<uint8_t> m_transitionBits;   // force 1, disable 2
 };
 
 // The latch's latest record, waiting for one that passes the test.
@@ -1370,7 +1372,7 @@ void TestOverlayAndStatusOverTheSocket()
       "0c000000" "2000" "0000" "08000000" "02" "01" "05dc",
       "0c000000" "2000" "0000" "09000000" "02" "01" "0000",
       "0c000000" "2000" "0000" "0a000000" "02" "00" "0000",
-      // Reserved control bits are ignored: bit 0 clear is a hide whatever else is set.
+      // Bit 0 clear is a hide whatever else is set; bits 1 and 2 pass on, the reserved ones are ignored.
       "0c000000" "2000" "0000" "0b000000" "02" "fe" "0100",
    };
    for (const char* frame : controls)
@@ -1387,6 +1389,7 @@ void TestOverlayAndStatusOverTheSocket()
       CHECK(overlay.m_controls.size() == 4 && overlay.m_controls[0] == std::make_pair(true, 1500u));
       CHECK(overlay.m_controls.size() == 4 && overlay.m_controls[1] == std::make_pair(true, 0u));
       CHECK(overlay.m_controls.size() == 4 && !overlay.m_controls[2].first && !overlay.m_controls[3].first);
+      CHECK_MSG(overlay.m_transitionBits == std::vector<uint8_t>({ 0, 0, 0, 3 }), "force and disable decoded from 0x02 and 0x04");
    }
 
    // --- Out of bounds is acknowledged and ignored ------------------------

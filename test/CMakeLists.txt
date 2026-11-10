@@ -25,6 +25,11 @@ target_link_libraries(overlay_state_test PRIVATE scorbit-transport)
 target_compile_options(overlay_state_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME overlay_state COMMAND overlay_state_test)
 
+add_executable(overlay_transition_test OverlayTransitionTest.cpp Check.h)
+target_link_libraries(overlay_transition_test PRIVATE scorbit-transport)
+target_compile_options(overlay_transition_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME overlay_transition COMMAND overlay_transition_test)
+
 add_executable(status_notice_test StatusNoticeTest.cpp Check.h)
 target_link_libraries(status_notice_test PRIVATE scorbit-transport)
 target_compile_options(status_notice_test PRIVATE ${SCORBIT_WARNINGS})

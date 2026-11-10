@@ -25,7 +25,9 @@
 // bytes are ignored, Show arms before any upload, every op is refused without a display,
 // and a value is shaded per platform rather than as a brightness.
 // :4 (SB-6309) reads a value as a brightness, 0 to 15, at the platform's nearest shade.
-#define SCORBIT_MSG_OVERLAY "Overlay:4"
+// :5 (SB-6503) sweeps the overlay in on show and out on hide, as the probe firmware does, when
+// the plugin's OverlayTransitions setting is on; a hide by the timer sweeps out too.
+#define SCORBIT_MSG_OVERLAY "Overlay:5"
 
 #define SCORBIT_OVERLAY_OP_UPLOAD 1
 #define SCORBIT_OVERLAY_OP_SHOW   2

@@ -178,68 +178,73 @@ void TestOutOfRangeKeepsThePreviousBitmap()
 void TestControlArmsBeforeAnyUpload()
 {
    Overlay::State s;
+   s.SetTransition({ .on = false });   // the timer rules alone; the sweep is in OverlayTransitionTest
    const Clock::time_point t0 = Clock::now();
    s.Control(true, 1000, t0);
-   CHECK_MSG(!s.Visible(t0), "nothing to show yet");
+   CHECK_MSG(!s.Visible(t0, 128), "nothing to show yet");
 
    const std::vector<uint8_t> p = Payload(10, 10, 0x07);
    s.Store(p.data(), p.size());
-   CHECK_MSG(s.Visible(t0 + milliseconds(500)), "an upload inside the window shows at once");
-   CHECK_MSG(!s.Visible(t0 + milliseconds(1000)), "hidden at the deadline");
+   CHECK_MSG(s.Visible(t0 + milliseconds(500), 128), "an upload inside the window shows at once");
+   CHECK_MSG(!s.Visible(t0 + milliseconds(1000), 128), "hidden at the deadline");
 }
 
 void TestUploadAfterExpiryStaysHidden()
 {
    Overlay::State s;
+   s.SetTransition({ .on = false });   // the timer rules alone; the sweep is in OverlayTransitionTest
    const Clock::time_point t0 = Clock::now();
    s.Control(true, 100, t0);
    const std::vector<uint8_t> p = Payload(10, 10, 0x07);
    s.Store(p.data(), p.size());
-   CHECK(!s.Visible(t0 + milliseconds(200)));
+   CHECK(!s.Visible(t0 + milliseconds(200), 128));
 }
 
 void TestTimerRestartsAndUntilHidden()
 {
    Overlay::State s;
+   s.SetTransition({ .on = false });   // the timer rules alone; the sweep is in OverlayTransitionTest
    const std::vector<uint8_t> p = Payload(10, 10, 0x07);
    s.Store(p.data(), p.size());
    const Clock::time_point t0 = Clock::now();
    s.Control(true, 100, t0);
    s.Control(true, 100, t0 + milliseconds(90));
-   CHECK_MSG(s.Visible(t0 + milliseconds(150)), "control restarts the timer");
-   CHECK(!s.Visible(t0 + milliseconds(190)));
+   CHECK_MSG(s.Visible(t0 + milliseconds(150), 128), "control restarts the timer");
+   CHECK(!s.Visible(t0 + milliseconds(190), 128));
 
    s.Control(true, 0, t0);
-   CHECK_MSG(s.Visible(t0 + std::chrono::hours(1)), "0 shows until hidden");
+   CHECK_MSG(s.Visible(t0 + std::chrono::hours(1), 128), "0 shows until hidden");
    s.Control(false, 500, t0);
-   CHECK_MSG(!s.Visible(t0), "hide ignores its duration");
+   CHECK_MSG(!s.Visible(t0, 128), "hide ignores its duration");
 }
 
 void TestUploadWhileShownReplaces()
 {
    Overlay::State s;
+   s.SetTransition({ .on = false });   // the timer rules alone; the sweep is in OverlayTransitionTest
    const std::vector<uint8_t> a = Payload(10, 10, 0x01), b = Payload(12, 10, 0x02);
    s.Store(a.data(), a.size());
    const Clock::time_point t0 = Clock::now();
    s.Control(true, 0, t0);
    s.Store(b.data(), b.size());
-   CHECK(s.Visible(t0));
+   CHECK(s.Visible(t0, 128));
    CHECK(s.Width() == 12 && s.Pixels() == std::vector<uint8_t>(120, 0x02));
 }
 
 void TestClearDropsBitmapAndTimer()
 {
    Overlay::State s;
+   s.SetTransition({ .on = false });   // the timer rules alone; the sweep is in OverlayTransitionTest
    const std::vector<uint8_t> p = Payload(10, 10, 0x07);
    s.Store(p.data(), p.size());
    const Clock::time_point t0 = Clock::now();
    s.Control(true, 0, t0);
    s.Clear();
-   CHECK(!s.Visible(t0));
+   CHECK(!s.Visible(t0, 128));
    CHECK(s.Pixels().empty() && s.Width() == 0 && s.Height() == 0);
    // A new session starts with no overlay armed: an upload alone shows nothing.
    s.Store(p.data(), p.size());
-   CHECK(!s.Visible(t0));
+   CHECK(!s.Visible(t0, 128));
 }
 
 }

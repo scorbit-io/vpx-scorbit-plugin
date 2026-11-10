@@ -53,6 +53,7 @@ add_library(scorbit-transport STATIC
    src/MemoryBridge.cpp
    src/OverlayPlacement.h
    src/OverlayState.h
+   src/OverlayTransition.h
    src/OverlayCache.h
    src/OverrideChain.h
    src/ReadBack.h
