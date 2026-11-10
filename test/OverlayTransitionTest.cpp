@@ -4,6 +4,7 @@
 // are worked by hand from those rules (a band `width` columns wide starts `width` columns off the
 // left and steps one column a pace), not taken from the header under test.
 
+#include "OverlayCache.h"
 #include "OverlayState.h"
 
 #include "Check.h"
@@ -11,7 +12,9 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
 using namespace Scorbit;
@@ -212,6 +215,99 @@ void TestClearDropsASweep()
    CHECK_MSG(!SweepOf(s, 200).Visible(), "a new session starts hidden");
 }
 
+void TestBandWithoutABitmap()
+{
+   Overlay::State s;
+   s.Control(true, 0, At(0));
+   CHECK_MSG(SweepOf(s, 500).reveal == Reveal::Show, "the band crosses the game before any upload, as the firmware's does");
+   CHECK_MSG(!SweepOf(s, 1360).Visible(), "and nothing is left once it has passed");
+   std::vector<uint8_t> p { 128, 32 };
+   p.resize(2 + 128 * 32, 0x0F);
+   s.Store(p.data(), p.size());
+   CHECK_MSG(SweepOf(s, 1400).reveal == Reveal::Full, "an upload then shows at once");
+}
+
+// One base dot at a time, as Composite draws every output dot that maps to it.
+void TestComposeDot()
+{
+   // A 128x32 overlay: opaque value 0x0A in columns 0 to 63, transparent beyond.
+   auto rec = std::make_unique<Overlay::Record>();
+   rec->width = 128;
+   rec->height = 32;
+   for (uint32_t y = 0; y < 32; y++)
+      for (uint32_t x = 0; x < 128; x++)
+         rec->pixels[y * 128 + x] = x < 64 ? 0x0A : 0x8A;
+   const Overlay::Placement at = Overlay::Place(128, 32, 128, 32);
+
+   Overlay::Sweep full;
+   full.reveal = Reveal::Full;
+   CHECK(Overlay::ComposeDot(*rec, at, full, 10, 5) == 0x0A);
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, full, 100, 5) == -1, "a transparent pixel shows the game");
+
+   Overlay::Sweep show;
+   show.reveal = Reveal::Show;
+   show.frontier = 50;
+   show.width = 8;
+   show.limit = 128;
+   show.seed = 3;
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, show, 49, 5) == 0x0A, "revealed left of the band");
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, show, 60, 5) == -1, "the game right of the band, under an opaque pixel too");
+   int lit = 0, game = 0;
+   for (uint32_t y = 0; y < 32; y++)
+      for (uint32_t x = 50; x < 58; x++)
+      {
+         const int v = Overlay::ComposeDot(*rec, at, show, x, y);
+         CHECK_MSG(v == -1 || v == 9 || v == 12 || v == 15, "a band dot is lit or shows the game, never the overlay");
+         (v == -1 ? game : lit)++;
+      }
+   CHECK(lit > 0 && game > 0);
+
+   Overlay::Sweep hide;
+   hide.reveal = Reveal::Hide;
+   hide.frontier = 20;
+   hide.width = 8;
+   hide.limit = 42;   // a hide that interrupted a show at column 42
+   hide.seed = 3;
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, hide, 19, 5) == -1, "masked left of the band");
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, hide, 30, 5) == 0x0A, "still shown right of it");
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, hide, 50, 5) == -1, "never shown past the limit");
+
+   // A smaller overlay is centred: 64x16 on 128x32 lands at (32, 8).
+   rec->width = 64;
+   rec->height = 16;
+   for (uint32_t i = 0; i < 64 * 16; i++)
+      rec->pixels[i] = 0x05;
+   const Overlay::Placement centred = Overlay::Place(128, 32, 64, 16);
+   CHECK(Overlay::ComposeDot(*rec, centred, show, 32, 8) == 0x05);
+   CHECK(Overlay::ComposeDot(*rec, centred, show, 31, 8) == -1 && Overlay::ComposeDot(*rec, centred, show, 32, 7) == -1);
+   CHECK_MSG(Overlay::ComposeDot(*rec, centred, full, 95, 23) == 0x05 && Overlay::ComposeDot(*rec, centred, full, 96, 23) == -1, "its far edge");
+}
+
+// The record the render threads read carries the sweep, timer included, with no writer after the control.
+void TestCacheCarriesTheSweep()
+{
+   Overlay::Cache cache;
+   std::vector<uint8_t> p { 128, 32 };
+   p.resize(2 + 128 * 32, 0x0F);
+   cache.Store(p.data(), p.size());
+   const Clock::time_point before = Clock::now();
+   cache.Control(true, 2000);
+   const Clock::time_point after = Clock::now();
+   auto record = std::make_unique<Overlay::Record>();
+   auto scratch = std::make_unique<Overlay::Record>();
+   uint64_t seq = 0;
+   CHECK(cache.ReadIfChanged(seq, *record, *scratch));
+   CHECK_MSG(record->SweepAt(after, 128).reveal == Reveal::Show, "a show sweeps in");
+   CHECK(record->SweepAt(after + milliseconds(1500), 128).reveal == Reveal::Full);
+   CHECK_MSG(record->SweepAt(after + milliseconds(2050), 128).reveal == Reveal::Hide, "the hold ends in a hide sweep");
+   CHECK_MSG(!record->Visible(after + milliseconds(2000 + 1360 + 10), 128), "which ends");
+   CHECK(record->Visible(before + milliseconds(2000 + 1360 - 10), 128));
+
+   cache.Control(false, 0, false, true);
+   CHECK(cache.ReadIfChanged(seq, *record, *scratch));
+   CHECK_MSG(!record->Visible(Clock::now(), 128), "a hide with the disable bit is immediate");
+}
+
 // The sparkle's statistics against the firmware's table: lit with chance density / 256, then
 // brightness 9, 12 or 15 at 1 : 1 : 2.
 void TestSparkleStatistics()
@@ -287,6 +383,9 @@ int main()
    TestForceAndDisable();
    TestWipeKeepsItsShape();
    TestClearDropsASweep();
+   TestBandWithoutABitmap();
+   TestComposeDot();
+   TestCacheCarriesTheSweep();
    TestSparkleStatistics();
    return ScorbitTest::Summary("overlay_transition_test");
 }

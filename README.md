@@ -93,7 +93,7 @@ Enable = 1
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
 | `OverlayTransitions` | Sweep a DMD overlay in and out with a sparkle band, as the DMD probe does, default on. The daemon can force or skip the sweep per show (see below). |
 | `OverlayTransitionPace` | Milliseconds the sweep takes per DMD column, 1 to 254, default 10. |
-| `OverlayTransitionWidth` | The band's width in DMD columns, 0 to 16, default 8; 0 turns the sweep off. |
+| `OverlayTransitionWidth` | The band's width in DMD columns, 0 to 16, default 8; 0 turns the sweep off. The three transition settings are read when the plugin loads. |
 | `StatusCorner` | macOS, Windows and Linux on X11 (not Wayland, where the notifications stay the surface). Show the status light in this screen corner: 0 off (default), 1 top left, 2 top right, 3 bottom left, 4 bottom right. Off by default because no corner of a full-bleed table is guaranteed free; see `docs/status-window.md`. `ShowStatus = 0` hides it too. |
 | `StatusOpacity` | How strongly the status light draws, 10 to 100 percent, default 100. |
 

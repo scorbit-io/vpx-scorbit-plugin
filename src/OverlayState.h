@@ -153,7 +153,9 @@ public:
    // overlay shown or hidden at once, a wipe in progress included.
    void Control(bool enable, uint32_t durationMs, Clock::time_point now, bool force = false, bool disable = false)
    {
-      const Ticks at = TicksOf(now);
+      // Never before the wipe in place: an in-process op queued behind the socket worker keeps its
+      // arrival time, which may precede a wipe the worker started meanwhile.
+      const Ticks at = std::max(TicksOf(now), m_timeline.wipe.startAt);
       Timeline t = Settle(m_timeline, at);
       const bool applied = t.enabled;
       t.transition = Transitions(t.settings, force, disable);
@@ -181,10 +183,11 @@ public:
       m_pixels.clear();
    }
 
-   // What shows on a display `displayWidth` base columns wide: nothing without a bitmap.
+   // What shows on a display `displayWidth` base columns wide. Without a bitmap only a wipe's band,
+   // as the firmware sweeps its empty overlay.
    Sweep SweepAt(Clock::time_point now, uint32_t displayWidth) const
    {
-      return m_pixels.empty() ? Sweep { } : Overlay::SweepAt(m_timeline, TicksOf(now), displayWidth);
+      return WithBitmap(Overlay::SweepAt(m_timeline, TicksOf(now), displayWidth), !m_pixels.empty());
    }
    bool Visible(Clock::time_point now, uint32_t displayWidth) const { return SweepAt(now, displayWidth).Visible(); }
 

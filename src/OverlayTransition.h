@@ -56,8 +56,9 @@ enum class Reveal : uint8_t
 
 using Ticks = int64_t;   // steady_clock ticks
 
-// The reveal as it was last set: a settled state, or a wipe with where and when it started. The
-// band's shape is latched at the start, as the firmware latches its type.
+// The reveal as it was last set: a settled state, or a wipe with where and when it started. Its
+// effect is latched at the start, as the firmware latches its type; so are pace and width, which
+// the firmware reads live, but which here change only when the plugin loads.
 struct Wipe
 {
    Reveal reveal = Reveal::Off;
@@ -199,6 +200,12 @@ inline Sweep SweepAt(const Timeline& timeline, Ticks now, uint32_t displayWidth)
    s.seed = w.seed;
    s.effect = w.effect;
    return s;
+}
+
+// With no bitmap a settled overlay draws nothing, but a wipe's band still crosses the game.
+inline Sweep WithBitmap(const Sweep& s, bool bitmap)
+{
+   return bitmap || s.Wiping() ? s : Sweep { };
 }
 
 // --- Band contents ---

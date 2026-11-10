@@ -36,10 +36,25 @@ struct Record
    // Judged by each reader on every frame, so neither the timer nor a wipe needs a writer to move.
    Sweep SweepAt(State::Clock::time_point now, uint32_t displayWidth) const
    {
-      return width == 0 ? Sweep { } : Overlay::SweepAt(timeline, TicksOf(now), displayWidth);
+      return WithBitmap(Overlay::SweepAt(timeline, TicksOf(now), displayWidth), width != 0);
    }
    bool Visible(State::Clock::time_point now, uint32_t displayWidth) const { return SweepAt(now, displayWidth).Visible(); }
 };
+
+// What the base dot (bx, by) shows under a sweep: a band or overlay value, 0 to 127, drawn at its
+// luminance, or -1 for the game's own dot. `at` is the record's placement on the base display.
+inline int ComposeDot(const Record& rec, const Placement& at, const Sweep& sweep, uint32_t bx, uint32_t by)
+{
+   if (const int32_t band = sweep.BandColumn(static_cast<int32_t>(bx)); band >= 0)
+   {
+      const uint8_t v = BandDot(sweep, band, static_cast<int32_t>(by));
+      return v != 0 ? v : -1;
+   }
+   if (bx < at.dstX || bx >= at.dstX + at.width || by < at.dstY || by >= at.dstY + at.height || !sweep.ShowsOverlay(static_cast<int32_t>(bx)))
+      return -1;
+   const uint8_t px = rec.pixels[static_cast<size_t>(at.srcY + (by - at.dstY)) * rec.width + at.srcX + (bx - at.dstX)];
+   return (px & TRANSPARENT_BIT) != 0 ? -1 : px;
+}
 
 static_assert(std::is_trivially_copyable_v<Record>, "a record is copied as bytes");
 

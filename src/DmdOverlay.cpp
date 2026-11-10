@@ -503,7 +503,7 @@ void DmdOverlay::OnOverlayMsg(const unsigned int msgId, void* userData, void* ms
    case SCORBIT_OVERLAY_OP_HIDE:
       if (!me->m_cache.PostControl(false, 0))
          break;
-      LOGI("overlay: hidden after compositing "s + std::to_string(me->m_compositedFrames.load()) + " frames");
+      LOGI("overlay: hiding after compositing "s + std::to_string(me->m_compositedFrames.load()) + " frames");
       msg->applied = 1;
       break;
    default: break;
@@ -637,23 +637,11 @@ const void* DmdOverlay::Composite(Entry& e, const DisplayFrame& src, const Overl
       const bool overlayRow = overlay && by >= at.dstY && by < at.dstY + at.height;
       if (!overlayRow && !sweep.Wiping())
          continue;
-      const uint8_t* row = overlayRow ? rec.pixels + static_cast<size_t>(at.srcY + (by - at.dstY)) * rec.width + at.srcX : nullptr;
       for (uint32_t x = 0; x < W; x++)
       {
          const uint32_t bx = static_cast<uint32_t>(static_cast<uint64_t>(x) * t.baseWidth / W);
-         const size_t i = static_cast<size_t>(y) * W + x;
-         if (const int32_t band = sweep.BandColumn(static_cast<int32_t>(bx)); band >= 0)
-         {
-            if (const uint8_t v = Overlay::BandDot(sweep, band, static_cast<int32_t>(by)); v != 0)
-               put(i, v);
-            continue;
-         }
-         if (!overlayRow || bx < at.dstX || bx >= at.dstX + at.width || !sweep.ShowsOverlay(static_cast<int32_t>(bx)))
-            continue;
-         const uint8_t px = row[bx - at.dstX];
-         if (px & Overlay::TRANSPARENT_BIT)
-            continue;
-         put(i, px);
+         if (const int v = Overlay::ComposeDot(rec, at, sweep, bx, by); v >= 0)
+            put(static_cast<size_t>(y) * W + x, static_cast<uint8_t>(v));
       }
    }
    return out.data();
