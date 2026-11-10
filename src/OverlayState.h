@@ -153,9 +153,11 @@ public:
    // overlay shown or hidden at once, a wipe in progress included.
    void Control(bool enable, uint32_t durationMs, Clock::time_point now, bool force = false, bool disable = false)
    {
-      // Never before the wipe in place: an in-process op queued behind the socket worker keeps its
-      // arrival time, which may precede a wipe the worker started meanwhile.
-      const Ticks at = std::max(TicksOf(now), m_timeline.wipe.startAt);
+      // A wipe starts no earlier than the one in place: an in-process op queued behind the socket
+      // worker keeps its arrival time, which may precede a wipe the worker started meanwhile. Its
+      // hold still counts from that arrival.
+      const Ticks arrived = TicksOf(now);
+      const Ticks at = std::max(arrived, m_timeline.wipe.startAt);
       Timeline t = Settle(m_timeline, at);
       const bool applied = t.enabled;
       t.transition = Transitions(t.settings, force, disable);
@@ -167,7 +169,7 @@ public:
          t = BeginHide(t, at);
       t.enabled = enable;
       t.untilHidden = durationMs == 0;
-      t.hideAt = at + MsTicks(durationMs);
+      t.hideAt = arrived + MsTicks(durationMs);
       m_timeline = t;
    }
 

@@ -215,6 +215,24 @@ void TestClearDropsASweep()
    CHECK_MSG(!SweepOf(s, 200).Visible(), "a new session starts hidden");
 }
 
+// An in-process show queued behind the socket worker applies after a wipe the worker started:
+// its sweep cannot start before that wipe, but its hold still counts from its arrival.
+void TestQueuedShowKeepsItsDeadline()
+{
+   Overlay::State s = Shown();
+   s.Control(true, 0, At(0));
+   s.Control(false, 0, At(1600));   // the worker's hide, applied first
+   s.Control(true, 500, At(1000));  // a show that arrived at 1000 ms, for 500 ms
+   CHECK_MSG(!SweepOf(s, 1700).Visible(), "its hold ended at 1500 ms, so it never appears");
+
+   Overlay::State later = Shown();
+   later.Control(true, 0, At(0));
+   later.Control(false, 0, At(1600));
+   later.Control(true, 2000, At(1000));   // deadline 3000 ms
+   CHECK_MSG(SweepOf(later, 1600).reveal == Reveal::Show && SweepOf(later, 1600).frontier == -8, "the sweep starts at the worker's wipe");
+   CHECK(SweepOf(later, 2999).reveal == Reveal::Full && SweepOf(later, 3000).reveal == Reveal::Hide);
+}
+
 void TestBandWithoutABitmap()
 {
    Overlay::State s;
@@ -511,6 +529,7 @@ int main()
    TestWipeKeepsItsShape();
    TestClearDropsASweep();
    TestBandWithoutABitmap();
+   TestQueuedShowKeepsItsDeadline();
    TestComposeDot();
    TestCacheCarriesTheSweep();
    TestSparkleStatistics();
