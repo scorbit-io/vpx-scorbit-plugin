@@ -195,7 +195,7 @@ void TestCacheReadsOnlyWhenChanged()
    Overlay::Record record;
    uint64_t seq = 0;
    CHECK(cache.ReadIfChanged(seq, record, g_scratch));
-   CHECK(record.width == 0 && !record.Visible(Overlay::Cache::Clock::now()));
+   CHECK(record.width == 0 && !record.Visible(Overlay::Cache::Clock::now(), 128));
    CHECK_MSG(!cache.ReadIfChanged(seq, record, g_scratch), "an unchanged record is not copied again");
 
    const std::vector<uint8_t> p = Upload(10, 10, 0x03);
@@ -203,16 +203,17 @@ void TestCacheReadsOnlyWhenChanged()
    cache.Control(true, 0);
    CHECK(cache.ReadIfChanged(seq, record, g_scratch));
    CHECK(record.width == 10 && record.height == 10 && record.pixels[99] == 0x03);
-   CHECK(record.Visible(Overlay::Cache::Clock::now() + std::chrono::hours(1)));
+   CHECK(record.Visible(Overlay::Cache::Clock::now() + std::chrono::hours(1), 128));
 
    cache.Clear();
    CHECK(cache.ReadIfChanged(seq, record, g_scratch));
-   CHECK(record.width == 0 && !record.Visible(Overlay::Cache::Clock::now()));
+   CHECK(record.width == 0 && !record.Visible(Overlay::Cache::Clock::now(), 128));
 }
 
 void TestCacheTimerCountsFromArrival()
 {
    Overlay::Cache cache;
+   cache.SetTransition({ .on = false });   // the timer alone: a hide sweep would keep it visible
    const std::vector<uint8_t> p = Upload(10, 10, 0x03);
    const auto before = Overlay::Cache::Clock::now();
    {
@@ -230,8 +231,8 @@ void TestCacheTimerCountsFromArrival()
    uint64_t seq = 0;
    CHECK(cache.ReadIfChanged(seq, record, g_scratch));
    CHECK_MSG(record.width == 10, "the queued upload applied");
-   CHECK_MSG(!record.Visible(Overlay::Cache::Clock::now()), "100 ms from arrival have passed, though it applied just now");
-   CHECK(record.Visible(before + std::chrono::milliseconds(50)));
+   CHECK_MSG(!record.Visible(Overlay::Cache::Clock::now(), 128), "100 ms from arrival have passed, though it applied just now");
+   CHECK(record.Visible(before + std::chrono::milliseconds(50), 128));
 }
 
 void TestCacheKeepsArrivalOrder()

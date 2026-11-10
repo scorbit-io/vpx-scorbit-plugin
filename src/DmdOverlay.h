@@ -63,8 +63,11 @@ public:
    // WriteDmdOverlay (0x23) bytes: width, height, then width*height pixels, bit 7
    // transparent, the low bits platform bitplane bits.
    Overlay::State::Upload Store(const uint8_t* payload, size_t size) { return m_cache.Store(payload, size); }
-   // The 0x27 control. Enabling restarts the timer, 0 meaning until hidden.
-   void Control(bool enable, uint32_t durationMs);
+   // The 0x27 control. Enabling restarts the timer, 0 meaning until hidden. The transition bits
+   // force or skip the show / hide transition against the setting, for this control only.
+   void Control(bool enable, uint32_t durationMs, bool forceTransition = false, bool disableTransition = false);
+   // API thread, at load: the transition settings the probe would hold in flash.
+   void SetTransition(const Overlay::TransitionSettings& settings) { m_cache.SetTransition(settings); }
    // Session end: hidden, with no bitmap and no timer.
    void Clear() { m_cache.Clear(); }
 
@@ -113,6 +116,7 @@ private:
       unsigned int srcFrameId = 0;
       unsigned int outFrameId = 0;
       bool lastComposited = false;
+      Overlay::Sweep lastSweep;   // a wipe composites again on every step, not only on a new frame
       Overlay::Record record;
       Overlay::Record scratch;
       uint64_t recordSequence = 0;
@@ -142,7 +146,7 @@ private:
    static void OnOverlayMsg(const unsigned int msgId, void* userData, void* msgData);
    static DisplayFrame GetRenderFrame(void* callContext);
    static DisplayFrame GetIdentifyFrame(void* callContext);
-   const void* Composite(Entry& e, const DisplayFrame& src);
+   const void* Composite(Entry& e, const DisplayFrame& src, const Overlay::Sweep& sweep);
    void DropWorker();
    static void OnPrepareFrame(const unsigned int msgId, void* userData, void* msgData);
    void DrainDrops();

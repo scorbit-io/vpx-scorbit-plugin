@@ -112,7 +112,8 @@ public:
    virtual bool OverlaySurface() = 0;
    // The 0x23 payload, verbatim.
    virtual Overlay::State::Upload OverlayUpload(const uint8_t* payload, size_t size) = 0;
-   virtual void OverlayControl(bool enable, uint32_t durationMs) = 0;
+   // The 0x27 control, its transition bits decoded.
+   virtual void OverlayControl(bool enable, uint32_t durationMs, bool forceTransition, bool disableTransition) = 0;
    // Session end: hidden, with no bitmap and no timer.
    virtual void OverlayClear() = 0;
 };

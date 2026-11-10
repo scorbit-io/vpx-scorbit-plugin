@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <type_traits>
 #include <vector>
 
 namespace Scorbit::Overlay
@@ -29,17 +30,37 @@ struct Record
 {
    uint32_t width = 0;
    uint32_t height = 0;
-   uint32_t enabled = 0;
-   uint32_t untilHidden = 0;
-   int64_t hideAt = 0;  // steady_clock ticks
+   Timeline timeline;
    uint8_t pixels[MAX_WIDTH * MAX_HEIGHT] { };
 
-   // Judged by each reader on every frame, so the timer needs no writer to expire.
-   bool Visible(State::Clock::time_point now) const
+   // Judged by each reader on every frame, so neither the timer nor a wipe needs a writer to move.
+   Sweep SweepAt(State::Clock::time_point now, uint32_t displayWidth) const
    {
-      return enabled != 0 && width != 0 && (untilHidden != 0 || now.time_since_epoch().count() < hideAt);
+      return WithBitmap(Overlay::SweepAt(timeline, TicksOf(now), displayWidth), width != 0);
    }
+   bool Visible(State::Clock::time_point now, uint32_t displayWidth) const { return SweepAt(now, displayWidth).Visible(); }
 };
+
+// What the base dot (bx, by) shows under a sweep: a band or overlay value, 0 to 127, drawn at its
+// luminance, or -1 for the game's own dot. `at` is the record's placement on the base display.
+inline int ComposeDot(const Record& rec, const Placement& at, const Sweep& sweep, uint32_t bx, uint32_t by)
+{
+   if (const int32_t band = sweep.BandColumn(static_cast<int32_t>(bx)); band >= 0)
+   {
+      const uint8_t v = BandDot(sweep, band, static_cast<int32_t>(by));
+      return v != 0 ? v : -1;
+   }
+   if (!sweep.ShowsOverlay(static_cast<int32_t>(bx)))
+      return -1;
+   // The ticker's overlay slides: this dot shows the overlay column its offset puts here.
+   const int64_t sx = sweep.SourceColumn(static_cast<int32_t>(bx));
+   if (sx < at.dstX || sx >= static_cast<int64_t>(at.dstX) + at.width || by < at.dstY || by >= at.dstY + at.height)
+      return -1;
+   const uint8_t px = rec.pixels[static_cast<size_t>(at.srcY + (by - at.dstY)) * rec.width + at.srcX + static_cast<size_t>(sx - at.dstX)];
+   return (px & TRANSPARENT_BIT) != 0 ? -1 : px;
+}
+
+static_assert(std::is_trivially_copyable_v<Record>, "a record is copied as bytes");
 
 // What a record carries before its pixels, of which only width * height are published.
 inline constexpr size_t RECORD_HEADER_BYTES = offsetof(Record, pixels);
@@ -67,10 +88,18 @@ public:
       return result;
    }
 
-   void Control(bool enable, uint32_t durationMs)
+   void Control(bool enable, uint32_t durationMs, bool force = false, bool disable = false)
    {
       std::lock_guard lock(m_writer);
-      m_state.Control(enable, durationMs, Clock::now());
+      m_state.Control(enable, durationMs, Clock::now(), force, disable);
+      Publish();
+   }
+
+   // Load time, before any control: the probe's persistent transition settings.
+   void SetTransition(const TransitionSettings& settings)
+   {
+      std::lock_guard lock(m_writer);
+      m_state.SetTransition(settings);
       Publish();
    }
 
@@ -188,9 +217,7 @@ private:
    {
       m_scratch.width = m_state.Width();
       m_scratch.height = m_state.Height();
-      m_scratch.enabled = m_state.Enabled() ? 1 : 0;
-      m_scratch.untilHidden = m_state.UntilHidden() ? 1 : 0;
-      m_scratch.hideAt = static_cast<int64_t>(m_state.HideAt().time_since_epoch().count());
+      m_scratch.timeline = m_state.GetTimeline();
       const std::vector<uint8_t>& pixels = m_state.Pixels();
       std::copy(pixels.begin(), pixels.end(), m_scratch.pixels);
       m_published.Write(&m_scratch, RECORD_HEADER_BYTES + pixels.size());

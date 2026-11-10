@@ -91,6 +91,10 @@ Enable = 1
 | `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |
+| `OverlayTransitions` | Sweep a DMD overlay in and out with a sparkle band, as the DMD probe does, default on. The daemon can force or skip the sweep per show (see below). |
+| `OverlayTransitionEffect` | Which transition: 1 sparkle (default), 2 bar, 3 meteor, 4 glow, 5 line, 6 ticker, the DMD probe's numbering. |
+| `OverlayTransitionPace` | Milliseconds the sweep takes per DMD column, 1 to 254, default 10. |
+| `OverlayTransitionWidth` | The band's width in DMD columns, 0 to 16, default 8; 0 turns the band effects off. The line is always 1 wide and the ticker ignores it. The transition settings are read when the plugin loads. |
 | `StatusCorner` | macOS, Windows and Linux on X11 (not Wayland, where the notifications stay the surface). Show the status light in this screen corner: 0 off (default), 1 top left, 2 top right, 3 bottom left, 4 bottom right. Off by default because no corner of a full-bleed table is guaranteed free; see `docs/status-window.md`. `ShowStatus = 0` hides it too. |
 | `StatusOpacity` | How strongly the status light draws, 10 to 100 percent, default 100. |
 
@@ -188,6 +192,23 @@ a message on the VPX plugin bus, `Scorbit` / `Overlay`, declared in
 width, height, then one byte per pixel), show with a duration in milliseconds
 (0 for until hidden) and hide. Show arms the overlay even before an upload, as
 the probe does. Send it on the API thread.
+
+Showing and hiding play the probe firmware's transition. A band 8 columns wide
+sweeps left to right, one column every 10 ms: a show reveals the overlay behind
+it, a hide masks it again, and the band's sparkle is drawn afresh at every step,
+its unlit dots showing the game. A 128-wide display takes 1.36 s each way, a
+192-wide one 2.0 s. Only a change between shown and hidden sweeps: an upload
+while shown swaps at once, a hide during a show sweeps out only what was shown,
+and a show during a hide starts again from the left. A timed show counts its
+duration from the show, then sweeps out. `OverlayTransitionEffect` picks the
+band as the probe does: sparkle; a solid bar; a meteor, each row a trail of
+random length fading from the head; a glow, solid with a dimming tail; or a
+line, a bar one column wide. The ticker has no band: the overlay itself slides
+in from the left and out to the right, one column a pace, a hide during the
+slide carrying on from where it is. Bits 1 and 2 of the control byte force
+or skip the sweep for that show or hide, against `OverlayTransitions`
+(`src/OverlayTransition.h`); the in-process message and the file drop carry
+only bit 0, so they follow the setting.
 
 For testing without a daemon connection, `overlayDropDir` names a directory the
 plugin watches. Writing `overlay.bin` (the upload payload) uploads; writing

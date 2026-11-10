@@ -444,9 +444,9 @@ std::unique_ptr<DmdOverlay::Entry> DmdOverlay::MakeEntry(const Target& t)
    return e;
 }
 
-void DmdOverlay::Control(bool enable, uint32_t durationMs)
+void DmdOverlay::Control(bool enable, uint32_t durationMs, bool forceTransition, bool disableTransition)
 {
-   m_cache.Control(enable, durationMs);
+   m_cache.Control(enable, durationMs, forceTransition, disableTransition);
    if (enable)
       m_compositedFrames = 0;
 }
@@ -503,7 +503,7 @@ void DmdOverlay::OnOverlayMsg(const unsigned int msgId, void* userData, void* ms
    case SCORBIT_OVERLAY_OP_HIDE:
       if (!me->m_cache.PostControl(false, 0))
          break;
-      LOGI("overlay: hidden after compositing "s + std::to_string(me->m_compositedFrames.load()) + " frames");
+      LOGI("overlay: hiding after compositing "s + std::to_string(me->m_compositedFrames.load()) + " frames");
       msg->applied = 1;
       break;
    default: break;
@@ -557,8 +557,9 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
       e->lastComposited = false;
    }
 
-   // Judged on every call: the timer expires here, with no writer involved.
-   if (!e->record.Visible(std::chrono::steady_clock::now()))
+   // Judged on every call: the timer expires and a wipe steps here, with no writer involved.
+   const Overlay::Sweep sweep = e->record.SweepAt(std::chrono::steady_clock::now(), e->target.baseWidth);
+   if (!sweep.Visible())
    {
       // Pass the target's frame through untouched.
       if (e->lastComposited || src.frameId != e->srcFrameId)
@@ -568,9 +569,10 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
       return { e->outFrameId, src.frame };
    }
 
-   if (!e->lastComposited || src.frameId != e->srcFrameId)
+   if (!e->lastComposited || src.frameId != e->srcFrameId || !(sweep == e->lastSweep))
    {
-      const void* out = owner->Composite(*e, src);
+      e->lastSweep = sweep;
+      const void* out = owner->Composite(*e, src, sweep);
       e->lastComposited = true;
       e->srcFrameId = src.frameId;
       e->outFrameId++;
@@ -586,7 +588,9 @@ DisplayFrame DmdOverlay::GetRenderFrame(void* callContext)
 // outside it and pixels with bit 7 set are transparent, and an opaque pixel replaces the
 // dot at the luminance the probe on this platform shows its value at. A colouriser output
 // of another size takes the same placement scaled to it, and shows it white x luminance.
-const void* DmdOverlay::Composite(Entry& e, const DisplayFrame& src)
+// During a show or hide wipe the sweep decides which base columns show the overlay, and the
+// band's lit dots replace the game at the same luminance; its unlit dots show the game.
+const void* DmdOverlay::Composite(Entry& e, const DisplayFrame& src, const Overlay::Sweep& sweep)
 {
    const Overlay::Record& rec = e.record;
    const Target& t = e.target;
@@ -596,7 +600,8 @@ const void* DmdOverlay::Composite(Entry& e, const DisplayFrame& src)
    e.next ^= 1;
 
    const Overlay::Placement at = Overlay::Place(t.baseWidth, t.baseHeight, rec.width, rec.height);
-   if (at.width == 0 || at.height == 0)
+   const bool overlay = at.width != 0 && at.height != 0;
+   if (!overlay && !sweep.Wiping())
       return out.data();
 
    float lum[128];
@@ -615,29 +620,28 @@ const void* DmdOverlay::Composite(Entry& e, const DisplayFrame& src)
          const uint16_t r = static_cast<uint16_t>(s * 31.f + 0.5f), g = static_cast<uint16_t>(s * 63.f + 0.5f);
          srgb565[v] = static_cast<uint16_t>((r << 11) | (g << 5) | r);
       }
+   const auto put = [&](size_t i, uint8_t v)
+   {
+      switch (format)
+      {
+      case CTLPI_DISPLAY_FORMAT_LUM32F: std::memcpy(out.data() + i * sizeof(float), &lum[v], sizeof(float)); break;
+      case CTLPI_DISPLAY_FORMAT_SRGB888: out[i * 3] = out[i * 3 + 1] = out[i * 3 + 2] = srgb8[v]; break;
+      default: std::memcpy(out.data() + i * 2, &srgb565[v], 2); break;
+      }
+   };
 
    // Every output dot maps to the base dot it covers; on the controller's display that is itself.
    for (uint32_t y = 0; y < H; y++)
    {
       const uint32_t by = static_cast<uint32_t>(static_cast<uint64_t>(y) * t.baseHeight / H);
-      if (by < at.dstY || by >= at.dstY + at.height)
+      const bool overlayRow = overlay && by >= at.dstY && by < at.dstY + at.height;
+      if (!overlayRow && !sweep.Wiping())
          continue;
-      const uint8_t* row = rec.pixels + static_cast<size_t>(at.srcY + (by - at.dstY)) * rec.width + at.srcX;
       for (uint32_t x = 0; x < W; x++)
       {
          const uint32_t bx = static_cast<uint32_t>(static_cast<uint64_t>(x) * t.baseWidth / W);
-         if (bx < at.dstX || bx >= at.dstX + at.width)
-            continue;
-         const uint8_t px = row[bx - at.dstX];
-         if (px & Overlay::TRANSPARENT_BIT)
-            continue;
-         const size_t i = static_cast<size_t>(y) * W + x;
-         switch (format)
-         {
-         case CTLPI_DISPLAY_FORMAT_LUM32F: std::memcpy(out.data() + i * sizeof(float), &lum[px], sizeof(float)); break;
-         case CTLPI_DISPLAY_FORMAT_SRGB888: out[i * 3] = out[i * 3 + 1] = out[i * 3 + 2] = srgb8[px]; break;
-         default: std::memcpy(out.data() + i * 2, &srgb565[px], 2); break;
-         }
+         if (const int v = Overlay::ComposeDot(rec, at, sweep, bx, by); v >= 0)
+            put(static_cast<size_t>(y) * W + x, static_cast<uint8_t>(v));
       }
    }
    return out.data();

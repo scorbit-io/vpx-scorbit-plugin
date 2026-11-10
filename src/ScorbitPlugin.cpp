@@ -12,6 +12,7 @@
 #include "plugins/ControllerPlugin.h"
 #include "pinmame/PinMAMEPlugin.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -61,6 +62,16 @@ MSGPI_STRING_VAL_SETTING(setDmdDump, "dmdDumpFile", "DMD dump file",
    "Write captured DMD frames to this file as dmddump text (one hex digit per pixel), empty to disable", false, "", 1024);
 MSGPI_STRING_VAL_SETTING(setOverlayDrop, "overlayDropDir", "Overlay drop directory",
    "Demo: watch this directory for overlay.bin / overlay-ctl.bin (raw probe payloads) and display them, empty to disable", false, "", 1024);
+// The probe firmware's settings and defaults: on, a sparkle band 8 columns wide, one column every
+// 10 ms. A control message can still force or skip the transition for that show or hide.
+MSGPI_BOOL_VAL_SETTING(setOverlayTransitions, "OverlayTransitions", "Overlay transitions",
+   "Sweep a DMD overlay in and out with a sparkle band, as the Scorbit DMD probe does", true, true);
+MSGPI_INT_VAL_SETTING(setOverlayTransitionEffect, "OverlayTransitionEffect", "Overlay transition effect",
+   "The overlay transition: 1 sparkle, 2 bar, 3 meteor, 4 glow, 5 line, 6 ticker (the overlay slides)", true, 1, 6, 1);
+MSGPI_INT_VAL_SETTING(setOverlayTransitionPace,"OverlayTransitionPace", "Overlay transition pace",
+   "Milliseconds the overlay transition takes to cross one DMD column", true, 1, 254, 10);
+MSGPI_INT_VAL_SETTING(setOverlayTransitionWidth, "OverlayTransitionWidth", "Overlay transition width",
+   "Width of the overlay transition's band in DMD columns, 0 for no transition", true, 0, 16, 8);
 MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
    "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
 MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
@@ -191,6 +202,10 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
    msgApi->RegisterSetting(endpointId, &setDmdDump);
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);
+   msgApi->RegisterSetting(endpointId, &setOverlayTransitions);
+   msgApi->RegisterSetting(endpointId, &setOverlayTransitionEffect);
+   msgApi->RegisterSetting(endpointId, &setOverlayTransitionPace);
+   msgApi->RegisterSetting(endpointId, &setOverlayTransitionWidth);
    msgApi->RegisterSetting(endpointId, &setSocketPath);
    msgApi->RegisterSetting(endpointId, &setShowStatus);
    msgApi->RegisterSetting(endpointId, &setStatusCorner);
@@ -222,6 +237,11 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
             drop = std::filesystem::path(info.prefPath) / drop;
       }
       dmdOverlay->SetDropDir(drop.string());
+   }
+   {
+      const int effect = std::clamp(setOverlayTransitionEffect_Get(), static_cast<int>(Overlay::EFFECT_FIRST), static_cast<int>(Overlay::EFFECT_LAST));
+      dmdOverlay->SetTransition({ setOverlayTransitions_Get() != 0, static_cast<Overlay::Effect>(effect),
+         static_cast<uint32_t>(setOverlayTransitionPace_Get()), static_cast<uint32_t>(setOverlayTransitionWidth_Get()) });
    }
 
    // The daemon listens and the plugin connects, so this starts whether or not

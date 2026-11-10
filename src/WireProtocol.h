@@ -461,7 +461,11 @@ struct NvRamParameters
 
 inline constexpr uint8_t OVERLAY_OP_UPLOAD = 1;   // payload is the probe's 0x23 WriteDmdOverlay
 inline constexpr uint8_t OVERLAY_OP_CONTROL = 2;  // payload is the probe's 0x27 control register
-inline constexpr uint8_t OVERLAY_CONTROL_ENABLE = 1u << 0; // the other control bits are reserved
+inline constexpr uint8_t OVERLAY_CONTROL_ENABLE = 1u << 0;
+// Against the probe's transition setting, for this control only: play the show or hide
+// transition even if the setting is off, or skip it even if it is on. Bits 3 to 7 are reserved.
+inline constexpr uint8_t OVERLAY_CONTROL_FORCE_TRANSITION = 1u << 1;
+inline constexpr uint8_t OVERLAY_CONTROL_DISABLE_TRANSITION = 1u << 2;
 
 // The probe payload for the op is carried byte for byte: everything after op. The
 // reply is empty.

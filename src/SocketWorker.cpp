@@ -1520,7 +1520,8 @@ bool SocketWorker::AnswerOverlay(const Wire::Message& msg)
    else
    {
       const bool enable = (control.control & Wire::OVERLAY_CONTROL_ENABLE) != 0;
-      m_overlay->OverlayControl(enable, control.durationMs);
+      m_overlay->OverlayControl(enable, control.durationMs, (control.control & Wire::OVERLAY_CONTROL_FORCE_TRANSITION) != 0,
+         (control.control & Wire::OVERLAY_CONTROL_DISABLE_TRANSITION) != 0);
       Log(LOG_LEVEL_DEBUG, !enable ? "Socket: overlay hidden"s
          : control.durationMs == 0 ? "Socket: overlay shown until hidden"s
          : "Socket: overlay shown for " + std::to_string(control.durationMs) + " ms");

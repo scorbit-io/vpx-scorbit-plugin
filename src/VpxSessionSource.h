@@ -116,7 +116,10 @@ public:
    // IOverlayTarget, worker thread.
    bool OverlaySurface() override { return m_overlay.HasSurface(); }
    Overlay::State::Upload OverlayUpload(const uint8_t* payload, size_t size) override { return m_overlay.Store(payload, size); }
-   void OverlayControl(bool enable, uint32_t durationMs) override { m_overlay.Control(enable, durationMs); }
+   void OverlayControl(bool enable, uint32_t durationMs, bool forceTransition, bool disableTransition) override
+   {
+      m_overlay.Control(enable, durationMs, forceTransition, disableTransition);
+   }
    void OverlayClear() override { m_overlay.Clear(); }
 
 private:

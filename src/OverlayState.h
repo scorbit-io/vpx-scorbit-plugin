@@ -2,14 +2,15 @@
 
 #pragma once
 
-// The DMD probe's overlay as plain state: one bitmap, an enable bit and a hide timer,
-// with the probe firmware's rule for each,
+// The DMD probe's overlay as plain state: one bitmap, an enable bit, a hide timer and the
+// transition between shown and hidden (OverlayTransition.h), with the probe firmware's rule for each,
 // and the shade each overlay value shows at on each platform. The wire layouts are in
 // WireProtocol.h. Free of any Visual
 // Pinball dependency so both are tested on their own; the socket path and the
 // in-process Overlay message share it.
 
 #include "OverlayPlacement.h"
+#include "OverlayTransition.h"
 
 #include <chrono>
 #include <cmath>
@@ -139,39 +140,66 @@ public:
       return Accepted(payload[0], payload[1]) ? Upload::Stored : Upload::Ignored;
    }
 
+   // The probe's transition settings; a wipe already running keeps the shape it started with.
+   void SetTransition(const TransitionSettings& settings) { m_timeline.settings = settings; }
+
    // The 0x27 control. Enabling arms the bit and restarts the timer, 0 meaning until
    // hidden, whether or not a bitmap has arrived yet: one that follows inside the
    // window shows at once. On expiry the overlay hides itself.
-   void Control(bool enable, uint32_t durationMs, Clock::time_point now)
+   //
+   // As the firmware does it, only a change of the enable bit starts a wipe: a show while
+   // hidden or hiding sweeps in from the left, a hide while shown or showing sweeps out. A
+   // control that does not transition (force and disable against the setting) settles the
+   // overlay shown or hidden at once, a wipe in progress included.
+   void Control(bool enable, uint32_t durationMs, Clock::time_point now, bool force = false, bool disable = false)
    {
-      m_enabled = enable;
-      m_untilHidden = durationMs == 0;
-      m_hideAt = now + std::chrono::milliseconds(durationMs);
+      // A wipe starts no earlier than the one in place: an in-process op queued behind the socket
+      // worker keeps its arrival time, which may precede a wipe the worker started meanwhile. Its
+      // hold still counts from that arrival.
+      const Ticks arrived = TicksOf(now);
+      const Ticks at = std::max(arrived, m_timeline.wipe.startAt);
+      Timeline t = Settle(m_timeline, at);
+      const bool applied = t.enabled;
+      t.transition = Transitions(t.settings, force, disable);
+      if (!t.transition)
+         t.wipe.reveal = enable ? Reveal::Full : Reveal::Off;
+      else if (enable && !applied)
+         t.wipe = StartWipe(Reveal::Show, at, NO_LIMIT, t.settings, t.wipe.seed);
+      else if (!enable && applied)
+         t = BeginHide(t, at);
+      t.enabled = enable;
+      t.untilHidden = durationMs == 0;
+      t.hideAt = arrived + MsTicks(durationMs);
+      m_timeline = t;
    }
 
-   // Session end: hidden, with no bitmap and no timer left behind.
+   // Session end: hidden at once, with no bitmap and no timer left behind.
    void Clear()
    {
-      m_enabled = false;
-      m_untilHidden = false;
-      m_hideAt = { };
+      const TransitionSettings settings = m_timeline.settings;
+      const uint32_t seed = m_timeline.wipe.seed;
+      m_timeline = { };
+      m_timeline.settings = settings;
+      m_timeline.wipe.seed = seed;
       m_width = m_height = 0;
       m_pixels.clear();
    }
 
-   bool Visible(Clock::time_point now) const { return m_enabled && !m_pixels.empty() && (m_untilHidden || now < m_hideAt); }
+   // What shows on a display `displayWidth` base columns wide. Without a bitmap only a wipe's band,
+   // as the firmware sweeps its empty overlay.
+   Sweep SweepAt(Clock::time_point now, uint32_t displayWidth) const
+   {
+      return WithBitmap(Overlay::SweepAt(m_timeline, TicksOf(now), displayWidth), !m_pixels.empty());
+   }
+   bool Visible(Clock::time_point now, uint32_t displayWidth) const { return SweepAt(now, displayWidth).Visible(); }
 
-   bool Enabled() const { return m_enabled; }
-   bool UntilHidden() const { return m_untilHidden; }
-   Clock::time_point HideAt() const { return m_hideAt; }
+   const Timeline& GetTimeline() const { return m_timeline; }
    uint32_t Width() const { return m_width; }
    uint32_t Height() const { return m_height; }
    const std::vector<uint8_t>& Pixels() const { return m_pixels; }
 
 private:
-   bool m_enabled = false;
-   bool m_untilHidden = false;
-   Clock::time_point m_hideAt { };
+   Timeline m_timeline;
    uint32_t m_width = 0;
    uint32_t m_height = 0;
    std::vector<uint8_t> m_pixels;
