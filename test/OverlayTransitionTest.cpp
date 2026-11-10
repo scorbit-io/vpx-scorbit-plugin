@@ -308,6 +308,133 @@ void TestCacheCarriesTheSweep()
    CHECK_MSG(!record->Visible(Clock::now(), 128), "a hide with the disable bit is immediate");
 }
 
+Overlay::Sweep Band(Overlay::Effect effect, int32_t width)
+{
+   Overlay::Sweep w;
+   w.reveal = Reveal::Show;
+   w.effect = effect;
+   w.width = width;
+   w.seed = 5;
+   return w;
+}
+
+void TestBarLineAndGlow()
+{
+   Overlay::Sweep bar = Band(Overlay::Effect::Bar, 8);
+   bool solid = true;
+   for (int32_t y = 0; y < 32; y++)
+      for (int32_t x = 0; x < 8; x++)
+         solid = solid && Overlay::BandDot(bar, x, y) == 15;
+   CHECK_MSG(solid, "a bar is every dot at 15");
+
+   // A line is a bar one column wide, whatever the width setting: (128 + 1) x 10 ms.
+   Overlay::State s = Shown();
+   s.SetTransition({ .effect = Overlay::Effect::Line, .width = 8 });
+   s.Control(true, 0, At(0));
+   Overlay::Sweep w = SweepOf(s, 500);
+   CHECK(w.frontier == 49 && w.width == 1 && w.BandColumn(49) == 0 && w.BandColumn(50) == -1);
+   CHECK(Overlay::BandDot(w, 0, 3) == 15);
+   CHECK(SweepOf(s, 1289).reveal == Reveal::Show && SweepOf(s, 1290).reveal == Reveal::Full);
+
+   // Glow: 15, then the last three columns 12, 9, 5.
+   const Overlay::Sweep glow = Band(Overlay::Effect::Glow, 8);
+   const int expected[8] = { 15, 15, 15, 15, 15, 12, 9, 5 };
+   for (int32_t x = 0; x < 8; x++)
+      CHECK_MSG(Overlay::BandDot(glow, x, 0) == expected[x], "glow column " + std::to_string(x));
+   // Narrow bands keep the head at 15 and start the tail at column 1.
+   CHECK(Overlay::BandDot(Band(Overlay::Effect::Glow, 2), 0, 0) == 15 && Overlay::BandDot(Band(Overlay::Effect::Glow, 2), 1, 0) == 12);
+   CHECK(Overlay::BandDot(Band(Overlay::Effect::Glow, 4), 1, 0) == 12 && Overlay::BandDot(Band(Overlay::Effect::Glow, 4), 3, 0) == 5);
+   CHECK(Overlay::BandDot(Band(Overlay::Effect::Glow, 1), 0, 0) == 15);
+
+   // Mirrored on hide: the head, 15, is the band's rightmost column.
+   Overlay::Sweep hide = glow;
+   hide.reveal = Reveal::Hide;
+   hide.frontier = 40;
+   CHECK(Overlay::BandDot(hide, hide.BandColumn(47), 0) == 15 && Overlay::BandDot(hide, hide.BandColumn(40), 0) == 5);
+}
+
+// Meteor: per row, a trail from the head of 1 to width columns, fading 15 - x * 12 / (width - 1), at least 3.
+void TestMeteor()
+{
+   Overlay::Sweep w = Band(Overlay::Effect::Meteor, 8);
+   const int shade[8] = { 15, 14, 12, 10, 9, 7, 5, 3 };   // 15 - floor(12x / 7)
+   int rows = 0, full = 0, bad = 0;
+   for (int32_t f = 0; f < 2000; f++)
+   {
+      w.frontier = f;
+      for (int32_t y = 0; y < 32; y++)
+      {
+         int trail = 0;
+         while (trail < 8 && Overlay::BandDot(w, trail, y) != 0)
+            trail++;
+         for (int32_t x = 0; x < 8; x++)
+         {
+            const uint8_t v = Overlay::BandDot(w, x, y);
+            if ((x < trail && v != shade[x]) || (x >= trail && v != 0))
+               bad++;
+         }
+         bad += trail == 0 ? 1 : 0;
+         rows++;
+         full += trail == 8 ? 1 : 0;
+      }
+   }
+   CHECK_MSG(bad == 0, "every row a contiguous trail from the head, at the firmware's shades");
+   // Full width when (r & 0x30) == 0, a quarter of rows, or when 1 + r % 8 is 8 in the rest: 1/4 + 3/4 x 1/8.
+   CHECK_MSG(std::fabs(static_cast<double>(full) / rows - 0.34375) < 0.01, "full-width trails at the firmware's rate");
+}
+
+// Ticker: no band. Show slides the overlay in from a display's width off the left, one column a
+// pace; hide slides it out to the right, a hide during the slide carrying on from where it is.
+void TestTicker()
+{
+   Overlay::State s = Shown();
+   s.SetTransition({ .effect = Overlay::Effect::Ticker, .width = 0 });
+   s.Control(true, 0, At(0));
+   Overlay::Sweep w = SweepOf(s, 0);
+   CHECK_MSG(w.reveal == Reveal::Show && w.frontier == -128, "starts fully off the left; width 0 does not stop it");
+   w = SweepOf(s, 500);
+   CHECK(w.frontier == -78 && w.SourceColumn(100) == 178 && w.SourceColumn(10) == 88 && w.BandColumn(10) == -1);
+   CHECK(SweepOf(s, 1279).reveal == Reveal::Show && SweepOf(s, 1280).reveal == Reveal::Full);
+
+   s.Control(false, 0, At(2000));
+   w = SweepOf(s, 2300);
+   CHECK_MSG(w.reveal == Reveal::Hide && w.frontier == 30 && w.SourceColumn(40) == 10, "hide slides out to the right");
+   CHECK(SweepOf(s, 3279).reveal == Reveal::Hide && SweepOf(s, 3280).reveal == Reveal::Off);
+
+   Overlay::State mid = Shown();
+   mid.SetTransition({ .effect = Overlay::Effect::Ticker });
+   mid.Control(true, 0, At(0));
+   mid.Control(false, 0, At(500));   // slid in to -78
+   CHECK_MSG(SweepOf(mid, 600).frontier == -68, "a hide during the slide carries on from its offset");
+   CHECK_MSG(SweepOf(mid, 2559).reveal == Reveal::Hide && SweepOf(mid, 2560).reveal == Reveal::Off, "206 steps to clear the right edge");
+
+   Overlay::State none = Shown();
+   none.SetTransition({ .effect = Overlay::Effect::Ticker });
+   none.Control(true, 0, At(0));
+   none.Control(false, 0, At(5));
+   CHECK_MSG(!SweepOf(none, 5).Visible(), "still fully off the left: nothing to slide out");
+
+   // Each dot shows the overlay column its offset puts there; past the overlay's edges, the game.
+   auto rec = std::make_unique<Overlay::Record>();
+   rec->width = 128;
+   rec->height = 32;
+   for (uint32_t y = 0; y < 32; y++)
+      for (uint32_t x = 0; x < 128; x++)
+         rec->pixels[y * 128 + x] = static_cast<uint8_t>(x < 120 ? x % 16 : 0x80);
+   const Overlay::Placement at = Overlay::Place(128, 32, 128, 32);
+   Overlay::Sweep slide;
+   slide.reveal = Reveal::Show;
+   slide.effect = Overlay::Effect::Ticker;
+   slide.frontier = -78;
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, slide, 10, 0) == (88 % 16), "column 10 shows overlay column 88");
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, slide, 45, 0) == -1, "overlay column 123 is transparent: the game");
+   CHECK_MSG(Overlay::ComposeDot(*rec, at, slide, 60, 0) == -1, "past the overlay's right edge: the game");
+   slide.reveal = Reveal::Hide;
+   slide.frontier = 30;
+   CHECK(Overlay::ComposeDot(*rec, at, slide, 29, 0) == -1 && Overlay::ComposeDot(*rec, at, slide, 30, 0) == 0
+      && Overlay::ComposeDot(*rec, at, slide, 47, 0) == 1);
+}
+
 // The sparkle's statistics against the firmware's table: lit with chance density / 256, then
 // brightness 9, 12 or 15 at 1 : 1 : 2.
 void TestSparkleStatistics()
@@ -387,5 +514,8 @@ int main()
    TestComposeDot();
    TestCacheCarriesTheSweep();
    TestSparkleStatistics();
+   TestBarLineAndGlow();
+   TestMeteor();
+   TestTicker();
    return ScorbitTest::Summary("overlay_transition_test");
 }

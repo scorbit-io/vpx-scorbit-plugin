@@ -50,9 +50,13 @@ inline int ComposeDot(const Record& rec, const Placement& at, const Sweep& sweep
       const uint8_t v = BandDot(sweep, band, static_cast<int32_t>(by));
       return v != 0 ? v : -1;
    }
-   if (bx < at.dstX || bx >= at.dstX + at.width || by < at.dstY || by >= at.dstY + at.height || !sweep.ShowsOverlay(static_cast<int32_t>(bx)))
+   if (!sweep.ShowsOverlay(static_cast<int32_t>(bx)))
       return -1;
-   const uint8_t px = rec.pixels[static_cast<size_t>(at.srcY + (by - at.dstY)) * rec.width + at.srcX + (bx - at.dstX)];
+   // The ticker's overlay slides: this dot shows the overlay column its offset puts here.
+   const int64_t sx = sweep.SourceColumn(static_cast<int32_t>(bx));
+   if (sx < at.dstX || sx >= static_cast<int64_t>(at.dstX) + at.width || by < at.dstY || by >= at.dstY + at.height)
+      return -1;
+   const uint8_t px = rec.pixels[static_cast<size_t>(at.srcY + (by - at.dstY)) * rec.width + at.srcX + static_cast<size_t>(sx - at.dstX)];
    return (px & TRANSPARENT_BIT) != 0 ? -1 : px;
 }
 
