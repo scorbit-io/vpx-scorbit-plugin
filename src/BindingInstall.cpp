@@ -42,6 +42,15 @@ bool LinkNoReplace(const fs::path& from, const fs::path& to, std::error_code& ec
 #endif
 }
 
+unsigned long ProcessId()
+{
+#ifdef _WIN32
+   return GetCurrentProcessId();
+#else
+   return static_cast<unsigned long>(getpid());
+#endif
+}
+
 BindingInstallResult Fail(std::string detail)
 {
    return { BindingInstall::Failed, std::move(detail) };
@@ -63,8 +72,9 @@ BindingInstallResult InstallBinding(const fs::path& source, const fs::path& scri
    if (ec || !fs::is_directory(scriptsDir, ec))
       return Fail("cannot create the scripts folder: " + (ec ? ec.message() : std::string("not a folder")));
 
+   // Named for this process and call: two VPX installing at once must never share, or delete, a copy.
    static std::atomic<unsigned> counter { 0 };
-   const fs::path temp = scriptsDir / (source.filename().string() + ".part-" + std::to_string(counter++));
+   const fs::path temp = scriptsDir / (source.filename().string() + ".part-" + std::to_string(ProcessId()) + "-" + std::to_string(counter++));
    fs::remove(temp, ec);
    ec.clear();
    if (!fs::copy_file(source, temp, fs::copy_options::none, ec))

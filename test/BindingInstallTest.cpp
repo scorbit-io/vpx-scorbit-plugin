@@ -10,6 +10,14 @@
 #include <random>
 #include <string>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 using namespace Scorbit;
 namespace fs = std::filesystem;
 
@@ -103,6 +111,27 @@ int main()
       CHECK(r.outcome == BindingInstall::Failed);
       CHECK(!r.detail.empty());
       CHECK(Read(prefs / "scripts") == "not a folder");
+   }
+
+   // Another VPX mid-install: its partial copies are neither used nor removed. Its names differ by
+   // process id; ".part-0" is the name every process used before they did.
+   {
+      const fs::path scripts = root / "prefs6" / "scripts";
+      fs::create_directories(scripts);
+#ifdef _WIN32
+      const unsigned long other = GetCurrentProcessId() + 1;
+#else
+      const unsigned long other = static_cast<unsigned long>(getpid()) + 1;
+#endif
+      const fs::path theirs = scripts / ("scorbit-2.0.6.vbs.part-" + std::to_string(other) + "-0");
+      const fs::path legacy = scripts / "scorbit-2.0.6.vbs.part-0";
+      Write(theirs, "' half a");
+      Write(legacy, "' half b");
+      const BindingInstallResult r = InstallBinding(source, scripts);
+      CHECK(r.outcome == BindingInstall::Added);
+      CHECK_MSG(Read(scripts / "scorbit-2.0.6.vbs") == "' binding 2.0.6\r\n", "this process's own complete copy");
+      CHECK_MSG(Read(theirs) == "' half a" && Read(legacy) == "' half b", "the other process's copies untouched");
+      CHECK(Entries(scripts) == 3);
    }
 
    // The bundled file missing: failed, nothing created.
