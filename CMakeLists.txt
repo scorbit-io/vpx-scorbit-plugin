@@ -30,6 +30,7 @@ option(SCORBIT_TRANSPORT_ONLY "Build only the transport library and its tests" O
 
 if(NOT SCORBIT_TRANSPORT_ONLY)
    include(cmake/vpx_headers.cmake)
+   include(cmake/scorbit_binding.cmake)
 endif()
 
 if(MSVC)
@@ -102,6 +103,8 @@ add_library(plugin-scorbit MODULE
    src/VpxSessionSource.cpp
    src/ScriptBinding.h
    src/ScriptBinding.cpp
+   src/PluginFolder.h
+   src/PluginFolder.cpp
    src/ScorbitPluginAPI.h
    src/QuitHook.h
    src/StatusWindow.h
@@ -139,8 +142,13 @@ target_compile_definitions(plugin-scorbit PRIVATE
    "SCORBIT_VPX_PLUGIN_API_COMMIT=\"${VPX_PLUGIN_API_COMMIT}\""
    "SCORBIT_VPX_PINNED_VERSION=\"${VPX_PINNED_VERSION}\""
    "SCORBIT_VPX_PINNED_REVISION=\"${VPX_PINNED_REVISION}\""
+   "SCORBIT_BINDING_FILE=\"${SCORBIT_BINDING_FILE}\""
 )
 target_link_libraries(plugin-scorbit PRIVATE scorbit-transport)
+if(UNIX AND NOT APPLE)
+   # dladdr, which finds the plugin's own folder (the bundled binding beside it).
+   target_link_libraries(plugin-scorbit PRIVATE ${CMAKE_DL_LIBS})
+endif()
 if(MSVC)
    # Same reason as scorbit-transport: fopen in DmdTap is checked before use.
    target_compile_definitions(plugin-scorbit PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -172,6 +180,8 @@ add_custom_target(stage-plugin ALL
    COMMAND "${CMAKE_COMMAND}" -E make_directory "${STAGE_DIR}"
    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:plugin-scorbit>" "${STAGE_DIR}/"
    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_SOURCE_DIR}/plugin.cfg" "${STAGE_DIR}/"
+   # The table-script binding, added to <prefPath>/scripts at load.
+   COMMAND "${CMAKE_COMMAND}" -E copy "${SCORBIT_BINDING_PATH}" "${STAGE_DIR}/"
    COMMENT "Staging plugin folder in ${STAGE_DIR}"
    VERBATIM
 )

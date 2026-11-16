@@ -1,7 +1,7 @@
 # The Scorbit SDK for VBScript tables (design)
 
-Status: the binding is written in `scorbit_sdk` (`wrappers/vbscript`, in review); the plugin's
-install step (below) is not wired in yet.
+Status: the binding ships with each `scorbit_sdk` release from 2.0.6 (`wrappers/vbscript`); the
+plugin bundles a pinned release (`cmake/scorbit_binding.cmake`) and installs it at load (below).
 
 ## What it is
 

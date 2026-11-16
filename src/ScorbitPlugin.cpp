@@ -1,8 +1,10 @@
 // license:GPLv3+
 
 #include "common.h"
+#include "BindingInstall.h"
 #include "DmdTap.h"
 #include "DmdOverlay.h"
+#include "PluginFolder.h"
 #include "QuitHook.h"
 #include "ScriptBinding.h"
 #include "SocketWorker.h"
@@ -32,6 +34,10 @@ LPI_IMPLEMENT_CPP
 #ifndef SCORBIT_VPX_PLUGIN_API_COMMIT
 #define SCORBIT_VPX_PLUGIN_API_COMMIT ""
 #endif
+#ifndef SCORBIT_BINDING_FILE
+#define SCORBIT_BINDING_FILE "scorbit.vbs"
+#endif
+
 
 // The socket worker cannot log from its own thread, so its lines are drained
 // here, along with the Declare and overlay work the API thread owns.
@@ -39,6 +45,30 @@ static constexpr double LOG_DRAIN_INTERVAL = 0.25;
 
 static const MsgPluginAPI* msgApi = nullptr;
 static VPXPluginAPI* vpxApi = nullptr;
+
+// Adds the bundled table-script binding to <prefPath>/scripts, where GetTextFile finds it, before
+// any table script runs (docs/vbs-sdk.md). Add-only, and a failure only costs tables the shared copy.
+static void InstallTableBinding()
+{
+   VPXInfo info { };
+   if (vpxApi != nullptr)
+      vpxApi->GetVpxInfo(&info);
+   const std::filesystem::path folder = PluginFolder();
+   if (info.prefPath == nullptr || folder.empty())
+   {
+      LOGW("binding: "s + SCORBIT_BINDING_FILE + " not installed, " + (folder.empty() ? "the plugin's folder is unknown" : "VPX reports no preferences folder"));
+      return;
+   }
+   const std::filesystem::path scripts = std::filesystem::path(info.prefPath) / "scripts";
+   const BindingInstallResult r = InstallBinding(folder / SCORBIT_BINDING_FILE, scripts);
+   switch (r.outcome)
+   {
+   case BindingInstall::Added: LOGI("binding: added "s + SCORBIT_BINDING_FILE + " to " + scripts.string()); break;
+   case BindingInstall::Present: LOGI("binding: "s + SCORBIT_BINDING_FILE + " already in " + scripts.string() + ", left as it is"); break;
+   default: LOGW("binding: "s + SCORBIT_BINDING_FILE + " not installed, " + r.detail); break;
+   }
+}
+
 static uint32_t endpointId = 0;
 static unsigned int getVpxApiId = 0;
 
@@ -199,6 +229,9 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    InstallQuitHook(UnloadOnQuit);
 
    msgApi->BroadcastMsg(endpointId, getVpxApiId = msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_MSG_GET_API), &vpxApi);
+
+   // Before any table loads, so a table's script finds the binding on its first run.
+   InstallTableBinding();
 
    msgApi->RegisterSetting(endpointId, &setDmdDump);
    msgApi->RegisterSetting(endpointId, &setOverlayDrop);

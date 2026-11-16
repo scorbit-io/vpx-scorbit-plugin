@@ -120,6 +120,8 @@ jobs:
           foreach ($f in @($dll, "plugin.cfg")) {
             if (-not (Test-Path (Join-Path $stage $f))) { throw "staged folder is missing $f" }
           }
+          # The table-script binding the plugin adds to VPX's scripts folder at load.
+          if (-not (Get-ChildItem $stage -Filter "scorbit-*.vbs")) { throw "staged folder has no scorbit-<version>.vbs" }
           # VPX picks the key by its own pointer width, so the DLL has to match the key.
           $bytes = [IO.File]::ReadAllBytes((Join-Path $stage $dll))
           $pe = [BitConverter]::ToInt32($bytes, 0x3C)
@@ -171,6 +173,7 @@ jobs:
         run: |
           so="build/stage/scorbit/$(sed -n 's/^linux\.${{ matrix.arch }} = "\(.*\)"$/\1/p' plugin.cfg)"
           test -f "$so" || { echo "plugin.cfg's linux.${{ matrix.arch }} library was not staged"; exit 1; }
+          ls build/stage/scorbit/scorbit-*.vbs > /dev/null || { echo "the table-script binding was not staged"; exit 1; }
           readelf -d "$so" | grep NEEDED
           # Loaded with dlopen, so a machine without X can still load the plugin.
           if readelf -d "$so" | grep -q 'NEEDED.*libxcb'; then echo "$so links libxcb"; exit 1; fi
