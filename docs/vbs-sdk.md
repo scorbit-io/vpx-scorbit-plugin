@@ -88,12 +88,12 @@ none of this.)
 ## Delivery and versions
 
 The binding is versioned and never edited after release. Each release is its own file, named for
-the SDK's exact version, `scorbit-<major>.<minor>.<patch>.vbs` (`scorbit-2.0.5.vbs` from SDK 2.0.5), carrying
+the SDK's exact version, `scorbit-<major>.<minor>.<patch>.vbs` (`scorbit-2.0.8.vbs` from SDK 2.0.8, the release the plugin bundles), carrying
 `SCORBIT_SDK_VERSION`. A table loads the exact version it was written for:
 
 ```vbscript
 On Error Resume Next
-ExecuteGlobal GetTextFile("scorbit-2.0.5.vbs")
+ExecuteGlobal GetTextFile("scorbit-2.0.8.vbs")
 On Error Goto 0
 ScorbitInit "<machine uuid>"
 ```
