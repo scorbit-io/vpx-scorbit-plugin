@@ -261,6 +261,23 @@ End If
 VPX hands that `CreateObject` to this plugin. Without the plugin it fails, which is why
 the script guards every use: the table must still run on a VPX without Scorbit.
 
+The Scorbit SDK also ships a VBScript binding over `Scorbit.Table`, with the SDK's names and every
+call guarded, as `scorbit-<version>.vbs` from each SDK release. The plugin bundles one pinned
+release (`cmake/scorbit_binding.cmake`, today `scorbit-2.0.8.vbs`) and adds it to
+`<prefPath>/scripts/` when it loads, where VPX's `GetTextFile` finds it. It only adds: a file of
+that name already there is left as it is, and other versions are never touched, so a table loads
+the exact version it was written for:
+
+```vbscript
+On Error Resume Next
+ExecuteGlobal GetTextFile("scorbit-2.0.8.vbs")
+On Error Goto 0
+ScorbitInit "<machine uuid>"
+```
+
+A table that uses the binding should also ship its `scorbit-<version>.vbs` beside itself, for a
+VPX without the plugin. See `docs/vbs-sdk.md`.
+
 | Call | Does |
 |---|---|
 | `Declare uuid` | names the Scorbit machine: a uuid in 8-4-4-4-12 hex, any case |
@@ -386,7 +403,7 @@ members polled from a timer.
 src/            plugin sources (ScorbitPluginAPI.h is the message contract)
 test/           transport tests and the scripted daemon-side peer
 plugin.cfg      VPX plugin manifest (ids and library names per platform)
-cmake/          the pinned VPX/PinMAME header fetch
+cmake/          the pinned VPX/PinMAME header and table-script binding fetches
 ```
 
 Run the tests with:
