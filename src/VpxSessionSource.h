@@ -123,7 +123,7 @@ public:
    void OverlayClear() override { m_overlay.Clear(); }
    const Overlay::Cache* OverlayRecord() override { return &m_overlay.Published(); }
    Overlay::Platform OverlayPlatform() override { return m_overlay.ShadingPlatform(); }
-   void OverlayBase(uint16_t& width, uint16_t& height, uint8_t& shades) override { m_overlay.Base(width, height, shades); }
+   uint64_t OverlayBaseSource() override { return m_overlay.BaseSource(); }
 
 private:
    static void OnGameStart(const unsigned int msgId, void* userData, void* msgData);

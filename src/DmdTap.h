@@ -39,6 +39,7 @@ public:
       unsigned int height = 0;
       unsigned int shades = 0;     // 4 or 16
       uint64_t generation = 0;     // DmdTap source generation that produced this frame
+      uint64_t sourceId = 0;       // the display source that produced it (DisplaySrcId::id.id)
       std::vector<uint8_t> pixels; // width * height shade indices, row major
    };
 
@@ -101,6 +102,7 @@ private:
       uint32_t height;
       uint32_t shades;
       uint64_t generation;
+      uint64_t sourceId;
    };
    void Publish(const Frame& frame);
 

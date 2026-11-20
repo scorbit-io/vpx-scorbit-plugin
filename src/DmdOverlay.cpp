@@ -294,6 +294,7 @@ std::vector<DmdOverlay::Target> DmdOverlay::Desired() const
       Target t;
       t.source = *node;
       t.identify = &*node == root && node->GetIdentifyFrame != nullptr;
+      t.baseSource = root->id.id;
       t.baseWidth = root->width;
       t.baseHeight = root->height;
       t.sixteenShades = root->identifyFormat == CTLPI_DISPLAY_ID_FORMAT_BITPLANE4;
@@ -403,10 +404,10 @@ void DmdOverlay::UpdateSurface()
    {
       std::lock_guard lock(e->mutex);
       if (e->live && !any)
-         base = PackBase(e->target.baseWidth, e->target.baseHeight, e->target.sixteenShades);
+         base = e->target.baseSource;
       any = any || e->live;
    }
-   m_base = base;
+   m_baseSource = base;
    if (m_surface.exchange(any) != any)
       m_surfaceGeneration++;
 }

@@ -53,6 +53,7 @@ struct FrameSnapshot
    uint16_t height = 0;
    uint8_t shades = 0;              // 4 or 16
    std::vector<uint8_t> pixels;     // width * height shade indices, row major
+   uint64_t sourceId = 0;           // not on the wire: the display the frame was captured from
 };
 
 // What the plugin declares about itself, plus a counter the API thread bumps
@@ -122,9 +123,9 @@ public:
    // compose the overlaid frame. Null: no overlaid frames are served.
    virtual const Overlay::Cache* OverlayRecord() { return nullptr; }
    virtual Overlay::Platform OverlayPlatform() { return Overlay::Platform::Unknown; }
-   // The display the render path places the overlay on; zeros when none. The overlaid frame is
-   // composed only when it is the identify frame's display.
-   virtual void OverlayBase(uint16_t& width, uint16_t& height, uint8_t& shades) { width = height = 0; shades = 0; }
+   // The display the render path places the overlay on, 0 when none. The overlaid frame is
+   // composed only when it is the display the identify frame was captured from.
+   virtual uint64_t OverlayBaseSource() { return 0; }
 };
 
 enum LogLevel
