@@ -51,6 +51,15 @@ class OverlaidComposer final
 public:
    using Clock = State::Clock;
 
+   // The wire's "no overlaid frame held"; overlay_seq never takes it.
+   static constexpr uint32_t RESERVED_SEQ = 0xFFFFFFFFu;
+
+   // Seeded from the clock, so a reloaded plugin does not replay a seq a daemon may still hold.
+   explicit OverlaidComposer(uint32_t seed = static_cast<uint32_t>(Clock::now().time_since_epoch().count()))
+      : m_seq(seed)
+   {
+   }
+
    // Worker thread only. surface: the plugin has a display it composites on, so VPX shows overlays.
    OverlaidFrame Compose(const Cache& cache, Platform platform, bool surface, const PlainFrame& plain, Clock::time_point now)
    {
@@ -80,7 +89,8 @@ public:
       if (!m_last || !(*m_last == key))
       {
          m_last = key;
-         m_seq++;
+         if (++m_seq == RESERVED_SEQ)
+            m_seq++;
          if (key.showing)
             Draw(plain, key);
       }
@@ -129,8 +139,7 @@ private:
    Record m_record;
    Record m_scratch;
    std::optional<Key> m_last;
-   // Seeded from the clock, so a reloaded plugin does not replay a seq a daemon may still hold.
-   uint32_t m_seq = static_cast<uint32_t>(Clock::now().time_since_epoch().count());
+   uint32_t m_seq;   // the last served; only an advance is ever served, so the seed itself never is
    std::vector<uint8_t> m_pixels;
 };
 

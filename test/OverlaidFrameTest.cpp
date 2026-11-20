@@ -240,6 +240,31 @@ void TestSeqAdvancesOnItsInputsOnly()
    CHECK(!f.showing && f.seq != wpc);
 }
 
+// The reserved 0xFFFFFFFF says "none held", so a daemon could never hold a frame carrying it.
+void TestSeqSkipsTheSentinel()
+{
+   const Plain plain(128, 32, 4);
+   const auto now = Clock::now();
+   for (const uint32_t seed : { 0xFFFFFFFEu, 0xFFFFFFFFu })
+   {
+      Overlay::Cache cache;
+      Overlay::OverlaidComposer composer(seed);
+      const uint32_t first = composer.Compose(cache, Platform::Wpc, true, plain.View(), now).seq;
+      CHECK_MSG(first == 0, "seed " + std::to_string(seed) + " served " + std::to_string(first));
+   }
+
+   // An advance that would land on it.
+   Overlay::Cache cache;
+   cache.SetTransition({ .on = false });
+   Overlay::OverlaidComposer composer(0xFFFFFFFDu);
+   CHECK(composer.Compose(cache, Platform::Wpc, true, plain.View(), now).seq == 0xFFFFFFFEu);
+   const std::vector<uint8_t> p = Upload(32, 10, 0x0F);
+   CHECK(cache.Store(p.data(), p.size()) == Overlay::State::Upload::Stored);
+   CHECK_MSG(composer.Compose(cache, Platform::Wpc, true, plain.View(), now).seq == 0, "0xFFFFFFFF is skipped");
+   cache.Control(true, 0);
+   CHECK(composer.Compose(cache, Platform::Wpc, true, plain.View(), Clock::now()).seq == 1);
+}
+
 void TestTheTimerExpires()
 {
    Overlay::Cache cache;
@@ -266,5 +291,6 @@ int main()
    TestSweepsMatchComposeDot();
    TestSeqAdvancesOnItsInputsOnly();
    TestTheTimerExpires();
+   TestSeqSkipsTheSentinel();
    return ScorbitTest::Summary("overlaid_frame_test");
 }
