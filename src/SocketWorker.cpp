@@ -1116,7 +1116,8 @@ uint32_t SocketWorker::OwnCapabilities() const
 
 bool SocketWorker::OverlaidAllowed() const
 {
-   return m_peerMinor >= 3 && (OwnCapabilities() & Wire::CAP_OVERLAID_FRAMES) != 0;
+   return m_peerMinor >= 3 && (OwnCapabilities() & Wire::CAP_OVERLAID_FRAMES) != 0
+      && (m_peerCapabilities & Wire::CAP_OVERLAID_FRAMES) != 0;
 }
 
 void SocketWorker::AnswerOverlaid(const Wire::FrameRequest& req, const FrameSnapshot& snapshot, Wire::FrameReply& out)
@@ -1129,12 +1130,10 @@ void SocketWorker::AnswerOverlaid(const Wire::FrameRequest& req, const FrameSnap
    plain.height = snapshot.height;
    plain.shades = snapshot.shades;
    plain.pixels = snapshot.pixels.data();
-   // VPX shows the overlay on this frame only when the render path places it on the same display.
-   uint16_t baseWidth = 0, baseHeight = 0;
-   uint8_t baseShades = 0;
-   m_overlay->OverlayBase(baseWidth, baseHeight, baseShades);
-   const bool surface = m_overlay->OverlaySurface() && baseWidth == plain.width && baseHeight == plain.height
-      && baseShades == plain.shades;
+   // VPX shows the overlay on this frame only when the render path places it on the display the
+   // frame was captured from; the same size is not enough when a controller has two.
+   const uint64_t base = m_overlay->OverlayBaseSource();
+   const bool surface = m_overlay->OverlaySurface() && base != 0 && base == snapshot.sourceId;
    const Overlay::OverlaidFrame frame = m_overlaid.Compose(*m_overlay->OverlayRecord(), m_overlay->OverlayPlatform(),
       surface, plain, Overlay::OverlaidComposer::Clock::now());
 
