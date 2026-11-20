@@ -358,14 +358,31 @@ std::vector<uint8_t> Encode(const FrameRequest& v)
    Writer w;
    w.U32(v.sinceFrameId);
    w.U32(v.sinceGeneration);
+   if (v.hasStreams)
+   {
+      w.U8(v.streams);
+      w.U32(v.sinceOverlaySeq);
+   }
    return w.Ok() ? w.Take() : std::vector<uint8_t> { };
 }
+
+// The 1.3 tail's size. Fewer trailing bytes are not a 1.3 tail; like any unknown trailer they are ignored.
+static constexpr size_t FRAME_REQUEST_TAIL_BYTES = 5;
 
 bool Decode(const std::vector<uint8_t>& payload, FrameRequest& out)
 {
    Reader r(payload.data(), payload.size());
    r.U32(out.sinceFrameId);
    r.U32(out.sinceGeneration);
+   out.hasStreams = false;
+   out.streams = STREAM_PLAIN;
+   out.sinceOverlaySeq = SINCE_OVERLAY_NONE;
+   if (r.Ok() && r.Remaining() >= FRAME_REQUEST_TAIL_BYTES)
+   {
+      out.hasStreams = true;
+      r.U8(out.streams);
+      r.U32(out.sinceOverlaySeq);
+   }
    return r.Ok();
 }
 
@@ -387,8 +404,22 @@ std::vector<uint8_t> Encode(const FrameReply& v)
          return { };
       w.Bytes(v.pixels.data(), v.pixels.size());
    }
+   if (v.hasOverlay)
+   {
+      w.U32(v.overlaySeq);
+      w.U8(v.overlayState);
+      w.U8(v.overlayHasPixels);
+      if (v.overlayHasPixels != 0)
+      {
+         if (v.overlayPixels.size() != static_cast<size_t>(v.width) * v.height)
+            return { };
+         w.Bytes(v.overlayPixels.data(), v.overlayPixels.size());
+      }
+   }
    return w.Ok() ? w.Take() : std::vector<uint8_t> { };
 }
+
+static constexpr size_t FRAME_REPLY_TAIL_BYTES = 6;
 
 bool Decode(const std::vector<uint8_t>& payload, FrameReply& out)
 {
@@ -402,6 +433,20 @@ bool Decode(const std::vector<uint8_t>& payload, FrameReply& out)
    out.pixels.clear();
    if (r.Ok() && out.hasPixels != 0)
       r.Bytes(out.pixels, static_cast<size_t>(out.width) * out.height);
+   out.hasOverlay = false;
+   out.overlaySeq = 0;
+   out.overlayState = 0;
+   out.overlayHasPixels = 0;
+   out.overlayPixels.clear();
+   if (r.Ok() && r.Remaining() >= FRAME_REPLY_TAIL_BYTES)
+   {
+      out.hasOverlay = true;
+      r.U32(out.overlaySeq);
+      r.U8(out.overlayState);
+      r.U8(out.overlayHasPixels);
+      if (r.Ok() && out.overlayHasPixels != 0)
+         r.Bytes(out.overlayPixels, static_cast<size_t>(out.width) * out.height);
+   }
    return r.Ok();
 }
 
