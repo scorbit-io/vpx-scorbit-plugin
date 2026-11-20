@@ -127,6 +127,10 @@ None of these makes the API or render thread wait on the socket worker.
     It judges visibility against the deadline on every call, and never waits on a writer.
   - A reader that retries more than three times composites from its own last good copy for that
     frame.
+  - The socket worker is one more reader (protocol 1.3, `src/OverlaidFrame.h`). It keeps its own
+    copy and composes the overlaid frame on the tap's identify frame when the daemon asks. It
+    applies the same per-dot rule, `ComposeDot`, and judges the sweep at the moment of the
+    request. It never calls `GetRenderFrame` or touches the overrides.
 - *Snapshot*, API thread → worker (`MemoryBridge`): the memory ranges a `Poll` serves, published
   once per frame through the same seqlock and tagged with the subscription they were read for, so
   a `Poll` never serves bytes of a set since replaced. A `Poll` that sees the snapshot torn more

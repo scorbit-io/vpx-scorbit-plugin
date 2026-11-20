@@ -136,7 +136,7 @@ rotates its token is picked up without restarting VPX.
 
 `src/WireProtocol.*` is the whole wire format: little-endian, a `u32` length
 followed by `u16` type, `u16` flags and a `u32` sequence number, then the
-payload. This build speaks protocol 1.2 and serves Hello, Declare, Frame, Ping,
+payload. This build speaks protocol 1.3 and serves Hello, Declare, Frame, Ping,
 Bye, the memory messages, Overlay and Status. For table scripts it sends Game and
 TopScoresRequest, and takes TopScores, Players and PlayerPicture. It still talks to a
 1.1 daemon, which serves no leaderboards, players or pictures and sends Status without
@@ -144,6 +144,15 @@ TopScoresRequest, and takes TopScores, Players and PlayerPicture. It still talks
 `SessionState` and `StatusText` read the same from either. A type it does not serve is
 answered with `unsupported_type` rather than ignored. Frames cross as one shade
 index per pixel, row major, exactly as the tap captured them.
+
+From 1.3 a daemon may also ask, in the same `Frame` exchange, for the *overlaid*
+frame: the same identify frame with the current overlay composited as VPX draws
+it, for a live view of the machine. It is composed on the socket worker from the
+tap's frame and the published overlay, never from the render path, and a daemon
+that does not ask for it gets exactly the 1.2 reply. Overlay shades are placed on
+the identify frame's own scale, so on a 5- or 7-shade platform they are the
+nearest identify shades, not exact ones. Frames a daemon uses for scoring stay
+the plain ones.
 
 `test/` holds a scripted daemon-side peer and the test binaries; `ctest` in the
 build directory runs them all. They need neither Visual Pinball nor a daemon.
