@@ -18,6 +18,8 @@
 
 #include "Latch.h"
 #include "MemoryBridge.h"
+#include "OverlaidFrame.h"
+#include "OverlayCache.h"
 #include "OverlayState.h"
 #include "ReadBack.h"
 #include "StatusNotice.h"
@@ -116,6 +118,13 @@ public:
    virtual void OverlayControl(bool enable, uint32_t durationMs, bool forceTransition, bool disableTransition) = 0;
    // Session end: hidden, with no bitmap and no timer.
    virtual void OverlayClear() = 0;
+   // Protocol 1.3: the published overlay and the platform it shades for, read on the worker to
+   // compose the overlaid frame. Null: no overlaid frames are served.
+   virtual const Overlay::Cache* OverlayRecord() { return nullptr; }
+   virtual Overlay::Platform OverlayPlatform() { return Overlay::Platform::Unknown; }
+   // The display the render path places the overlay on; zeros when none. The overlaid frame is
+   // composed only when it is the identify frame's display.
+   virtual void OverlayBase(uint16_t& width, uint16_t& height, uint8_t& shades) { width = height = 0; shades = 0; }
 };
 
 enum LogLevel
@@ -214,6 +223,9 @@ private:
    bool Identifies(const Wire::Declare& d) const;
    // A 1.2 read-back both sides offer; player_pictures also needs players.
    bool ReadBackAllowed(uint32_t capability) const;
+   // Protocol 1.3: the daemon negotiated a minor that may ask for the overlaid frame.
+   bool OverlaidAllowed() const;
+   void AnswerOverlaid(const Wire::FrameRequest& req, const FrameSnapshot& snapshot, Wire::FrameReply& out);
    // Sends the script's queued TopScoresRequests. False closes the session.
    bool SendTopScoresRequests();
    void PostScores(uint64_t epoch, uint32_t requestId, int result);
@@ -307,6 +319,8 @@ private:
    // What HelloAck offered this connection.
    uint16_t m_peerMinor = 0;
    uint32_t m_peerCapabilities = 0;
+   // Plugin-wide, so its overlay_seq survives reconnects; the daemon resends the sentinel anyway.
+   Overlay::OverlaidComposer m_overlaid;
    bool m_loggedNoAuthored = false;      // once per connection
    // Batches taken from the source and not yet acknowledged, kept across connections.
    std::deque<GamePost> m_games;

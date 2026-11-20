@@ -54,6 +54,7 @@ add_library(scorbit-transport STATIC
    src/WireProtocol.cpp
    src/MemoryBridge.h
    src/MemoryBridge.cpp
+   src/OverlaidFrame.h
    src/OverlayPlacement.h
    src/OverlayState.h
    src/OverlayTransition.h

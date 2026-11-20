@@ -398,11 +398,15 @@ void DmdOverlay::Apply()
 void DmdOverlay::UpdateSurface()
 {
    bool any = false;
+   uint64_t base = 0;
    for (const std::unique_ptr<Entry>& e : m_entries)
    {
       std::lock_guard lock(e->mutex);
+      if (e->live && !any)
+         base = PackBase(e->target.baseWidth, e->target.baseHeight, e->target.sixteenShades);
       any = any || e->live;
    }
+   m_base = base;
    if (m_surface.exchange(any) != any)
       m_surfaceGeneration++;
 }

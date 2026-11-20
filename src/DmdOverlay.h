@@ -56,6 +56,17 @@ public:
 
    // Any thread. Some override is live, so there is something to composite on.
    bool HasSurface() const { return m_surface; }
+   // Worker thread, for the overlaid frame: the record is a seqlock read, the platform an atomic.
+   const Overlay::Cache& Published() const { return m_cache; }
+   Overlay::Platform ShadingPlatform() const { return static_cast<Overlay::Platform>(m_platform.load()); }
+   // The controller display the render path places on, so the worker composes only on the same one.
+   void Base(uint16_t& width, uint16_t& height, uint8_t& shades) const
+   {
+      const uint64_t b = m_base.load();
+      width = static_cast<uint16_t>(b >> 32);
+      height = static_cast<uint16_t>(b >> 16);
+      shades = static_cast<uint8_t>(b);
+   }
    // Any thread. Moves whenever the overrides change, which must re-Declare.
    uint64_t SurfaceGeneration() const { return m_surfaceGeneration; }
 
@@ -176,7 +187,12 @@ private:
 
    std::atomic<uint32_t> m_controllerEndpointId { 0 };
    std::atomic<int> m_platform { static_cast<int>(Overlay::Platform::Unknown) };
+   static uint64_t PackBase(uint32_t w, uint32_t h, bool sixteen)
+   {
+      return (static_cast<uint64_t>(w & 0xFFFF) << 32) | (static_cast<uint64_t>(h & 0xFFFF) << 16) | (sixteen ? 16u : 4u);
+   }
    std::atomic<bool> m_surface { false };
+   std::atomic<uint64_t> m_base { 0 };
    std::atomic<uint64_t> m_surfaceGeneration { 0 };
    std::atomic<uint64_t> m_compositedFrames { 0 };
    PinballPlugin::Controller::CtrlItemConsumer<DisplaySrcId> m_sources; // every source but ours
