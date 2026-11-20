@@ -1110,7 +1110,42 @@ uint32_t SocketWorker::OwnCapabilities() const
       | (m_memory != nullptr ? Wire::CAP_MEMORY_READ | Wire::CAP_MEMORY_WRITE : 0u)
       | (m_overlay != nullptr ? Wire::CAP_OVERLAY : 0u)
       | (m_config.authoredTables ? Wire::CAP_AUTHORED_TABLES : 0u)
-      | (readBacks ? Wire::CAP_LEADERBOARDS | Wire::CAP_PLAYERS | Wire::CAP_PLAYER_PICTURES : 0u);
+      | (readBacks ? Wire::CAP_LEADERBOARDS | Wire::CAP_PLAYERS | Wire::CAP_PLAYER_PICTURES : 0u)
+      | (m_overlay != nullptr && m_overlay->OverlayRecord() != nullptr ? Wire::CAP_OVERLAID_FRAMES : 0u);
+}
+
+bool SocketWorker::OverlaidAllowed() const
+{
+   return m_peerMinor >= 3 && (OwnCapabilities() & Wire::CAP_OVERLAID_FRAMES) != 0
+      && (m_peerCapabilities & Wire::CAP_OVERLAID_FRAMES) != 0;
+}
+
+void SocketWorker::AnswerOverlaid(const Wire::FrameRequest& req, const FrameSnapshot& snapshot, Wire::FrameReply& out)
+{
+   Overlay::PlainFrame plain;
+   plain.hasSource = snapshot.hasSource && snapshot.pixels.size() == static_cast<size_t>(snapshot.width) * snapshot.height;
+   plain.frameId = snapshot.frameId;
+   plain.generation = snapshot.generation;
+   plain.width = snapshot.width;
+   plain.height = snapshot.height;
+   plain.shades = snapshot.shades;
+   plain.pixels = snapshot.pixels.data();
+   // VPX shows the overlay on this frame only when the render path places it on the display the
+   // frame was captured from; the same size is not enough when a controller has two.
+   const uint64_t base = m_overlay->OverlayBaseSource();
+   const bool surface = m_overlay->OverlaySurface() && base != 0 && base == snapshot.sourceId;
+   const Overlay::OverlaidFrame frame = m_overlaid.Compose(*m_overlay->OverlayRecord(), m_overlay->OverlayPlatform(),
+      surface, plain, Overlay::OverlaidComposer::Clock::now());
+
+   out.hasOverlay = true;
+   out.overlaySeq = frame.seq;
+   out.overlayState = frame.showing ? 1 : 0;
+   const bool held = req.sinceOverlaySeq != Wire::SINCE_OVERLAY_NONE && req.sinceOverlaySeq == frame.seq;
+   if (frame.showing && !held)
+   {
+      out.overlayHasPixels = 1;
+      out.overlayPixels = *frame.pixels;
+   }
 }
 
 bool SocketWorker::ReadBackAllowed(uint32_t capability) const
@@ -1626,6 +1661,9 @@ bool SocketWorker::AnswerFrame(const Wire::Message& msg)
    m_source.GetFrame(snapshot);
 
    Wire::FrameReply out;
+   // Composed before the plain pixels move into the reply.
+   if (req.WantsOverlaid() && OverlaidAllowed())
+      AnswerOverlaid(req, snapshot, out);
    out.sourceGeneration = snapshot.generation;
    if (snapshot.hasSource)
    {

@@ -28,7 +28,7 @@ namespace Scorbit::Wire
 {
 
 inline constexpr uint16_t PROTO_MAJOR = 1;
-inline constexpr uint16_t PROTO_MINOR = 2;
+inline constexpr uint16_t PROTO_MINOR = 3;
 
 // Largest message accepted from the peer, counted from the first byte of the
 // length field. Sends are held one header below it so a peer that measures the
@@ -123,6 +123,8 @@ enum Capability : uint32_t
    CAP_START_REQUESTS = 1u << 11,
    CAP_CREDITS = 1u << 12,
    CAP_PRICING = 1u << 13,
+   // 1.3. Hello: the plugin serves the overlaid frame. HelloAck: the daemon may ask for it.
+   CAP_OVERLAID_FRAMES = 1u << 14,
 };
 
 const char* TypeName(uint16_t type);
@@ -308,11 +310,22 @@ inline bool NewIdentity(const Declare& was, const Declare& now)
 // id 0xFFFFFFFF, which at sixty frames a second is years of continuous play.
 inline constexpr uint32_t SINCE_FRAME_NONE = 0xFFFFFFFFu;
 
+// Frame's streams (1.3): bit 0 plain, always set; bit 1 asks for the overlaid tail.
+inline constexpr uint8_t STREAM_PLAIN = 0x01;
+inline constexpr uint8_t STREAM_OVERLAID = 0x02;
+// Reserved since_overlay_seq: the requester holds no overlaid frame, so pixels are forced.
+inline constexpr uint32_t SINCE_OVERLAY_NONE = 0xFFFFFFFFu;
+
 struct FrameRequest
 {
    uint32_t sinceFrameId = 0;
    uint32_t sinceGeneration = 0;
+   // 1.3 tail, present when hasStreams.
+   bool hasStreams = false;
+   uint8_t streams = STREAM_PLAIN;
+   uint32_t sinceOverlaySeq = SINCE_OVERLAY_NONE;
 
+   bool WantsOverlaid() const { return hasStreams && (streams & STREAM_OVERLAID) != 0; }
    bool operator==(const FrameRequest&) const = default;
 };
 
@@ -325,6 +338,12 @@ struct FrameReply
    uint8_t shades = 0;
    uint8_t hasPixels = 0;
    std::vector<uint8_t> pixels;     // width * height shade indices, row major
+   // 1.3 tail, present when hasOverlay: the same frame with the overlay composited, same geometry.
+   bool hasOverlay = false;
+   uint32_t overlaySeq = 0;
+   uint8_t overlayState = 0;        // 0 none showing (the overlaid frame is the plain one), 1 showing
+   uint8_t overlayHasPixels = 0;
+   std::vector<uint8_t> overlayPixels;
 
    bool operator==(const FrameReply&) const = default;
 };

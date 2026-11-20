@@ -56,6 +56,11 @@ public:
 
    // Any thread. Some override is live, so there is something to composite on.
    bool HasSurface() const { return m_surface; }
+   // Worker thread, for the overlaid frame: the record is a seqlock read, the platform an atomic.
+   const Overlay::Cache& Published() const { return m_cache; }
+   Overlay::Platform ShadingPlatform() const { return static_cast<Overlay::Platform>(m_platform.load()); }
+   // The controller display the render path places on, 0 when no override is live.
+   uint64_t BaseSource() const { return m_baseSource.load(); }
    // Any thread. Moves whenever the overrides change, which must re-Declare.
    uint64_t SurfaceGeneration() const { return m_surfaceGeneration; }
 
@@ -87,13 +92,15 @@ private:
    {
       DisplaySrcId source { };
       bool identify = false;      // the controller's display: identify frames pass through
-      uint32_t baseWidth = 0;     // the controller's display, where the probe places the overlay
+      uint64_t baseSource = 0;    // the controller's display, where the probe places the overlay
+      uint32_t baseWidth = 0;
       uint32_t baseHeight = 0;
       bool sixteenShades = false;
 
       bool operator==(const Target& o) const
       {
-         return source == o.source && identify == o.identify && baseWidth == o.baseWidth && baseHeight == o.baseHeight
+         return source == o.source && identify == o.identify && baseSource == o.baseSource && baseWidth == o.baseWidth
+            && baseHeight == o.baseHeight
             && sixteenShades == o.sixteenShades;
       }
    };
@@ -177,6 +184,7 @@ private:
    std::atomic<uint32_t> m_controllerEndpointId { 0 };
    std::atomic<int> m_platform { static_cast<int>(Overlay::Platform::Unknown) };
    std::atomic<bool> m_surface { false };
+   std::atomic<uint64_t> m_baseSource { 0 };
    std::atomic<uint64_t> m_surfaceGeneration { 0 };
    std::atomic<uint64_t> m_compositedFrames { 0 };
    PinballPlugin::Controller::CtrlItemConsumer<DisplaySrcId> m_sources; // every source but ours

@@ -86,7 +86,7 @@ void TestHello()
       tokenHex += "30313233343536373839616263646566";
    const std::string expected =
       "0100"              // proto_major
-      "0200"              // proto_minor, 1.2
+      "0300"              // proto_minor, 1.3
       "0500" "302e312e30" // plugin_version "0.1.0"
       "0400" "35353839"   // vpx_revision "5589"
       "0300" "616263"     // plugin_api_commit "abc"
@@ -806,7 +806,7 @@ const std::string STATUS_HIDDEN_HEX = "0d000000" "2100" "0000" "05000000" "04" "
 
 void TestSliceSixGoldenVectors()
 {
-   CHECK(Wire::PROTO_MINOR == 2);
+   CHECK(Wire::PROTO_MINOR >= 2);
    Wire::Message msg;
 
    // --- TopScoresRequest and its empty response ---------------------------------
@@ -977,6 +977,78 @@ void TestSliceSixRejections()
    CHECK_MSG(Wire::ReceivedSensitive(msg).empty(), "responses carry none");
 }
 
+// Whole wire frames from the slice 7 contract (protocol 1.3), §7, verbatim: a 4 x 2, 4-shade source.
+const std::string FRAME_13_REQUEST_HEX = "15000000" "0400" "0000" "1e000000" "2a000000" "03000000" "03" "ffffffff";
+const std::string FRAME_13_REPLY_HEX = "2c000000" "0400" "0100" "1e000000" "2b000000" "03000000" "0400" "0200" "04" "01"
+   "0001020303020100" "07000000" "01" "01" "0303010303020100";
+const std::string FRAME_13_REQUEST_HELD_HEX = "15000000" "0400" "0000" "1f000000" "2b000000" "03000000" "03" "07000000";
+const std::string FRAME_13_REPLY_UNCHANGED_HEX = "1c000000" "0400" "0100" "1f000000" "2b000000" "03000000" "0400" "0200" "04" "00"
+   "07000000" "01" "00";
+const std::string FRAME_13_REPLY_HIDDEN_HEX = "1c000000" "0400" "0100" "20000000" "2b000000" "03000000" "0400" "0200" "04" "00"
+   "08000000" "00" "00";
+
+Wire::FrameReply Reply13(uint32_t seq, uint8_t state, bool plainPixels, bool overlaidPixels)
+{
+   Wire::FrameReply r;
+   r.frameId = 43;
+   r.sourceGeneration = 3;
+   r.width = 4;
+   r.height = 2;
+   r.shades = 4;
+   r.hasPixels = plainPixels ? 1 : 0;
+   if (plainPixels)
+      r.pixels = { 0, 1, 2, 3, 3, 2, 1, 0 };
+   r.hasOverlay = true;
+   r.overlaySeq = seq;
+   r.overlayState = state;
+   r.overlayHasPixels = overlaidPixels ? 1 : 0;
+   if (overlaidPixels)
+      r.overlayPixels = { 3, 3, 1, 3, 3, 2, 1, 0 };
+   return r;
+}
+
+void TestSliceSevenGoldenVectors()
+{
+   CHECK(Wire::PROTO_MINOR == 3);
+   CHECK(Wire::CAP_OVERLAID_FRAMES == 1u << 14);
+   Wire::Message msg;
+
+   Wire::FrameRequest first { 42, 3, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, Wire::SINCE_OVERLAY_NONE };
+   CHECK_MSG(Frame(Wire::TYPE_FRAME, 0, 30, Wire::Encode(first)) == FRAME_13_REQUEST_HEX, Frame(Wire::TYPE_FRAME, 0, 30, Wire::Encode(first)));
+   Wire::FrameRequest firstBack;
+   CHECK(DecodeFrame(FRAME_13_REQUEST_HEX, Wire::TYPE_FRAME, 30, msg) && Wire::Decode(msg.payload, firstBack) && firstBack == first);
+   CHECK(firstBack.WantsOverlaid());
+
+   const Wire::FrameReply full = Reply13(7, 1, true, true);
+   CHECK_MSG(Frame(Wire::TYPE_FRAME, Wire::FLAG_RESPONSE, 30, Wire::Encode(full)) == FRAME_13_REPLY_HEX,
+      Frame(Wire::TYPE_FRAME, Wire::FLAG_RESPONSE, 30, Wire::Encode(full)));
+   Wire::FrameReply fullBack;
+   const std::vector<uint8_t> fullBytes = ScorbitTest::Unhex(FRAME_13_REPLY_HEX);
+   CHECK(Wire::DecodeBody(fullBytes.data() + Wire::LENGTH_BYTES, fullBytes.size() - Wire::LENGTH_BYTES, msg)
+      && Wire::Decode(msg.payload, fullBack) && fullBack == full);
+
+   Wire::FrameRequest held { 43, 3, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, 7 };
+   CHECK(Frame(Wire::TYPE_FRAME, 0, 31, Wire::Encode(held)) == FRAME_13_REQUEST_HELD_HEX);
+   CHECK(Frame(Wire::TYPE_FRAME, Wire::FLAG_RESPONSE, 31, Wire::Encode(Reply13(7, 1, false, false))) == FRAME_13_REPLY_UNCHANGED_HEX);
+   CHECK(Frame(Wire::TYPE_FRAME, Wire::FLAG_RESPONSE, 32, Wire::Encode(Reply13(8, 0, false, false))) == FRAME_13_REPLY_HIDDEN_HEX);
+
+   // A 1.2 request carries no tail and asks for no overlaid frame; a 1.2 reply encodes none.
+   Wire::FrameRequest plain;
+   CHECK(Wire::Decode(Wire::Encode(Wire::FrameRequest { 42, 3 }), plain) && !plain.hasStreams && !plain.WantsOverlaid());
+   CHECK(Wire::Encode(Wire::FrameRequest { 42, 3 }).size() == 8);
+   Wire::FrameRequest plainOnly;
+   CHECK(Wire::Decode(Wire::Encode(Wire::FrameRequest { 42, 3, true, Wire::STREAM_PLAIN, 0 }), plainOnly) && !plainOnly.WantsOverlaid());
+
+   // Truncated tails: the reply's overlaid pixels are sized by the plain geometry.
+   std::vector<uint8_t> payload = Wire::Encode(full);
+   payload.pop_back();
+   Wire::FrameReply cut;
+   CHECK_MSG(!Wire::Decode(payload, cut), "a short overlaid run is malformed");
+   Wire::FrameReply wrongSize = full;
+   wrongSize.overlayPixels.pop_back();
+   CHECK_MSG(Wire::Encode(wrongSize).empty(), "an overlaid run that disagrees with the geometry is not encoded");
+}
+
 int main()
 {
    TestFraming();
@@ -998,6 +1070,7 @@ int main()
    TestSliceFiveGoldenVectors();
    TestGameRejections();
    TestSliceSixGoldenVectors();
+   TestSliceSevenGoldenVectors();
    TestSliceSixRejections();
    return ScorbitTest::Summary("wire_codec_test");
 }

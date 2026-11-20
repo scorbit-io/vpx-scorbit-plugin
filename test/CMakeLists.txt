@@ -30,6 +30,12 @@ target_link_libraries(overlay_transition_test PRIVATE scorbit-transport)
 target_compile_options(overlay_transition_test PRIVATE ${SCORBIT_WARNINGS})
 add_test(NAME overlay_transition COMMAND overlay_transition_test)
 
+# The overlaid identify frame of protocol 1.3, against the render path's per-dot rule.
+add_executable(overlaid_frame_test OverlaidFrameTest.cpp Check.h)
+target_link_libraries(overlaid_frame_test PRIVATE scorbit-transport)
+target_compile_options(overlaid_frame_test PRIVATE ${SCORBIT_WARNINGS})
+add_test(NAME overlaid_frame COMMAND overlaid_frame_test)
+
 add_executable(status_notice_test StatusNoticeTest.cpp Check.h)
 target_link_libraries(status_notice_test PRIVATE scorbit-transport)
 target_compile_options(status_notice_test PRIVATE ${SCORBIT_WARNINGS})

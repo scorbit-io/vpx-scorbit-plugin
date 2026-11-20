@@ -180,6 +180,7 @@ void DmdTap::Worker()
          m_back.height = src.height;
          m_back.shades = src.identifyFormat == CTLPI_DISPLAY_ID_FORMAT_BITPLANE4 ? 16 : 4;
          m_back.generation = m_sourceGeneration; // the source that produced these pixels
+         m_back.sourceId = src.id.id;
       }
 
       Dump(m_back);
@@ -189,7 +190,7 @@ void DmdTap::Worker()
 
 void DmdTap::Publish(const Frame& frame)
 {
-   const Header header { frame.frameId, frame.width, frame.height, frame.shades, frame.generation };
+   const Header header { frame.frameId, frame.width, frame.height, frame.shades, frame.generation, frame.sourceId };
    m_record.resize(sizeof(header) + frame.pixels.size());
    std::memcpy(m_record.data(), &header, sizeof(header));
    std::memcpy(m_record.data() + sizeof(header), frame.pixels.data(), frame.pixels.size());
@@ -208,6 +209,7 @@ bool DmdTap::GetLatest(Frame& out, std::vector<uint8_t>& scratch) const
    out.height = header.height;
    out.shades = header.shades;
    out.generation = header.generation;
+   out.sourceId = header.sourceId;
    out.pixels.assign(scratch.begin() + sizeof(Header), scratch.begin() + static_cast<std::ptrdiff_t>(size));
    return true;
 }

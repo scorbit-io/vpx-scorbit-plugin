@@ -1283,6 +1283,23 @@ public:
    std::vector<uint8_t> m_transitionBits;   // force 1, disable 2
 };
 
+// An overlay target with a real published record, as DmdOverlay serves it for the overlaid frame.
+class CachedOverlay final : public IOverlayTarget
+{
+public:
+   CachedOverlay() { m_cache.SetTransition({ .on = false }); }
+   bool OverlaySurface() override { return true; }
+   Overlay::State::Upload OverlayUpload(const uint8_t* payload, size_t size) override { return m_cache.Store(payload, size); }
+   void OverlayControl(bool enable, uint32_t durationMs, bool, bool) override { m_cache.Control(enable, durationMs); }
+   void OverlayClear() override { m_cache.Clear(); }
+   const Overlay::Cache* OverlayRecord() override { return &m_cache; }
+   Overlay::Platform OverlayPlatform() override { return Overlay::Platform::Wpc; }
+   uint64_t OverlayBaseSource() override { return m_baseSource; }
+
+   Overlay::Cache m_cache;
+   std::atomic<uint64_t> m_baseSource { 7 };
+};
+
 // The latch's latest record, waiting for one that passes the test.
 template <typename Pred>
 bool AwaitStatus(StatusLatch& latch, Pred pred, StatusRecord& out)
@@ -2286,7 +2303,7 @@ void TestReadBacksWithA12Daemon()
       // --- Negotiation: bits 8 to 10 both ways at minor 2 ------------------------
       Wire::Hello hello;
       CHECK(AckHello(peer, 2, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_AUTHORED_TABLES | READ_BACK_CAPS, hello));
-      CHECK(hello.protoMinor == 2);
+      CHECK(hello.protoMinor == Wire::PROTO_MINOR);
       CHECK_MSG((hello.capabilities & READ_BACK_CAPS) == READ_BACK_CAPS, "caps " + std::to_string(hello.capabilities));
       CHECK_MSG(channel.Request(1, { }) == 0, "no request before the Declare");
       Wire::Message msg;
@@ -3025,6 +3042,128 @@ void TestStatusFollowsTheRomGame()
    }
 }
 
+// Protocol 1.3: the overlaid frame rides on Frame only for a daemon that negotiated minor 3.
+bool FrameExchange(ScorbitTest::TestPeer& peer, uint32_t seq, const Wire::FrameRequest& req, Wire::FrameReply& reply)
+{
+   Wire::Message msg;
+   return peer.Send(Wire::TYPE_FRAME, 0, seq, Wire::Encode(req)) && peer.ReadOfType(Wire::TYPE_FRAME, msg, WAIT_MS)
+      && msg.header.IsResponse() && !msg.header.IsError() && Wire::Decode(msg.payload, reply);
+}
+
+void RunOverlaidFrameSession(uint16_t minor, uint32_t daemonCaps)
+{
+   const std::string dir = MakeTempDir();
+   CHECK(!dir.empty());
+   if (dir.empty())
+      return;
+   ScorbitTest::TestPeer peer(dir);
+   CHECK(peer.Listening());
+   if (!peer.Listening())
+      return;
+
+   FakeSource source;
+   FrameSnapshot frame;
+   Fill(frame, 5, 1, 128, 32, 4);
+   frame.sourceId = 7;
+   source.Set(MakeDeclare("tom_13", 128, 32, 4, 1), frame);
+   CachedOverlay overlay;
+   SocketWorker worker(source, MakeConfig(peer), Quiet(), nullptr, &overlay);
+   worker.Start();
+   CHECK(peer.Accept(WAIT_MS));
+
+   Wire::Hello hello;
+   CHECK(AckHello(peer, minor, daemonCaps, hello));
+   CHECK_MSG((hello.capabilities & Wire::CAP_OVERLAID_FRAMES) != 0, "caps " + std::to_string(hello.capabilities));
+   Wire::Message msg;
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+
+   const Wire::FrameRequest ask { Wire::SINCE_FRAME_NONE, 1, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, Wire::SINCE_OVERLAY_NONE };
+   Wire::FrameReply reply;
+   if (minor < 3 || (daemonCaps & Wire::CAP_OVERLAID_FRAMES) == 0)
+   {
+      CHECK(FrameExchange(peer, 100, ask, reply));
+      CHECK_MSG(!reply.hasOverlay, "no tail for a daemon below 1.3, or one that did not offer bit 14");
+      CHECK(reply.hasPixels == 1 && reply.pixels == frame.pixels);
+      worker.Stop();
+      return;
+   }
+
+   // A 1.3 request without bit 1 is answered as 1.2.
+   CHECK(FrameExchange(peer, 100, Wire::FrameRequest { Wire::SINCE_FRAME_NONE, 1, true, Wire::STREAM_PLAIN, Wire::SINCE_OVERLAY_NONE }, reply));
+   CHECK(!reply.hasOverlay && reply.hasPixels == 1);
+
+   // Nothing showing: six bytes, and the overlaid frame is the plain one.
+   CHECK(FrameExchange(peer, 101, ask, reply));
+   CHECK(reply.hasOverlay && reply.overlayState == 0 && reply.overlayHasPixels == 0 && reply.hasPixels == 1);
+   const uint32_t hiddenSeq = reply.overlaySeq;
+
+   // Shown: the plain frame with the overlay on it, in the same reply.
+   std::vector<uint8_t> upload { 16, 10 };
+   upload.resize(2 + 16 * 10, 0x0F);
+   CHECK(overlay.OverlayUpload(upload.data(), upload.size()) == Overlay::State::Upload::Stored);
+   overlay.OverlayControl(true, 0, false, false);
+   CHECK(FrameExchange(peer, 102, ask, reply));
+   CHECK(reply.overlayState == 1 && reply.overlayHasPixels == 1 && reply.overlaySeq != hiddenSeq);
+   CHECK(reply.pixels == frame.pixels && reply.overlayPixels.size() == frame.pixels.size());
+   if (reply.overlayPixels.size() == frame.pixels.size())
+   {
+      // Centred: (128 - 16) / 2 = 56, (32 - 10) / 2 = 11. WPC shows 0x0F at its top shade, 3.
+      CHECK(reply.overlayPixels[11 * 128 + 56] == 3 && reply.overlayPixels[20 * 128 + 71] == 3);
+      CHECK(reply.overlayPixels[0] == frame.pixels[0] && reply.overlayPixels[11 * 128 + 55] == frame.pixels[11 * 128 + 55]);
+   }
+   const uint32_t shownSeq = reply.overlaySeq;
+
+   // The sentinel forces pixels even when nothing changed.
+   CHECK(FrameExchange(peer, 110, Wire::FrameRequest { 5, 1, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, Wire::SINCE_OVERLAY_NONE }, reply));
+   CHECK(reply.hasPixels == 0 && reply.overlayHasPixels == 1 && reply.overlaySeq == shownSeq);
+
+   // The render path placing on another display of the same size: VPX shows no overlay on this
+   // frame, so neither does the feed.
+   overlay.m_baseSource = 8;
+   CHECK(FrameExchange(peer, 111, ask, reply));
+   CHECK(reply.overlayState == 0 && reply.overlayHasPixels == 0 && reply.overlaySeq != shownSeq);
+   overlay.m_baseSource = 7;
+   CHECK(FrameExchange(peer, 112, ask, reply));
+   CHECK(reply.overlayState == 1 && reply.overlayHasPixels == 1 && reply.overlaySeq != shownSeq);
+   const uint32_t backSeq = reply.overlaySeq;
+   CHECK(FrameExchange(peer, 113, Wire::FrameRequest { 5, 1, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, backSeq }, reply));
+   CHECK(reply.overlayHasPixels == 0 && reply.overlaySeq == backSeq);
+
+   // Held by the daemon, and the plain frame unchanged too: neither block carries pixels.
+   CHECK(FrameExchange(peer, 103, Wire::FrameRequest { 5, 1, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, backSeq }, reply));
+   CHECK(reply.hasPixels == 0 && reply.overlayState == 1 && reply.overlayHasPixels == 0 && reply.overlaySeq == backSeq);
+   const uint32_t heldSeq = reply.overlaySeq;
+
+   // A new game frame under the overlay advances overlay_seq even though the daemon holds the old.
+   Fill(frame, 6, 1, 128, 32, 4);
+   frame.sourceId = 7;
+   source.Set(MakeDeclare("tom_13", 128, 32, 4, 1), frame);
+   CHECK(FrameExchange(peer, 104, Wire::FrameRequest { 5, 1, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, heldSeq }, reply));
+   CHECK(reply.hasPixels == 1 && reply.overlayHasPixels == 1 && reply.overlaySeq != heldSeq);
+   const uint32_t movedSeq = reply.overlaySeq;
+
+   // Hidden.
+   overlay.OverlayControl(false, 0, false, false);
+   CHECK(FrameExchange(peer, 105, Wire::FrameRequest { 6, 1, true, Wire::STREAM_PLAIN | Wire::STREAM_OVERLAID, movedSeq }, reply));
+   CHECK(reply.overlayState == 0 && reply.overlayHasPixels == 0 && reply.overlaySeq != movedSeq);
+
+   // No conforming source: an overlay showing has nothing to go on.
+   overlay.OverlayControl(true, 0, false, false);
+   source.Set(MakeDeclare("tom_13", 0, 0, 0, 2), FrameSnapshot { });
+   // The changed declaration is sent first, and the worker serves nothing until it is answered.
+   CHECK(peer.ReadOfType(Wire::TYPE_DECLARE, msg, WAIT_MS));
+   CHECK(peer.Send(Wire::TYPE_DECLARE, Wire::FLAG_RESPONSE, msg.header.seq, { }));
+   CHECK(FrameExchange(peer, 106, ask, reply));
+   CHECK(reply.hasOverlay && reply.overlayState == 0 && reply.overlayHasPixels == 0 && reply.hasPixels == 0);
+   worker.Stop();
+}
+
+constexpr uint32_t OVERLAID_DAEMON_CAPS = Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_OVERLAY | Wire::CAP_OVERLAID_FRAMES;
+void TestOverlaidFrameWithA12Daemon() { RunOverlaidFrameSession(2, OVERLAID_DAEMON_CAPS); }
+void TestOverlaidFrameWithA13DaemonWithoutTheBit() { RunOverlaidFrameSession(3, Wire::CAP_IDENTIFY_FRAMES | Wire::CAP_OVERLAY); }
+void TestOverlaidFrameWithA13Daemon() { RunOverlaidFrameSession(3, OVERLAID_DAEMON_CAPS); }
+
 int main()
 {
    TestSession();
@@ -3041,6 +3180,9 @@ int main()
    TestWriteOnAHostWithoutWriteSupport();
    TestMemoryReadWithoutAnApiThread();
    TestOverlayAndStatusOverTheSocket();
+   TestOverlaidFrameWithA12Daemon();
+   TestOverlaidFrameWithA13DaemonWithoutTheBit();
+   TestOverlaidFrameWithA13Daemon();
    TestStatusFollowsTheRomGame();
    TestRefusedHelloReason();
    TestAuthoredTableWithAuthoredDaemon();

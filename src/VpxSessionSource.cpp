@@ -484,6 +484,7 @@ void VpxSessionSource::GetFrame(FrameSnapshot& out)
    out.width = static_cast<uint16_t>(latest.width);
    out.height = static_cast<uint16_t>(latest.height);
    out.shades = static_cast<uint8_t>(latest.shades);
+   out.sourceId = latest.sourceId;
    // Handed over exactly as the tap captured it: one shade index per pixel,
    // row major. Nothing repacks it on the way to the daemon.
    out.pixels = latest.pixels;
