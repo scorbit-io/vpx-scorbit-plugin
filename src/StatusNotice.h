@@ -153,8 +153,9 @@ public:
    // when it stops, while VPX still shows it. showStatus false includes the daemon's hidden.
    NoticeAction Frame(bool pinmameLoaded, bool controller, bool authored, bool showStatus, int notices, Clock::time_point now);
 
-   // Posted and still holding: the status notifier keeps quiet meanwhile.
-   bool Active() const { return m_posted; }
+   // On screen: posted, still holding, and within VPX's lifetime for it. The status notifier
+   // keeps quiet meanwhile, and only meanwhile, so a daemon [!] still shows during the table.
+   bool Active(Clock::time_point now) const { return m_posted && now - m_postedAt < StatusNotifier::NOTICE_LIFETIME; }
 
 private:
    bool m_running = false;

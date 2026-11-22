@@ -220,8 +220,8 @@ void VpxSessionSource::PostStatusNotice()
       LOGI(post ? "Status notice: "s + hint.text : "Status notice taken down: the PinMAME hint"s);
       m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, hint.text.c_str(), post ? NOTICE_MS : 0);
    }
-   // While the hint holds the daemon's state is not news; hidden, it posts again once the hint clears.
-   const NoticeAction action = m_notifier.Frame(std::move(m_statusPending), show && !m_pinmameHint.Active(), notices, AuthoredReady(), now);
+   // Kept quiet while the hint is on screen; hidden meanwhile, the state posts again after it.
+   const NoticeAction action = m_notifier.Frame(std::move(m_statusPending), show && !m_pinmameHint.Active(now), notices, AuthoredReady(), now);
    if (action.kind == NoticeAction::Kind::None || m_vpxApi == nullptr)
       return;
    if (action.kind == NoticeAction::Kind::Expire)

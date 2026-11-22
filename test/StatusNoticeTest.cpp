@@ -493,11 +493,13 @@ void TestPinMameHint()
    CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(0)).kind == Kind::None);
    h.TableStarted(at(0));
    CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(4999)).kind == Kind::None);
-   CHECK(!h.Active());
+   CHECK(!h.Active(at(0)));
 
    // Posted once at the grace; by default never again for the table (an original may be in play).
    NoticeAction a = h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(5000));
-   CHECK(a.kind == Kind::Post && a.text == PinMameHint::TEXT && h.Active());
+   CHECK(a.kind == Kind::Post && a.text == PinMameHint::TEXT && h.Active(at(5000)));
+   // Only while VPX shows it, so the daemon's notices are not held back for the whole table.
+   CHECK(h.Active(at(9999)) && !h.Active(at(10000)));
    CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(30000)).kind == Kind::None);
    CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(65000)).kind == Kind::None);
 
@@ -506,12 +508,12 @@ void TestPinMameHint()
    shown.TableStarted(at(0));
    CHECK(shown.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(5000)).kind == Kind::Post);
    CHECK(shown.Frame(false, true, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Expire);
-   CHECK(!shown.Active());
+   CHECK(!shown.Active(at(6000)));
    CHECK(shown.Frame(false, true, false, true, NOTICES_OUTSIDE_GAME, at(200000)).kind == Kind::None);
 
    // After VPX dropped it, no take-down: it would push the text again for a frame.
    CHECK(h.Frame(false, true, false, true, NOTICES_OUTSIDE_GAME, at(66000)).kind == Kind::None);
-   CHECK(!h.Active());
+   CHECK(!h.Active(at(66000)));
 
    // NOTICES_ALWAYS repeats it every REFRESH_EVERY while it holds.
    PinMameHint always;
@@ -556,14 +558,14 @@ void TestPinMameHint()
    PinMameHint off;
    off.TableStarted(at(0));
    CHECK(off.Frame(false, false, false, false, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::None);
-   CHECK(!off.Active());
+   CHECK(!off.Active(at(6000)));
 
    // The table's end forgets it; the next table waits out its own grace.
    PinMameHint next;
    next.TableStarted(at(0));
    CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Post);
    next.TableEnded();
-   CHECK(!next.Active());
+   CHECK(!next.Active(at(6000)));
    CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(7000)).kind == Kind::None);
    next.TableStarted(at(10000));
    CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(14000)).kind == Kind::None);

@@ -101,7 +101,7 @@ each record, so the handshake's reset of the status record on a reconnect does n
    no `Scorbit.Declare`, and VPX's PinMAME plugin not loaded (`GetPluginEndpoint("PinMAME")`
    is 0: a plugin switched off in VPX's settings is never loaded), the plugin posts
    `PinMameHint::TEXT` once for the table; `StatusNotices = 2` repeats it every 60 s while it
-   holds. The daemon's own notices are held back meanwhile. An original table that uses no
+   holds. The daemon's own notices are held back while it is on screen. An original table that uses no
    Scorbit looks the same from here, so the text holds for both ("if it is a ROM table, ..."),
    and posting once keeps it off such a table's play. A controller or a declaration takes it
    down while VPX still shows it. `ShowStatus = 0`, `StatusNotices = 0` and the daemon's
