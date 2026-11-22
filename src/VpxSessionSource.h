@@ -201,6 +201,7 @@ private:
 
    StatusLatch m_statusLatch;
    StatusNotifier m_notifier; // API thread only, as is the handle
+   PinMameHint m_pinmameHint; // API thread only
    unsigned int m_noticeHandle = 0;
    StatusRecord m_scriptStatus;                    // API thread only
    std::unique_ptr<StatusRecord> m_statusPending;  // taken for the script, not yet shown to the notifier

@@ -481,6 +481,110 @@ void TestDescribeEarlier()
    CHECK(StatusNotifier::DescribeEarlier(NO_SESSION) == "[!] Scorbit, during the game: no data, no connection to the Scorbit daemon");
 }
 
+// SB-6862: a table with no controller and no declaration while PinMAME is off.
+void TestPinMameHint()
+{
+   using Kind = NoticeAction::Kind;
+   const Clock::time_point t0 = Clock::now();
+   const auto at = [t0](int ms) { return t0 + milliseconds(ms); };
+
+   // Not before the table starts, and not within the grace.
+   PinMameHint h;
+   CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(0)).kind == Kind::None);
+   h.TableStarted(at(0));
+   CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(4999)).kind == Kind::None);
+   CHECK(!h.Active(at(0)));
+
+   // Posted once at the grace; by default never again for the table (an original may be in play).
+   NoticeAction a = h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(5000));
+   CHECK(a.kind == Kind::Post && a.text == PinMameHint::TEXT && h.Active(at(5000)));
+   // Only while VPX shows it, so the daemon's notices are not held back for the whole table.
+   CHECK(h.Active(at(9999)) && !h.Active(at(10000)));
+   CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(30000)).kind == Kind::None);
+   CHECK(h.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(65000)).kind == Kind::None);
+
+   // A controller appearing while VPX still shows it takes it down once, and nothing follows.
+   PinMameHint shown;
+   shown.TableStarted(at(0));
+   CHECK(shown.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(5000)).kind == Kind::Post);
+   CHECK(shown.Frame(false, true, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Expire);
+   CHECK(!shown.Active(at(6000)));
+   CHECK(shown.Frame(false, true, false, true, NOTICES_OUTSIDE_GAME, at(200000)).kind == Kind::None);
+
+   // After VPX dropped it, no take-down: it would push the text again for a frame.
+   CHECK(h.Frame(false, true, false, true, NOTICES_OUTSIDE_GAME, at(66000)).kind == Kind::None);
+   CHECK(!h.Active(at(66000)));
+
+   // NOTICES_ALWAYS repeats it every REFRESH_EVERY while it holds.
+   PinMameHint always;
+   always.TableStarted(at(0));
+   CHECK(always.Frame(false, false, false, true, NOTICES_ALWAYS, at(5000)).kind == Kind::Post);
+   CHECK(always.Frame(false, false, false, true, NOTICES_ALWAYS, at(64999)).kind == Kind::None);
+   CHECK(always.Frame(false, false, false, true, NOTICES_ALWAYS, at(65000)).kind == Kind::Post);
+
+   // PinMAME loaded: never, even with no controller (a table still starting, or an original one).
+   PinMameHint loaded;
+   loaded.TableStarted(at(0));
+   CHECK(loaded.Frame(true, false, false, true, NOTICES_OUTSIDE_GAME, at(60000)).kind == Kind::None);
+
+   // An original table that declares through the SDK: never, even late in the grace.
+   PinMameHint declared;
+   declared.TableStarted(at(0));
+   CHECK(declared.Frame(false, false, true, true, NOTICES_OUTSIDE_GAME, at(4000)).kind == Kind::None);
+   CHECK(declared.Frame(false, false, true, true, NOTICES_OUTSIDE_GAME, at(60000)).kind == Kind::None);
+
+   // A declaration after the post takes it down.
+   PinMameHint late;
+   late.TableStarted(at(0));
+   CHECK(late.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Post);
+   CHECK(late.Frame(false, false, true, true, NOTICES_OUTSIDE_GAME, at(7000)).kind == Kind::Expire);
+
+   // Settings: ShowStatus 0 or StatusNotices 0 keep it off, and switching one off takes it down.
+   for (const int notices : { NOTICES_OUTSIDE_GAME, NOTICES_ALWAYS })
+   {
+      PinMameHint s;
+      s.TableStarted(at(0));
+      CHECK(s.Frame(false, false, false, true, notices, at(6000)).kind == Kind::Post);
+      CHECK(s.Frame(false, false, false, false, notices, at(7000)).kind == Kind::Expire);
+   }
+   PinMameHint toNever;
+   toNever.TableStarted(at(0));
+   CHECK(toNever.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Post);
+   CHECK(toNever.Frame(false, false, false, true, NOTICES_NEVER, at(7000)).kind == Kind::Expire);
+   // Suppressed and shown again: still once per table, and the 60 s spacing still counts.
+   PinMameHint hidden;
+   hidden.TableStarted(at(0));
+   CHECK(hidden.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(5000)).kind == Kind::Post);
+   CHECK(hidden.Frame(false, false, false, false, NOTICES_OUTSIDE_GAME, at(11000)).kind == Kind::None);
+   CHECK(hidden.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(12000)).kind == Kind::None);
+   CHECK(hidden.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(120000)).kind == Kind::None);
+   PinMameHint hiddenAlways;
+   hiddenAlways.TableStarted(at(0));
+   CHECK(hiddenAlways.Frame(false, false, false, true, NOTICES_ALWAYS, at(5000)).kind == Kind::Post);
+   CHECK(hiddenAlways.Frame(false, false, false, false, NOTICES_ALWAYS, at(11000)).kind == Kind::None);
+   CHECK(hiddenAlways.Frame(false, false, false, true, NOTICES_ALWAYS, at(12000)).kind == Kind::None);
+   CHECK(hiddenAlways.Frame(false, false, false, true, NOTICES_ALWAYS, at(65000)).kind == Kind::Post);
+   PinMameHint never;
+   never.TableStarted(at(0));
+   CHECK(never.Frame(false, false, false, true, NOTICES_NEVER, at(6000)).kind == Kind::None);
+   // ShowStatus 0, or the daemon's hidden, from the start: never posted.
+   PinMameHint off;
+   off.TableStarted(at(0));
+   CHECK(off.Frame(false, false, false, false, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::None);
+   CHECK(!off.Active(at(6000)));
+
+   // The table's end forgets it; the next table waits out its own grace.
+   PinMameHint next;
+   next.TableStarted(at(0));
+   CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Post);
+   next.TableEnded();
+   CHECK(!next.Active(at(6000)));
+   CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(7000)).kind == Kind::None);
+   next.TableStarted(at(10000));
+   CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(14000)).kind == Kind::None);
+   CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(15000)).kind == Kind::Post);
+}
+
 }
 
 int main()
@@ -512,5 +616,6 @@ int main()
    TestSettings();
    TestTableEndedClearsTheGame();
    TestDescribeEarlier();
+   TestPinMameHint();
    return ScorbitTest::Summary("status_notice_test");
 }

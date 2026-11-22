@@ -99,6 +99,7 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
    // could name someone else's here; and this table has not seen the state yet.
    self->m_noticeHandle = 0;
    self->m_notifier.NewTable();
+   self->m_pinmameHint.TableStarted(std::chrono::steady_clock::now());
    self->UpdateDeclare();
    self->m_playerRunning = true;
 }
@@ -122,6 +123,7 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    self->m_loggedQueueDrop = false;
    // Nothing renders after this, so the game ends without a notice (docs/status-notices.md).
    self->m_notifier.TableEnded();
+   self->m_pinmameHint.TableEnded();
    self->m_epoch++;
    self->NewEpoch();
    self->UpdateDeclare();
@@ -206,7 +208,20 @@ void VpxSessionSource::PostStatusNotice()
    const bool show = m_showStatus == nullptr || m_showStatus() != 0;
    const int notices = m_statusNotices == nullptr ? NOTICES_OUTSIDE_GAME : m_statusNotices();
    TakeStatus();
-   const NoticeAction action = m_notifier.Frame(std::move(m_statusPending), show, notices, AuthoredReady(), now);
+   // SB-6862. A plugin switched off in VPX's settings is never loaded, so it has no endpoint.
+   const bool pinmameLoaded = m_msgApi->GetPluginEndpoint("PinMAME") != 0;
+   const bool hidden = m_scriptStatus.inSession && m_scriptStatus.haveStatus
+      && m_scriptStatus.status.sessionState == Wire::SESSION_HIDDEN;
+   const NoticeAction hint
+      = m_pinmameHint.Frame(pinmameLoaded, m_gameRunning, !m_authored.machineId.empty(), show && !hidden, notices, now);
+   if (hint.kind != NoticeAction::Kind::None && m_vpxApi != nullptr)
+   {
+      const bool post = hint.kind == NoticeAction::Kind::Post;
+      LOGI(post ? "Status notice: "s + hint.text : "Status notice taken down: the PinMAME hint"s);
+      m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, hint.text.c_str(), post ? NOTICE_MS : 0);
+   }
+   // Kept quiet while the hint is on screen; hidden meanwhile, the state posts again after it.
+   const NoticeAction action = m_notifier.Frame(std::move(m_statusPending), show && !m_pinmameHint.Active(now), notices, AuthoredReady(), now);
    if (action.kind == NoticeAction::Kind::None || m_vpxApi == nullptr)
       return;
    if (action.kind == NoticeAction::Kind::Expire)

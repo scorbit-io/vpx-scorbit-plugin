@@ -261,4 +261,46 @@ NoticeAction StatusNotifier::Frame(std::unique_ptr<StatusRecord> taken, bool sho
    return { NoticeAction::Kind::Post, want };
 }
 
+const char* const PinMameHint::TEXT = "[!] Scorbit can't track this table: if it is a ROM table, switch on VPX's PinMAME "
+                                      "plugin (Settings > Plugins), or let Scorbit Desktop do it";
+
+void PinMameHint::TableStarted(Clock::time_point now)
+{
+   m_running = true;
+   m_startedAt = now;
+   m_postedThisTable = false;
+   m_posted = false;
+}
+
+void PinMameHint::TableEnded()
+{
+   // Nothing renders after the table, so whatever was posted expires on its own.
+   m_running = false;
+   m_postedThisTable = false;
+   m_posted = false;
+}
+
+NoticeAction PinMameHint::Frame(bool pinmameLoaded, bool controller, bool authored, bool showStatus, int notices, Clock::time_point now)
+{
+   const bool holds = m_running && now - m_startedAt >= GRACE && !pinmameLoaded && !controller && !authored;
+   const bool allowed = showStatus && notices != NOTICES_NEVER;
+   if (!holds || !allowed)
+   {
+      if (!m_posted)
+         return { };
+      m_posted = false;
+      // Once VPX has dropped it, a take-down would push the text again for a frame.
+      if (now - m_postedAt >= StatusNotifier::NOTICE_LIFETIME)
+         return { };
+      return { NoticeAction::Kind::Expire, TEXT };
+   }
+   // Kept across a suppression, so hiding and showing again never posts out of turn.
+   if (m_postedThisTable && (notices != NOTICES_ALWAYS || now - m_postedAt < StatusNotifier::REFRESH_EVERY))
+      return { };
+   m_postedThisTable = true;
+   m_posted = true;
+   m_postedAt = now;
+   return { NoticeAction::Kind::Post, TEXT };
+}
+
 }

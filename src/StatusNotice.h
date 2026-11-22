@@ -133,4 +133,36 @@ private:
    bool m_afterGame = false;           // until the next post or game: the daemon's own game end is not news
 };
 
+// API thread. A table runs with no controller and no authored Declare while VPX's PinMAME
+// plugin is not loaded: a ROM table that cannot start. An original table that uses no Scorbit
+// looks the same, so the text holds for both (docs/status-notices.md).
+class PinMameHint final
+{
+public:
+   using Clock = std::chrono::steady_clock;
+
+   // From the table's start, for PinMAME to publish a controller or the script to declare.
+   static constexpr std::chrono::seconds GRACE { 5 };
+   static const char* const TEXT;
+
+   void TableStarted(Clock::time_point now);
+   void TableEnded();
+
+   // Once per rendered frame. Posts once when the hint starts to hold (with NOTICES_ALWAYS, again
+   // every StatusNotifier::REFRESH_EVERY: an original table may be in play) and takes it down
+   // when it stops, while VPX still shows it. showStatus false includes the daemon's hidden.
+   NoticeAction Frame(bool pinmameLoaded, bool controller, bool authored, bool showStatus, int notices, Clock::time_point now);
+
+   // On screen: posted, still holding, and within VPX's lifetime for it. The status notifier
+   // keeps quiet meanwhile, and only meanwhile, so a daemon [!] still shows during the table.
+   bool Active(Clock::time_point now) const { return m_posted && now - m_postedAt < StatusNotifier::NOTICE_LIFETIME; }
+
+private:
+   bool m_running = false;
+   Clock::time_point m_startedAt { };
+   bool m_postedThisTable = false;  // the once-per-table rule, kept across a suppression
+   bool m_posted = false;           // up, or still holding since its last post
+   Clock::time_point m_postedAt { };
+};
+
 }
