@@ -239,6 +239,13 @@ daemon's `tracking` to its `no game`; an authored table's from its script's `gam
 to its `game_end`. `StatusNotices = 2` posts on every change as before, and `0` posts
 nothing. The rules are in `docs/status-notices.md`.
 
+Scorbit needs VPX's PinMAME plugin switched on for ROM tables. If a table has been running for 5
+seconds with no controller, no `Scorbit.Declare` from its script, and the PinMAME plugin not
+loaded, the plugin posts "[!] Scorbit can't track this table: if it is a ROM table, switch on
+VPX's PinMAME plugin (Settings > Plugins), or let Scorbit Desktop do it" once for that table
+(every 60 seconds with `StatusNotices = 2`). It is taken down as soon as a controller appears or
+the script declares, and the same settings, or the daemon's hidden indicator, turn it off.
+
 On macOS, Windows and Linux on X11, moving the mouse over the status light shows the same text
 beside it for a few seconds, on the side toward the middle of the screen. The light stays click-through and
 never takes focus; the caption goes after 3 s without mouse movement, since VPX hides the cursor

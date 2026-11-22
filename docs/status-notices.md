@@ -97,6 +97,16 @@ each record, so the handshake's reset of the status record on a reconnect does n
    as shown, but it never reaches the screen (`docs/status-window.md`, "Results, Windows hardware").
    A rule of "notices only when the light can't show" would have nothing reliable to test.
 
+6. **A ROM table that cannot start says why.** When a table has run 5 s with no controller,
+   no `Scorbit.Declare`, and VPX's PinMAME plugin not loaded (`GetPluginEndpoint("PinMAME")`
+   is 0: a plugin switched off in VPX's settings is never loaded), the plugin posts
+   `PinMameHint::TEXT` once for the table; `StatusNotices = 2` repeats it every 60 s while it
+   holds. The daemon's own notices are held back meanwhile. An original table that uses no
+   Scorbit looks the same from here, so the text holds for both ("if it is a ROM table, ..."),
+   and posting once keeps it off such a table's play. A controller or a declaration takes it
+   down while VPX still shows it. `ShowStatus = 0`, `StatusNotices = 0` and the daemon's
+   hidden indicator keep it off.
+
 Considered and not taken, for players without a light: post a change mid-game only when the
 marker or the states change (not the support text alone), only after the new state has held for
 10 s, and never repeat it. That is one notice for an outage instead of several, but it still covers
