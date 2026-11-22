@@ -268,12 +268,15 @@ void PinMameHint::TableStarted(Clock::time_point now)
 {
    m_running = true;
    m_startedAt = now;
+   m_postedThisTable = false;
+   m_posted = false;
 }
 
 void PinMameHint::TableEnded()
 {
    // Nothing renders after the table, so whatever was posted expires on its own.
    m_running = false;
+   m_postedThisTable = false;
    m_posted = false;
 }
 
@@ -291,8 +294,10 @@ NoticeAction PinMameHint::Frame(bool pinmameLoaded, bool controller, bool author
          return { };
       return { NoticeAction::Kind::Expire, TEXT };
    }
-   if (m_posted && (notices != NOTICES_ALWAYS || now - m_postedAt < StatusNotifier::REFRESH_EVERY))
+   // Kept across a suppression, so hiding and showing again never posts out of turn.
+   if (m_postedThisTable && (notices != NOTICES_ALWAYS || now - m_postedAt < StatusNotifier::REFRESH_EVERY))
       return { };
+   m_postedThisTable = true;
    m_posted = true;
    m_postedAt = now;
    return { NoticeAction::Kind::Post, TEXT };

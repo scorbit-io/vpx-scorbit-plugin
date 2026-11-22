@@ -551,6 +551,19 @@ void TestPinMameHint()
    toNever.TableStarted(at(0));
    CHECK(toNever.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(6000)).kind == Kind::Post);
    CHECK(toNever.Frame(false, false, false, true, NOTICES_NEVER, at(7000)).kind == Kind::Expire);
+   // Suppressed and shown again: still once per table, and the 60 s spacing still counts.
+   PinMameHint hidden;
+   hidden.TableStarted(at(0));
+   CHECK(hidden.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(5000)).kind == Kind::Post);
+   CHECK(hidden.Frame(false, false, false, false, NOTICES_OUTSIDE_GAME, at(11000)).kind == Kind::None);
+   CHECK(hidden.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(12000)).kind == Kind::None);
+   CHECK(hidden.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(120000)).kind == Kind::None);
+   PinMameHint hiddenAlways;
+   hiddenAlways.TableStarted(at(0));
+   CHECK(hiddenAlways.Frame(false, false, false, true, NOTICES_ALWAYS, at(5000)).kind == Kind::Post);
+   CHECK(hiddenAlways.Frame(false, false, false, false, NOTICES_ALWAYS, at(11000)).kind == Kind::None);
+   CHECK(hiddenAlways.Frame(false, false, false, true, NOTICES_ALWAYS, at(12000)).kind == Kind::None);
+   CHECK(hiddenAlways.Frame(false, false, false, true, NOTICES_ALWAYS, at(65000)).kind == Kind::Post);
    PinMameHint never;
    never.TableStarted(at(0));
    CHECK(never.Frame(false, false, false, true, NOTICES_NEVER, at(6000)).kind == Kind::None);

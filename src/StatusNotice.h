@@ -160,7 +160,8 @@ public:
 private:
    bool m_running = false;
    Clock::time_point m_startedAt { };
-   bool m_posted = false;
+   bool m_postedThisTable = false;  // the once-per-table rule, kept across a suppression
+   bool m_posted = false;           // up, or still holding since its last post
    Clock::time_point m_postedAt { };
 };
 
