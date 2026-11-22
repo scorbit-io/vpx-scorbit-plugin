@@ -89,5 +89,6 @@ if(NOT WIN32)
    target_link_libraries(socket_worker_test PRIVATE scorbit-transport)
    target_compile_options(socket_worker_test PRIVATE ${SCORBIT_WARNINGS})
    add_test(NAME socket_worker COMMAND socket_worker_test)
-   set_tests_properties(socket_worker PROPERTIES TIMEOUT 60)
+   # It waits on real reconnect and backoff timeouts: 44 s locally, 52-54 s on CI's macos-arm64.
+   set_tests_properties(socket_worker PROPERTIES TIMEOUT 120)
 endif()
