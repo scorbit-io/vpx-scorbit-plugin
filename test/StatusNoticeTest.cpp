@@ -3,6 +3,7 @@
 // The Status latch and the transition-only notifier: what the API thread posts,
 // frame by frame, for a given run of session states.
 
+#include "StatusBanner.h"
 #include "StatusNotice.h"
 
 #include "Check.h"
@@ -19,7 +20,7 @@ using std::chrono::seconds;
 namespace
 {
 
-const std::string NO_SESSION = "[!] Scorbit: no data, no connection to the Scorbit daemon";
+const std::string NO_SESSION = "[!] Scorbit: no data, no connection to the Scorbit VPX Helper";
 
 std::unique_ptr<StatusRecord> InSession(uint8_t session, uint8_t system, const std::string& text = "")
 {
@@ -383,7 +384,7 @@ void TestLostDuringGameIsReported()
    CHECK_MSG(Quiet(n, nullptr, t0 + seconds(40)) == NONE, "past the grace, still quiet in the game");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(50)) == NONE, "reconnected within the bound");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(60))
-      == Post("[!] Scorbit, during the game: no data, no connection to the Scorbit daemon"), "the outage is reported at the end");
+      == Post("[!] Scorbit, during the game: no data, no connection to the Scorbit VPX Helper"), "the outage is reported at the end");
 }
 
 void TestAuthoredEndSettles()
@@ -478,7 +479,7 @@ void TestTableEndedClearsTheGame()
 void TestDescribeEarlier()
 {
    CHECK(StatusNotifier::DescribeEarlier("[!] Scorbit: no data, ok - x") == "[!] Scorbit, during the game: no data, ok - x");
-   CHECK(StatusNotifier::DescribeEarlier(NO_SESSION) == "[!] Scorbit, during the game: no data, no connection to the Scorbit daemon");
+   CHECK(StatusNotifier::DescribeEarlier(NO_SESSION) == "[!] Scorbit, during the game: no data, no connection to the Scorbit VPX Helper");
 }
 
 // SB-6862: a table with no controller and no declaration while PinMAME is off.
@@ -585,6 +586,22 @@ void TestPinMameHint()
    CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(15000)).kind == Kind::Post);
 }
 
+
+// The banner (docs/status-banner.md): the marker becomes the icon.
+void TestBanner()
+{
+   CHECK((BannerFor("[!] Scorbit: no data, offline") == BannerText { BannerIcon::Problem, "Scorbit: no data, offline" }));
+   CHECK((BannerFor("[OK] Scorbit: tracking, ok") == BannerText { BannerIcon::Info, "Scorbit: tracking, ok" }));
+   CHECK((BannerFor("[?] Scorbit: state 9") == BannerText { BannerIcon::Unknown, "Scorbit: state 9" }));
+   CHECK((BannerFor(PinMameHint::TEXT).icon == BannerIcon::Problem));
+   CHECK((BannerFor(StatusNotifier::DescribeNoSession("")).icon == BannerIcon::Problem));
+   CHECK_MSG((BannerFor("no marker") == BannerText { BannerIcon::Info, "no marker" }), "shown whole, as information");
+   CHECK((BannerFor("[!]") == BannerText { BannerIcon::Problem, "" }));
+   CHECK_MSG((BannerFor("[!x] odd").icon == BannerIcon::Info), "only the three markers count");
+
+   CHECK(BANNER_TEXT_HEIGHT == 20);  // 1.5 times VPX's 13
+}
+
 }
 
 int main()
@@ -617,5 +634,6 @@ int main()
    TestTableEndedClearsTheGame();
    TestDescribeEarlier();
    TestPinMameHint();
+   TestBanner();
    return ScorbitTest::Summary("status_notice_test");
 }

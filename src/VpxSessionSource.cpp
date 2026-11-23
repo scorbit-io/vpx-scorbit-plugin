@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "VpxSessionSource.h"
+#include "StatusWindow.h"
 
 #include "pinmame/PinMAMEPlugin.h"
 
@@ -28,7 +29,7 @@ static constexpr size_t LOG_QUEUE_LIMIT = 256;
 static constexpr int NOTICE_MS = static_cast<int>(std::chrono::milliseconds(StatusNotifier::NOTICE_LIFETIME).count());
 
 VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
-   int (*showStatus)(), int (*statusNotices)())
+   int (*showStatus)(), int (*statusNotices)(), int (*statusBanner)())
    : m_msgApi(msgApi)
    , m_endpointId(endpointId)
    , m_vpxApi(vpxApi)
@@ -36,6 +37,7 @@ VpxSessionSource::VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpoint
    , m_overlay(overlay)
    , m_showStatus(showStatus)
    , m_statusNotices(statusNotices)
+   , m_statusBanner(statusBanner)
    , m_gameStartMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_START))
    , m_gameEndMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_GAME_END))
    , m_prepareFrameMsgId(msgApi->GetMsgID(VPXPI_NAMESPACE, VPXPI_EVT_ON_PREPARE_FRAME))
@@ -124,6 +126,8 @@ void VpxSessionSource::OnGameEnd(const unsigned int, void* userData, void*)
    // Nothing renders after this, so the game ends without a notice (docs/status-notices.md).
    self->m_notifier.TableEnded();
    self->m_pinmameHint.TableEnded();
+   // The banner is a window of ours, not drawn in VPX's frame, so it does not end with the table.
+   HideStatusBanner();
    self->m_epoch++;
    self->NewEpoch();
    self->UpdateDeclare();
@@ -215,26 +219,43 @@ void VpxSessionSource::PostStatusNotice()
    const NoticeAction hint
       = m_pinmameHint.Frame(pinmameLoaded, m_gameRunning, !m_authored.machineId.empty(), show && !hidden, notices, now);
    if (hint.kind != NoticeAction::Kind::None && m_vpxApi != nullptr)
-   {
-      const bool post = hint.kind == NoticeAction::Kind::Post;
-      LOGI(post ? "Status notice: "s + hint.text : "Status notice taken down: the PinMAME hint"s);
-      m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, hint.text.c_str(), post ? NOTICE_MS : 0);
-   }
+      Present(hint, hint.kind == NoticeAction::Kind::Post ? "" : "the PinMAME hint", now);
    // Kept quiet while the hint is on screen; hidden meanwhile, the state posts again after it.
    const NoticeAction action = m_notifier.Frame(std::move(m_statusPending), show && !m_pinmameHint.Active(now), notices, AuthoredReady(), now);
-   if (action.kind == NoticeAction::Kind::None || m_vpxApi == nullptr)
-      return;
+   if (action.kind != NoticeAction::Kind::None && m_vpxApi != nullptr)
+      Present(action, "for the game", now);
+}
+
+void VpxSessionSource::Present(const NoticeAction& action, const char* takenDownWhy, std::chrono::steady_clock::time_point now)
+{
+   // VPX still shows a notice of ours: it lives NOTICE_LIFETIME from its post.
+   const bool noticeUp = m_noticeHandle != 0 && now - m_noticePostedAt < StatusNotifier::NOTICE_LIFETIME;
    if (action.kind == NoticeAction::Kind::Expire)
    {
-      // Taken down for the game: a length of 0 expires ours at once (NotificationOverlay reuses
-      // the handle and resets its disappear time).
-      LOGI("Status notice taken down for the game"s);
-      m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      LOGI("Status notice taken down "s + takenDownWhy);
+      HideStatusBanner();
+      // A length of 0 expires ours at once (NotificationOverlay reuses the handle and resets its
+      // disappear time); once VPX has dropped it, that would push the text again for a frame.
+      if (noticeUp)
+         m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      m_noticePostedAt = { }; // taken down: never taken down again, which would push it for a frame
       return;
    }
+   // The banner where it can show (docs/status-banner.md), else VPX's notice; one at a time.
+   const bool banner = m_statusBanner == nullptr || m_statusBanner() != 0;
+   if (banner && ShowStatusBanner(BannerFor(action.text), std::chrono::duration<double>(StatusNotifier::NOTICE_LIFETIME).count()))
+   {
+      LOGI("Status notice (banner): "s + action.text);
+      if (noticeUp)
+         m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      m_noticePostedAt = { };
+      return;
+   }
+   HideStatusBanner();
    LOGI("Status notice: "s + action.text);
    // Updates ours in place while VPX still shows it, else posts a new one (vpinball #4228).
    m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), NOTICE_MS);
+   m_noticePostedAt = now;
 }
 
 void VpxSessionSource::DeclareMachine(const std::string& machineId)

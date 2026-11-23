@@ -102,8 +102,8 @@ MSGPI_INT_VAL_SETTING(setOverlayTransitionPace,"OverlayTransitionPace", "Overlay
    "Milliseconds the overlay transition takes to cross one DMD column", true, 1, 254, 10);
 MSGPI_INT_VAL_SETTING(setOverlayTransitionWidth, "OverlayTransitionWidth", "Overlay transition width",
    "Width of the overlay transition's band in DMD columns, 0 for no transition", true, 0, 16, 8);
-MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
-   "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
+MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit VPX Helper socket",
+   "Local socket the Scorbit VPX Helper listens on, empty for the per-user default", false, "", 1024);
 MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
    "Show Scorbit status notifications, in a session or out of one", true, true);
 // Off by default: no corner of a full-bleed table is guaranteed free (docs/status-window.md).
@@ -112,6 +112,9 @@ MSGPI_INT_VAL_SETTING(setStatusCorner, "StatusCorner", "Status light corner",
 // 1: a notice would cover the playfield mid-game, where nothing is actionable (docs/status-notices.md).
 MSGPI_INT_VAL_SETTING(setStatusNotices, "StatusNotices", "Status notices",
    "Show status notices: 0 never (the status light only), 1 outside a game, plus one at the end of a game that had a warning, 2 always", true, 0, 2, 1);
+// The banner draws alerts readably over a lit playfield; 0 keeps VPX's own notice (docs/status-banner.md).
+MSGPI_INT_VAL_SETTING(setStatusBanner, "StatusBanner", "Status banner",
+   "Show status alerts as a banner: 1 yellow on black (default), 0 VPX's own notice", true, 0, 1, 1);
 MSGPI_INT_VAL_SETTING(setStatusOpacity, "StatusOpacity", "Status light opacity",
    "How strongly the status light draws, in percent", true, 10, 100, 100);
 
@@ -129,6 +132,7 @@ static bool statusUnavailableLogged = false;
 // settings mid-game; called every tick, so a change applies within one.
 static void ApplyStatusWindow()
 {
+   TickStatusBanner(false);
    if (vpxSession == nullptr)
       return;
    // Followed while hidden too, so the light never comes back showing a stale state.
@@ -243,6 +247,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
    msgApi->RegisterSetting(endpointId, &setShowStatus);
    msgApi->RegisterSetting(endpointId, &setStatusCorner);
    msgApi->RegisterSetting(endpointId, &setStatusNotices);
+   msgApi->RegisterSetting(endpointId, &setStatusBanner);
    msgApi->RegisterSetting(endpointId, &setStatusOpacity);
 
    dmdTap = new DmdTap(msgApi, endpointId);
@@ -279,7 +284,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginLoad(const uint32_t sessionId, const Msg
 
    // The daemon listens and the plugin connects, so this starts whether or not
    // a daemon is running and retries once a second until one is.
-   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get, &setStatusNotices_Get);
+   vpxSession = new VpxSessionSource(msgApi, endpointId, vpxApi, *dmdTap, *dmdOverlay, &setShowStatus_Get, &setStatusNotices_Get, &setStatusBanner_Get);
    // Before the table script runs, which is when its CreateObject is resolved.
    const bool scriptBinding = RegisterScriptBinding(msgApi, endpointId, vpxSession);
    {
@@ -313,6 +318,7 @@ MSGPI_EXPORT void MSGPIAPI ScorbitPluginUnload()
    // The tick stops first, so nothing rebuilds the light after its last flush.
    logDrainActive = false;
    UpdateStatusWindow(0, { }, 1, false, { });
+   TickStatusBanner(true);
    // Withdrawing the override broadcasts a display-source change. At quit, a colorizer
    // restarts its thread on it and exit() then deadlocks joining that thread (SB-5801).
    // Detach first: unsubscribing the controllers below would otherwise withdraw it

@@ -353,4 +353,200 @@ bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool 
    return appeared;
 }
 
+// --- The status alert banner (docs/status-banner.md) ---------------------------------------
+// A third panel of the same kind, centred a quarter of the way down the playfield's screen,
+// shown only while an alert is up. Released, and its last transaction flushed, at unload.
+
+static NSPanel* bannerPanel = nil;
+static NSTextField* bannerField = nil;
+static CAShapeLayer* bannerShape = nil;
+static CATextLayer* bannerGlyph = nil;
+static BannerText bannerShown;
+static NSRect bannerArea = NSZeroRect;
+static bool bannerUp = false;
+static std::chrono::steady_clock::time_point bannerUntil { };
+
+static NSColor* BannerYellow()
+{
+   return [NSColor colorWithSRGBRed:1 green:212 / 255.0 blue:0 alpha:1];
+}
+
+static void BuildBanner()
+{
+   bannerPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 10, 10)
+                                            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                                              backing:NSBackingStoreBuffered
+                                                defer:NO];
+   bannerPanel.opaque = NO;
+   bannerPanel.backgroundColor = [NSColor clearColor];
+   bannerPanel.hasShadow = NO;
+   bannerPanel.ignoresMouseEvents = YES;
+   bannerPanel.hidesOnDeactivate = NO;
+   bannerPanel.releasedWhenClosed = NO;
+   bannerPanel.level = NSStatusWindowLevel;
+   bannerPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
+      | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle;
+   bannerPanel.contentView.wantsLayer = YES;
+   CALayer* root = bannerPanel.contentView.layer;
+   root.backgroundColor = [NSColor blackColor].CGColor;
+   bannerShape = [CAShapeLayer layer];
+   [root addSublayer:bannerShape];
+   bannerGlyph = [CATextLayer layer];
+   bannerGlyph.alignmentMode = kCAAlignmentCenter;
+   bannerGlyph.foregroundColor = [NSColor blackColor].CGColor;
+   [root addSublayer:bannerGlyph];
+   bannerField = [NSTextField labelWithString:Heap("")];
+   bannerField.textColor = BannerYellow();
+   bannerField.lineBreakMode = NSLineBreakByWordWrapping;
+   bannerField.maximumNumberOfLines = BANNER_MAX_LINES;
+   bannerField.cell.truncatesLastVisibleLine = YES;
+   [bannerPanel.contentView addSubview:bannerField];
+}
+
+// The playfield window's frame, where the banner sits: VPX's key window while it is active (see
+// PlayfieldScreen), else the main screen's. In fullscreen the two are the same.
+static NSRect PlayfieldArea()
+{
+   NSWindow* key = [NSApp keyWindow];
+   return (key != nil && key != panel && key != bannerPanel && key.screen != nil) ? key.frame : [NSScreen mainScreen].frame;
+}
+
+// Sizes and places the banner for its text within this area, in points (docs/status-banner.md, "Size").
+static void LayoutBanner(const BannerText& banner, NSRect area, NSScreen* screen)
+{
+   const CGFloat height = BANNER_TEXT_HEIGHT;
+   NSFont* font = [NSFont boldSystemFontOfSize:height];
+   const CGFloat pad = std::ceil(height / 2);
+   const CGFloat icon = std::ceil(font.ascender - font.descender);
+   const CGFloat maxText = std::floor(BANNER_MAX_WIDTH * NSWidth(area)) - 3 * pad - icon;
+
+   // The daemon's text is copied off the wire unvalidated, as for the caption.
+   NSString* text = Heap(banner.text.c_str());
+   if (text == nil)
+      text = [[NSString alloc] initWithBytes:banner.text.data() length:banner.text.size() encoding:NSISOLatin1StringEncoding];
+   bannerField.font = font;
+   bannerField.stringValue = text != nil ? text : Heap("");
+   bannerField.preferredMaxLayoutWidth = maxText;
+   NSSize fit = bannerField.fittingSize;
+   fit.width = std::fmin(std::ceil(fit.width), maxText);
+   fit.height = std::ceil(fit.height);
+
+   const CGFloat width = pad + icon + pad + fit.width + pad;
+   const CGFloat inner = std::fmax(fit.height, icon);
+   const CGFloat boxHeight = pad + inner + pad;
+   bannerField.frame = NSMakeRect(pad + icon + pad, pad + (inner - fit.height) / 2, fit.width, fit.height);
+   [bannerPanel setContentSize:NSMakeSize(width, boxHeight)];
+   const CGFloat top = NSMaxY(area) - BANNER_TOP * NSHeight(area);
+   [bannerPanel setFrameOrigin:NSMakePoint(std::round(NSMidX(area) - width / 2), std::round(top - boxHeight))];
+
+   // The icon sits level with the first line: a yellow triangle for a problem, else a white disc.
+   [CATransaction begin];
+   [CATransaction setDisableActions:YES];
+   CALayer* root = bannerPanel.contentView.layer;
+   root.cornerRadius = pad / 2;
+   const CGRect box = CGRectMake(pad, boxHeight - pad - icon, icon, icon);
+   CGMutablePathRef path = CGPathCreateMutable();
+   const bool problem = banner.icon == BannerIcon::Problem;
+   if (problem)
+   {
+      CGPathMoveToPoint(path, nullptr, CGRectGetMidX(box), CGRectGetMaxY(box));
+      CGPathAddLineToPoint(path, nullptr, CGRectGetMaxX(box), CGRectGetMinY(box));
+      CGPathAddLineToPoint(path, nullptr, CGRectGetMinX(box), CGRectGetMinY(box));
+      CGPathCloseSubpath(path);
+   }
+   else
+      CGPathAddEllipseInRect(path, nullptr, box);
+   bannerShape.path = path;
+   CGPathRelease(path);
+   bannerShape.fillColor = problem ? BannerYellow().CGColor : [NSColor whiteColor].CGColor;
+   const CGFloat glyphSize = std::round(icon * (problem ? 0.55 : 0.65));
+   bannerGlyph.font = (__bridge CFTypeRef)[NSFont boldSystemFontOfSize:glyphSize];
+   bannerGlyph.fontSize = glyphSize;
+   bannerGlyph.string = problem ? Heap("!") : banner.icon == BannerIcon::Unknown ? Heap("?") : Heap("i");
+   // A triangle's middle sits low; its glyph follows it.
+   const CGFloat glyphHeight = std::ceil(glyphSize * 1.2);
+   const CGFloat centreY = problem ? CGRectGetMinY(box) + icon * 0.36 : CGRectGetMidY(box);
+   bannerGlyph.frame = CGRectMake(CGRectGetMinX(box), centreY - glyphHeight / 2, icon, glyphHeight);
+   bannerGlyph.contentsScale = screen.backingScaleFactor;
+   [CATransaction commit];
+}
+
+bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
+{
+   @autoreleasepool
+   {
+      if (bannerPanel == nil)
+         BuildBanner();
+      // No panel, no banner: the caller posts VPX's notice instead.
+      if (bannerPanel == nil)
+         return false;
+      const NSRect area = PlayfieldArea();
+      if (!(banner == bannerShown) || !NSEqualRects(area, bannerArea))
+      {
+         LayoutBanner(banner, area, PlayfieldScreen());
+         bannerShown = banner;
+         bannerArea = area;
+      }
+      bannerUp = true;
+      bannerUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(lifetimeSeconds * 1000));
+      if ([NSApp isActive] && !bannerPanel.visible)
+         [bannerPanel orderFrontRegardless];
+   }
+   return true;
+}
+
+void HideStatusBanner()
+{
+   bannerUp = false;
+   if (bannerPanel != nil && bannerPanel.visible)
+      [bannerPanel orderOut:nil];
+}
+
+void TickStatusBanner(bool release)
+{
+   if (release)
+   {
+      bannerUp = false;
+      if (bannerPanel == nil)
+         return;
+      @autoreleasepool
+      {
+         [bannerPanel orderOut:nil];
+         [bannerPanel close];
+         bannerPanel = nil;
+         bannerField = nil;
+         bannerShape = nil;
+         bannerGlyph = nil;
+         bannerShown = { };
+         bannerArea = NSZeroRect;
+      }
+      // Commit now: the run loop's own commit comes after VPX has unloaded the dylib.
+      [CATransaction flush];
+      return;
+   }
+   if (bannerUp && std::chrono::steady_clock::now() >= bannerUntil)
+      bannerUp = false;
+   if (bannerPanel == nil)
+      return;
+   // Up only while VPX is in front; back on return if the alert is still current.
+   const bool want = bannerUp && [NSApp isActive];
+   if (want)
+   {
+      // Follows the playfield window: moved, resized, made fullscreen, or first seen on this return.
+      @autoreleasepool
+      {
+         const NSRect area = PlayfieldArea();
+         if (!NSEqualRects(area, bannerArea))
+         {
+            LayoutBanner(bannerShown, area, PlayfieldScreen());
+            bannerArea = area;
+         }
+      }
+   }
+   if (want && !bannerPanel.visible)
+      [bannerPanel orderFrontRegardless];
+   else if (!want && bannerPanel.visible)
+      [bannerPanel orderOut:nil];
+}
+
 }

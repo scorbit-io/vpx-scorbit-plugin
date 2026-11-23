@@ -43,10 +43,10 @@ namespace Scorbit
 class VpxSessionSource final : public ISessionSource, public IOverlayTarget
 {
 public:
-   // showStatus and statusNotices read [Plugin.Scorbit] ShowStatus and StatusNotices; they are
-   // read every frame, so a change applies at once.
+   // showStatus, statusNotices and statusBanner read [Plugin.Scorbit] ShowStatus, StatusNotices and
+   // StatusBanner; they are read every frame, so a change applies at once.
    VpxSessionSource(const MsgPluginAPI* msgApi, uint32_t endpointId, VPXPluginAPI* vpxApi, DmdTap& tap, DmdOverlay& overlay,
-      int (*showStatus)(), int (*statusNotices)());
+      int (*showStatus)(), int (*statusNotices)(), int (*statusBanner)());
    ~VpxSessionSource() override;
 
    VpxSessionSource(const VpxSessionSource&) = delete;
@@ -147,6 +147,8 @@ private:
    // API thread, once per rendered frame: notifications are drawn inside rendered
    // frames and timed from their push, so one pushed while none render expires unseen.
    void PostStatusNotice();
+   // One notice action, to the banner where it can show, else to VPX's notice.
+   void Present(const NoticeAction& action, const char* takenDownWhy, std::chrono::steady_clock::time_point now);
    // Moves a newly posted status into what the script reads and what the notifier has yet to see.
    void TakeStatus();
    // Every epoch bump: the table's read-backs belong to the table.
@@ -163,6 +165,7 @@ private:
    DmdOverlay& m_overlay;
    int (*const m_showStatus)();
    int (*const m_statusNotices)();
+   int (*const m_statusBanner)();
    const unsigned int m_gameStartMsgId;
    const unsigned int m_gameEndMsgId;
    const unsigned int m_prepareFrameMsgId;
@@ -203,6 +206,7 @@ private:
    StatusNotifier m_notifier; // API thread only, as is the handle
    PinMameHint m_pinmameHint; // API thread only
    unsigned int m_noticeHandle = 0;
+   std::chrono::steady_clock::time_point m_noticePostedAt { }; // VPX's notice, as the handle
    StatusRecord m_scriptStatus;                    // API thread only
    std::unique_ptr<StatusRecord> m_statusPending;  // taken for the script, not yet shown to the notifier
 
