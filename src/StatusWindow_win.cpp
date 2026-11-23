@@ -533,6 +533,7 @@ constexpr wchar_t BANNER_CLASS[] = L"ScorbitStatusBanner";
 constexpr uint32_t BANNER_R = 0xFF, BANNER_G = 0xD4, BANNER_B = 0x00;  // #FFD400
 
 HWND bannerWindow = nullptr;
+HWND bannerPlayfield = nullptr;  // the playfield it was last placed over
 ATOM bannerClass = 0;
 bool bannerFailed = false;     // the window could not be made: VPX's notice, for the plugin's life
 bool bannerUp = false;
@@ -551,6 +552,12 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       return HTTRANSPARENT;
    case WM_MOUSEACTIVATE:
       return MA_NOACTIVATE;
+   case WM_ACTIVATE:
+      // Nothing of ours may hold the foreground: VPX pauses when its playfield loses it. A tool that
+      // focuses VPX by "main window" can pick this one (it has no owner); hand the foreground back.
+      if (LOWORD(wParam) != WA_INACTIVE && bannerPlayfield != nullptr && IsWindow(bannerPlayfield))
+         SetForegroundWindow(bannerPlayfield);
+      return 0;
    case WM_CLOSE:
       return 0;  // as for the light: the plugin destroys it
    default:
@@ -819,6 +826,7 @@ void FollowBanner()
       HideBannerWindow();
       return;
    }
+   bannerPlayfield = playfield;
    const double scale = WindowDpi(playfield) / 96.0;
    if (!bannerDrawn || !EqualRect(&area, &bannerArea) || scale != bannerScale)
    {
@@ -871,6 +879,7 @@ void TickStatusBanner(bool release)
       if (bannerWindow != nullptr)
          DestroyWindow(bannerWindow);
       bannerWindow = nullptr;
+      bannerPlayfield = nullptr;
       if (bannerClass != 0)
          UnregisterClassW(BANNER_CLASS, ThisModule());
       bannerClass = 0;
