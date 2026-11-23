@@ -849,12 +849,15 @@ bool FollowBanner()
 {
    HWND playfield = nullptr;
    RECT area { };
-   if (!bannerUp || bannerWindow == nullptr || !PlayfieldArea(playfield, area))
+   const bool found = PlayfieldArea(playfield, area);
+   // Recorded with no banner up too: BannerProc hands the foreground back to it.
+   if (found)
+      bannerPlayfield = playfield;
+   if (!bannerUp || bannerWindow == nullptr || !found)
    {
       HideBannerWindow();
       return true;
    }
-   bannerPlayfield = playfield;
    const double scale = WindowDpi(playfield) / 96.0;
    if (!bannerDrawn || !EqualRect(&area, &bannerArea) || scale != bannerScale)
    {
