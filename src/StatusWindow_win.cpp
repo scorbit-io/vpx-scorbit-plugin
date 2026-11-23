@@ -682,6 +682,34 @@ bool TextCoverage(HDC screen, HFONT font, const std::wstring& text, UINT format,
    return ok;
 }
 
+// The longest prefix of the text that, with an ellipsis, wraps to at most maxHeight; cut at a word
+// where there is one. The text itself when it fits.
+std::wstring FitBannerText(HDC screen, HFONT font, const std::wstring& text, UINT format, int boxWidth, int maxHeight)
+{
+   int w = 0, h = 0;
+   if (!TextCoverage(screen, font, text, format, boxWidth, w, h, nullptr) || h <= maxHeight)
+      return text;
+   const auto cut = [&](size_t n) {
+      std::wstring prefix = text.substr(0, n);
+      while (!prefix.empty() && iswspace(prefix.back()))
+         prefix.pop_back();
+      return prefix + L"\u2026";
+   };
+   size_t fits = 0, over = text.size();
+   while (over - fits > 1)
+   {
+      const size_t mid = fits + (over - fits) / 2;
+      TextCoverage(screen, font, cut(mid), format, boxWidth, w, h, nullptr);
+      (h <= maxHeight ? fits : over) = mid;
+   }
+   if (fits > 0 && IS_HIGH_SURROGATE(text[fits - 1]))
+      fits--;
+   const size_t space = text.find_last_of(L" \t", fits);
+   if (space != std::wstring::npos && space > 0 && fits < text.size() && !iswspace(text[fits]))
+      fits = space;
+   return cut(fits);
+}
+
 // Lays out and draws the banner for this area (docs/status-banner.md, "Size"): 20 DIPs x DPI / 96,
 // as a character height (a negative lfHeight), solid black, yellow text, the icon level with the
 // first line. Grayscale antialiasing, since ClearType's colour fringes have no alpha.
@@ -710,12 +738,12 @@ bool DrawBanner(const BannerText& banner, const RECT& area, double scale)
       const int pad = (textPx + 1) / 2;
       const int icon = line;
       const int maxText = std::max(1, static_cast<int>(BANNER_MAX_WIDTH * (area.right - area.left)) - 3 * pad - icon);
-      const std::wstring text = Widen(banner.text);
       const UINT format = DT_WORDBREAK | DT_NOPREFIX | DT_LEFT | DT_TOP;
+      // At most three lines, the last ending in an ellipsis when the text is longer.
+      const std::wstring text = FitBannerText(screen, font, Widen(banner.text), format, maxText, BANNER_MAX_LINES * line);
       int textW = 0, textH = 0;
       TextCoverage(screen, font, text, format, maxText, textW, textH, nullptr);
       textW = std::clamp(textW, 1, maxText);
-      // At most three lines; a longer text is clipped at the third.
       textH = std::clamp(textH, 1, BANNER_MAX_LINES * line);
       std::vector<uint8_t> textCov;
       const bool textOk = TextCoverage(screen, font, text, format, textW, textW, textH, &textCov);
@@ -816,15 +844,15 @@ void HideBannerWindow()
 }
 
 // Lays out again when the playfield moved, resized or changed DPI, and raises it while VPX is in
-// front; hides it otherwise.
-void FollowBanner()
+// front; hides it otherwise. False only when drawing failed, not while it waits for VPX.
+bool FollowBanner()
 {
    HWND playfield = nullptr;
    RECT area { };
    if (!bannerUp || bannerWindow == nullptr || !PlayfieldArea(playfield, area))
    {
       HideBannerWindow();
-      return;
+      return true;
    }
    bannerPlayfield = playfield;
    const double scale = WindowDpi(playfield) / 96.0;
@@ -833,7 +861,7 @@ void FollowBanner()
       if (!DrawBanner(bannerText, area, scale))
       {
          HideBannerWindow();
-         return;
+         return false;
       }
       bannerDrawn = true;
       bannerArea = area;
@@ -841,6 +869,7 @@ void FollowBanner()
    }
    SetWindowPos(bannerWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
    bannerShownNow = true;
+   return true;
 }
 
 std::string Lower(std::string s)
@@ -866,7 +895,12 @@ bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
    bannerText = banner;
    bannerUp = true;
    bannerUntil = Clock::now() + std::chrono::milliseconds(static_cast<int64_t>(lifetimeSeconds * 1000));
-   FollowBanner();
+   // A banner that could not be drawn hands the alert to VPX's notice.
+   if (!FollowBanner())
+   {
+      bannerUp = false;
+      return false;
+   }
    return true;
 }
 
