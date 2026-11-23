@@ -883,7 +883,8 @@ std::string Lower(std::string s)
 
 bool StatusBannerSupported()
 {
-   return !bannerFailed;
+   // Built here, so a banner that can't be made never drops a state VPX's notice would show.
+   return MakeBanner();
 }
 
 bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
