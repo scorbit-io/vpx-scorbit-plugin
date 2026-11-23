@@ -4,7 +4,6 @@
 
 // The status alert banner's content and size (docs/status-banner.md), the same on every platform.
 
-#include <algorithm>
 #include <string>
 #include <string_view>
 
@@ -41,12 +40,12 @@ inline BannerText BannerFor(const std::string& notice)
    return { BannerIcon::Info, notice };
 }
 
-// The text's character height in device-independent units (macOS points, or pixels at 96 DPI)
-// for a display this many units high.
-inline double BannerTextHeight(double displayHeight) { return std::clamp(displayHeight / 30.0, 18.0, 48.0); }
+// The text's character height in device-independent units (macOS points, or pixels at 96 DPI):
+// 1.5 times VPX's own 13, chosen live (a 1/30-of-the-display size read as far too big).
+inline constexpr double BANNER_TEXT_HEIGHT = 20;
 
-inline constexpr double BANNER_MAX_WIDTH = 0.6;  // of the display's width
+inline constexpr double BANNER_MAX_WIDTH = 0.6;  // of the playfield window's width
 inline constexpr int BANNER_MAX_LINES = 3;       // a longer text is cut with an ellipsis
-inline constexpr double BANNER_TOP = 0.25;       // the banner's top, down from the display's top
+inline constexpr double BANNER_TOP = 0.25;       // the banner's top, down from the playfield window's top
 
 }

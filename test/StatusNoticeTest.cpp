@@ -587,7 +587,7 @@ void TestPinMameHint()
 }
 
 
-// The banner (docs/status-banner.md): the marker becomes the icon, and the size follows the display.
+// The banner (docs/status-banner.md): the marker becomes the icon.
 void TestBanner()
 {
    CHECK((BannerFor("[!] Scorbit: no data, offline") == BannerText { BannerIcon::Problem, "Scorbit: no data, offline" }));
@@ -599,10 +599,7 @@ void TestBanner()
    CHECK((BannerFor("[!]") == BannerText { BannerIcon::Problem, "" }));
    CHECK_MSG((BannerFor("[!x] odd").icon == BannerIcon::Info), "only the three markers count");
 
-   CHECK(BannerTextHeight(1080) == 36);      // 1080p at 100%
-   CHECK(BannerTextHeight(900) == 30);       // a 1440x900 display in points
-   CHECK(BannerTextHeight(300) == 18);       // clamped up
-   CHECK(BannerTextHeight(2160) == 48);      // a 4K display at 100%: clamped down
+   CHECK(BANNER_TEXT_HEIGHT == 20);  // 1.5 times VPX's 13
 }
 
 }

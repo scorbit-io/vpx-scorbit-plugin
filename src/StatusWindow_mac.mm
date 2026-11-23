@@ -362,7 +362,7 @@ static NSTextField* bannerField = nil;
 static CAShapeLayer* bannerShape = nil;
 static CATextLayer* bannerGlyph = nil;
 static BannerText bannerShown;
-static NSRect bannerScreen = NSZeroRect;
+static NSRect bannerArea = NSZeroRect;
 static bool bannerUp = false;
 static std::chrono::steady_clock::time_point bannerUntil { };
 
@@ -403,11 +403,18 @@ static void BuildBanner()
    [bannerPanel.contentView addSubview:bannerField];
 }
 
-// Sizes and places the banner for its text on this screen, in points (docs/status-banner.md, "Size").
-static void LayoutBanner(const BannerText& banner, NSScreen* screen)
+// The playfield window's frame, where the banner sits: VPX's key window while it is active (see
+// PlayfieldScreen), else the main screen's. In fullscreen the two are the same.
+static NSRect PlayfieldArea()
 {
-   const NSRect area = screen.frame;
-   const CGFloat height = BannerTextHeight(NSHeight(area));
+   NSWindow* key = [NSApp keyWindow];
+   return (key != nil && key != panel && key != bannerPanel && key.screen != nil) ? key.frame : [NSScreen mainScreen].frame;
+}
+
+// Sizes and places the banner for its text within this area, in points (docs/status-banner.md, "Size").
+static void LayoutBanner(const BannerText& banner, NSRect area, NSScreen* screen)
+{
+   const CGFloat height = BANNER_TEXT_HEIGHT;
    NSFont* font = [NSFont boldSystemFontOfSize:height];
    const CGFloat pad = std::ceil(height / 2);
    const CGFloat icon = std::ceil(font.ascender - font.descender);
@@ -470,12 +477,12 @@ bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
    {
       if (bannerPanel == nil)
          BuildBanner();
-      NSScreen* screen = PlayfieldScreen();
-      if (!(banner == bannerShown) || !NSEqualRects(screen.frame, bannerScreen))
+      const NSRect area = PlayfieldArea();
+      if (!(banner == bannerShown) || !NSEqualRects(area, bannerArea))
       {
-         LayoutBanner(banner, screen);
+         LayoutBanner(banner, area, PlayfieldScreen());
          bannerShown = banner;
-         bannerScreen = screen.frame;
+         bannerArea = area;
       }
       bannerUp = true;
       bannerUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(lifetimeSeconds * 1000));
@@ -508,7 +515,7 @@ void TickStatusBanner(bool release)
          bannerShape = nil;
          bannerGlyph = nil;
          bannerShown = { };
-         bannerScreen = NSZeroRect;
+         bannerArea = NSZeroRect;
       }
       // Commit now: the run loop's own commit comes after VPX has unloaded the dylib.
       [CATransaction flush];

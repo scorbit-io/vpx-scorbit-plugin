@@ -47,26 +47,25 @@ to draw the alerts.
     Windows, and X11 often has none.
   - The icon keeps the shape difference the markers exist for, so no state is told by colour
     alone.
-- **Size, relative to the playfield's display.** Sizes are worked out in device-independent units
-  (DIPs: macOS points, or pixels at 96 DPI), then converted once per platform:
-  - The text's pixel height (the font's character height, not its point size) is 1/30 of the
-    display's height in DIPs, clamped to 18–48 DIPs. That's 36 DIPs on a 1080p display at 100%,
-    against VPX's 13.
-  - At most 60% of the display's width, word-wrapped, three lines at most; a longer text is cut
-    with an ellipsis.
+- **Size.** Sizes are in device-independent units (DIPs: macOS points, or pixels at 96 DPI).
+  - The text's character height is a fixed 20 DIPs, 1.5 times VPX's own 13. The first build sized
+    it to 1/30 of the display's height; on a 1117-point Mac screen that gave 37 points, which read
+    as far too big in the live check.
+  - At most 60% of the playfield window's width, word-wrapped, three lines at most; a longer text
+    is cut with an ellipsis.
   - Padding is half a line. The icon is one line high.
-- **Placement:** centred horizontally, its top a quarter of the way down the playfield's display,
-  where VPX's notice is now. It does not depend on `StatusCorner`. The display is found as the
-  light finds it: the key window's screen on macOS, VPX's foreground window's monitor on Windows,
-  the active window's monitor on X11.
+- **Placement:** centred horizontally in the playfield window, its top a quarter of the way down,
+  where VPX's notice is now. It does not depend on `StatusCorner`. Sizing and placing it within
+  the window, not the display, keeps it inside a windowed table. The window is found as the light
+  finds its screen: VPX's key window on macOS, VPX's foreground window on Windows, the active window
+  on X11. In fullscreen the window is the display.
 - **Scaling:** from DIPs to device pixels, once, by the light's per-platform rules.
-  - macOS: DIPs are points. The display's height is `NSScreen.frame` in points, and the layers
-    render at the screen's backing scale.
-  - Windows: device pixels = DIPs × the monitor's DPI (`GetDpiForWindow`) / 96. The display's
-    height in DIPs is its pixel height × 96 / DPI. The font is created with a negative `lfHeight`
-    of that many pixels, so the size is a character height. This is not the caption's
-    points-to-pixels `MulDiv(pt, dpi, 72)`, which would make it a third larger.
-  - X11: device pixels = DIPs × `Xft.dpi` / 96, and the display's height in DIPs likewise.
+  - macOS: DIPs are points, and the layers render at the screen's backing scale.
+  - Windows: device pixels = DIPs × the monitor's DPI (`GetDpiForWindow`) / 96. The font is
+    created with a negative `lfHeight` of that many pixels, so the size is a character height.
+    This is not the caption's points-to-pixels `MulDiv(pt, dpi, 72)`, which would make it a third
+    larger.
+  - X11: device pixels = DIPs × `Xft.dpi` / 96.
 
 ## Text on each platform
 
