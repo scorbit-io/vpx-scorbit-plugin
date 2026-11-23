@@ -3,6 +3,7 @@
 // The Status latch and the transition-only notifier: what the API thread posts,
 // frame by frame, for a given run of session states.
 
+#include "StatusBanner.h"
 #include "StatusNotice.h"
 
 #include "Check.h"
@@ -585,6 +586,25 @@ void TestPinMameHint()
    CHECK(next.Frame(false, false, false, true, NOTICES_OUTSIDE_GAME, at(15000)).kind == Kind::Post);
 }
 
+
+// The banner (docs/status-banner.md): the marker becomes the icon, and the size follows the display.
+void TestBanner()
+{
+   CHECK((BannerFor("[!] Scorbit: no data, offline") == BannerText { BannerIcon::Problem, "Scorbit: no data, offline" }));
+   CHECK((BannerFor("[OK] Scorbit: tracking, ok") == BannerText { BannerIcon::Info, "Scorbit: tracking, ok" }));
+   CHECK((BannerFor("[?] Scorbit: state 9") == BannerText { BannerIcon::Unknown, "Scorbit: state 9" }));
+   CHECK((BannerFor(PinMameHint::TEXT).icon == BannerIcon::Problem));
+   CHECK((BannerFor(StatusNotifier::DescribeNoSession("")).icon == BannerIcon::Problem));
+   CHECK_MSG((BannerFor("no marker") == BannerText { BannerIcon::Info, "no marker" }), "shown whole, as information");
+   CHECK((BannerFor("[!]") == BannerText { BannerIcon::Problem, "" }));
+   CHECK_MSG((BannerFor("[!x] odd").icon == BannerIcon::Info), "only the three markers count");
+
+   CHECK(BannerTextHeight(1080) == 36);      // 1080p at 100%
+   CHECK(BannerTextHeight(900) == 30);       // a 1440x900 display in points
+   CHECK(BannerTextHeight(300) == 18);       // clamped up
+   CHECK(BannerTextHeight(2160) == 48);      // a 4K display at 100%: clamped down
+}
+
 }
 
 int main()
@@ -617,5 +637,6 @@ int main()
    TestTableEndedClearsTheGame();
    TestDescribeEarlier();
    TestPinMameHint();
+   TestBanner();
    return ScorbitTest::Summary("status_notice_test");
 }

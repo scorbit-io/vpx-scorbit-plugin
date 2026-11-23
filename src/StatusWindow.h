@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "StatusBanner.h"
 #include "StatusLight.h"
 
 #include <string>
@@ -21,6 +22,20 @@ namespace Scorbit
 bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool flash, const std::string& caption);
 #else
 inline bool UpdateStatusWindow(int, const LightView&, double, bool, const std::string&) { return false; }
+#endif
+
+// The status alert banner (docs/status-banner.md). API thread only. Shows the text for lifetime
+// seconds and returns true, or returns false where no banner can show, so the caller posts
+// VPX's notice instead. It is up only while VPX is the active application.
+#if defined(__APPLE__)
+bool ShowStatusBanner(const BannerText& text, double lifetimeSeconds);
+void HideStatusBanner();
+// Every tick: hides it once its lifetime is over, and while VPX is not active. release: at unload.
+void TickStatusBanner(bool release);
+#else
+inline bool ShowStatusBanner(const BannerText&, double) { return false; }
+inline void HideStatusBanner() { }
+inline void TickStatusBanner(bool) { }
 #endif
 
 // Why the last show was refused, as under Wayland, or nullptr. The notifications stay the surface.

@@ -88,6 +88,7 @@ Enable = 1
 |---|---|
 | `ShowStatus` | Show Scorbit status notifications and the status light, default on. Off posts none, with or without a daemon. |
 | `StatusNotices` | When the notifications may cover the playfield: 0 never (the status light only), 1 outside a game, plus one at the end of a game that had a warning (default), 2 always, on every change. See "Status" below. |
+| `StatusBanner` | macOS. Show status alerts as a banner of the plugin's own: yellow text on solid black, sized to the display, centred a quarter of the way down, with an icon for the state. 1 (default) or 0 to keep VPX's own notice. Elsewhere VPX's notice is used for now. See `docs/status-banner.md`. |
 | `socketPath` | Optional. Local socket the Scorbit daemon listens on. Empty uses the per-user default (see below). |
 | `dmdDumpFile` | Optional. Write every captured DMD frame to this file (see below). Relative paths resolve against the pref directory. |
 | `overlayDropDir` | Optional, demo only. Watch this directory for raw overlay payloads and display them (see below). |

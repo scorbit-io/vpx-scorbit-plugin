@@ -64,6 +64,7 @@ add_library(scorbit-transport STATIC
    src/ReadBack.cpp
    src/SeqLock.h
    src/Latch.h
+   src/StatusBanner.h
    src/StatusNotice.h
    src/StatusNotice.cpp
    src/StatusLight.h
