@@ -86,6 +86,11 @@ void VpxSessionSource::OnGameStart(const unsigned int, void* userData, void*)
       self->m_vpxApi->GetVpxInfo(&vpx);
       self->m_authored.vpxPath = NativePathToUtf8(vpx.path);
       self->m_authored.prefPath = NativePathToUtf8(vpx.prefPath);
+      // Once per table: VPX's display mode is fixed while a table plays.
+      const char* blocked = vpx.prefPath != nullptr ? StatusBannerBlocked(vpx.prefPath) : nullptr;
+      if (blocked != nullptr && !self->m_bannerBlocked)
+         LOGI("Status banner unavailable, VPX's notices instead: "s + blocked);
+      self->m_bannerBlocked = blocked != nullptr;
    }
 
    self->m_tablePath = std::move(tablePath);
@@ -242,7 +247,7 @@ void VpxSessionSource::Present(const NoticeAction& action, const char* takenDown
       return;
    }
    // The banner where it can show (docs/status-banner.md), else VPX's notice; one at a time.
-   const bool banner = m_statusBanner == nullptr || m_statusBanner() != 0;
+   const bool banner = (m_statusBanner == nullptr || m_statusBanner() != 0) && !m_bannerBlocked;
    if (banner && ShowStatusBanner(BannerFor(action.text), std::chrono::duration<double>(StatusNotifier::NOTICE_LIFETIME).count()))
    {
       LOGI("Status notice (banner): "s + action.text);

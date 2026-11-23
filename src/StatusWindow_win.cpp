@@ -4,10 +4,15 @@
 #include "StatusLightRaster.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cwctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -515,6 +520,401 @@ bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool 
    else
       HideCaption();
    return appeared;
+}
+
+// --- The status alert banner (docs/status-banner.md) ---------------------------------------
+// A third window of the light's kind, centred in the playfield window a quarter of the way down,
+// shown only while an alert is up and VPX is in front. Destroyed, with its class, at unload.
+
+namespace
+{
+
+constexpr wchar_t BANNER_CLASS[] = L"ScorbitStatusBanner";
+constexpr uint32_t BANNER_R = 0xFF, BANNER_G = 0xD4, BANNER_B = 0x00;  // #FFD400
+
+HWND bannerWindow = nullptr;
+ATOM bannerClass = 0;
+bool bannerFailed = false;     // the window could not be made: VPX's notice, for the plugin's life
+bool bannerUp = false;
+Clock::time_point bannerUntil;
+BannerText bannerText;
+RECT bannerArea { };           // the playfield's client area it was laid out for, in screen pixels
+double bannerScale = 0;
+bool bannerDrawn = false;
+bool bannerShownNow = false;
+
+LRESULT CALLBACK BannerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+   switch (message)
+   {
+   case WM_NCHITTEST:
+      return HTTRANSPARENT;
+   case WM_MOUSEACTIVATE:
+      return MA_NOACTIVATE;
+   case WM_CLOSE:
+      return 0;  // as for the light: the plugin destroys it
+   default:
+      return DefWindowProcW(hwnd, message, wParam, lParam);
+   }
+}
+
+bool MakeBanner()
+{
+   if (bannerWindow != nullptr)
+      return true;
+   if (bannerFailed)
+      return false;
+   const HINSTANCE module = ThisModule();
+   WNDCLASSEXW cls { };
+   cls.cbSize = sizeof(cls);
+   cls.lpfnWndProc = BannerProc;
+   cls.hInstance = module;
+   cls.lpszClassName = BANNER_CLASS;
+   bannerClass = RegisterClassExW(&cls);
+   if (bannerClass != 0)
+      bannerWindow = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, BANNER_CLASS, L"",
+         WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, module, nullptr);
+   if (bannerWindow == nullptr)
+   {
+      if (bannerClass != 0)
+         UnregisterClassW(BANNER_CLASS, module);
+      bannerClass = 0;
+      bannerFailed = true;
+      return false;
+   }
+   return true;
+}
+
+// The playfield's client area in screen pixels, or false while VPX is not in front.
+bool PlayfieldArea(HWND& playfield, RECT& area)
+{
+   playfield = PlayfieldWindow();
+   if (playfield == nullptr || playfield == bannerWindow || !GetClientRect(playfield, &area))
+      return false;
+   POINT topLeft { area.left, area.top };
+   POINT bottomRight { area.right, area.bottom };
+   ClientToScreen(playfield, &topLeft);
+   ClientToScreen(playfield, &bottomRight);
+   area = { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y };
+   return area.right > area.left && area.bottom > area.top;
+}
+
+// Coverage of a pixel by the icon's shape, 4x4 supersampled: a triangle pointing up, or a disc.
+uint32_t ShapeCoverage(bool triangle, double x, double y, double size)
+{
+   int inside = 0;
+   for (int sy = 0; sy < 4; sy++)
+      for (int sx = 0; sx < 4; sx++)
+      {
+         const double px = x + (sx + 0.5) / 4, py = y + (sy + 0.5) / 4;
+         if (triangle)
+         {
+            // Apex at the top centre, base along the bottom.
+            const double half = size / 2 * (py / size);
+            inside += (py >= 0 && py <= size && std::abs(px - size / 2) <= half) ? 1 : 0;
+         }
+         else
+         {
+            const double dx = px - size / 2, dy = py - size / 2;
+            inside += dx * dx + dy * dy <= size * size / 4 ? 1 : 0;
+         }
+      }
+   return static_cast<uint32_t>(inside * 255 / 16);
+}
+
+// Draws the text (and measures it) in white on black into a DIB of the given size; returns its
+// coverage, one byte a pixel. With measure set, only measures, into width and height.
+bool TextCoverage(HDC screen, HFONT font, const std::wstring& text, UINT format, int boxWidth, int& width, int& height,
+   std::vector<uint8_t>* coverage)
+{
+   HDC dc = CreateCompatibleDC(screen);
+   if (dc == nullptr)
+      return false;
+   const HGDIOBJ previousFont = SelectObject(dc, font);
+   bool ok = false;
+   if (coverage == nullptr)
+   {
+      RECT measure { 0, 0, boxWidth, 0 };
+      DrawTextW(dc, text.c_str(), -1, &measure, format | DT_CALCRECT);
+      width = measure.right - measure.left;
+      height = measure.bottom - measure.top;
+      ok = true;
+   }
+   else
+   {
+      BITMAPINFO info { };
+      info.bmiHeader.biSize = sizeof(info.bmiHeader);
+      info.bmiHeader.biWidth = width;
+      info.bmiHeader.biHeight = -height;
+      info.bmiHeader.biPlanes = 1;
+      info.bmiHeader.biBitCount = 32;
+      info.bmiHeader.biCompression = BI_RGB;
+      void* pixels = nullptr;
+      HBITMAP dib = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+      if (dib != nullptr && pixels != nullptr)
+      {
+         const HGDIOBJ previousBitmap = SelectObject(dc, dib);
+         std::memset(pixels, 0, static_cast<size_t>(width) * height * 4);
+         SetBkMode(dc, TRANSPARENT);
+         SetTextColor(dc, RGB(255, 255, 255));
+         RECT box { 0, 0, width, height };
+         DrawTextW(dc, text.c_str(), -1, &box, format);
+         GdiFlush();
+         const uint32_t* px = static_cast<const uint32_t*>(pixels);
+         coverage->resize(static_cast<size_t>(width) * height);
+         for (size_t i = 0; i < coverage->size(); i++)
+            (*coverage)[i] = static_cast<uint8_t>(((px[i] & 0xFF) + ((px[i] >> 8) & 0xFF) + ((px[i] >> 16) & 0xFF)) / 3);
+         SelectObject(dc, previousBitmap);
+         ok = true;
+      }
+      if (dib != nullptr)
+         DeleteObject(dib);
+   }
+   SelectObject(dc, previousFont);
+   DeleteDC(dc);
+   return ok;
+}
+
+// Lays out and draws the banner for this area (docs/status-banner.md, "Size"): 20 DIPs x DPI / 96,
+// as a character height (a negative lfHeight), solid black, yellow text, the icon level with the
+// first line. Grayscale antialiasing, since ClearType's colour fringes have no alpha.
+bool DrawBanner(const BannerText& banner, const RECT& area, double scale)
+{
+   const HDC screen = GetDC(nullptr);
+   if (screen == nullptr)
+      return false;
+   const int textPx = std::max(1, static_cast<int>(std::lround(BANNER_TEXT_HEIGHT * scale)));
+   HFONT font = CreateFontW(-textPx, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+      ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+   HFONT glyphFont = nullptr;
+   bool ok = false;
+   if (font != nullptr)
+   {
+      TEXTMETRICW metrics { };
+      HDC probe = CreateCompatibleDC(screen);
+      if (probe != nullptr)
+      {
+         const HGDIOBJ previous = SelectObject(probe, font);
+         GetTextMetricsW(probe, &metrics);
+         SelectObject(probe, previous);
+         DeleteDC(probe);
+      }
+      const int line = std::max<int>(1, metrics.tmHeight);
+      const int pad = (textPx + 1) / 2;
+      const int icon = line;
+      const int maxText = std::max(1, static_cast<int>(BANNER_MAX_WIDTH * (area.right - area.left)) - 3 * pad - icon);
+      const std::wstring text = Widen(banner.text);
+      const UINT format = DT_WORDBREAK | DT_NOPREFIX | DT_LEFT | DT_TOP;
+      int textW = 0, textH = 0;
+      TextCoverage(screen, font, text, format, maxText, textW, textH, nullptr);
+      textW = std::clamp(textW, 1, maxText);
+      // At most three lines; a longer text is clipped at the third.
+      textH = std::clamp(textH, 1, BANNER_MAX_LINES * line);
+      std::vector<uint8_t> textCov;
+      const bool textOk = TextCoverage(screen, font, text, format, textW, textW, textH, &textCov);
+
+      const int glyphPx = std::max(1, static_cast<int>(std::lround(icon * (banner.icon == BannerIcon::Problem ? 0.55 : 0.65))));
+      glyphFont = CreateFontW(-glyphPx, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+         ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+      const wchar_t* glyph = banner.icon == BannerIcon::Problem ? L"!" : banner.icon == BannerIcon::Unknown ? L"?" : L"i";
+      std::vector<uint8_t> glyphCov;
+      int glyphW = icon, glyphH = icon;
+      const bool glyphOk = glyphFont != nullptr
+         && TextCoverage(screen, glyphFont, glyph, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, icon, glyphW, glyphH, &glyphCov);
+
+      const int width = pad + icon + pad + textW + pad;
+      const int inner = std::max(textH, icon);
+      const int height = pad + inner + pad;
+      const int corner = std::max(1, pad / 2);
+      const int textX = pad + icon + pad, textY = pad + (inner - textH) / 2;
+      // A triangle's middle sits low; its glyph follows it.
+      const int glyphShift = banner.icon == BannerIcon::Problem ? static_cast<int>(std::lround(icon * 0.14)) : 0;
+      const bool triangle = banner.icon == BannerIcon::Problem;
+      const uint32_t shapeR = 0xFF, shapeG = triangle ? BANNER_G : 0xFF, shapeB = triangle ? BANNER_B : 0xFF;
+
+      BITMAPINFO info { };
+      info.bmiHeader.biSize = sizeof(info.bmiHeader);
+      info.bmiHeader.biWidth = width;
+      info.bmiHeader.biHeight = -height;
+      info.bmiHeader.biPlanes = 1;
+      info.bmiHeader.biBitCount = 32;
+      info.bmiHeader.biCompression = BI_RGB;
+      void* pixels = nullptr;
+      HDC dc = CreateCompatibleDC(screen);
+      HBITMAP dib = (textOk && dc != nullptr) ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+      if (dib != nullptr && pixels != nullptr)
+      {
+         const HGDIOBJ previousBitmap = SelectObject(dc, dib);
+         uint32_t* px = static_cast<uint32_t*>(pixels);
+         for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+               uint32_t& p = px[static_cast<size_t>(y) * width + x];
+               const int cx = x < corner ? corner - 1 - x : x >= width - corner ? x - (width - corner) : -1;
+               const int cy = y < corner ? corner - 1 - y : y >= height - corner ? y - (height - corner) : -1;
+               if (cx >= 0 && cy >= 0 && (cx + 1) * (cx + 1) + (cy + 1) * (cy + 1) > corner * corner)
+               {
+                  p = 0;
+                  continue;
+               }
+               uint32_t r = 0, g = 0, b = 0;  // opaque black, so each colour is already premultiplied
+               const int tx = x - textX, ty = y - textY;
+               if (tx >= 0 && ty >= 0 && tx < textW && ty < textH)
+               {
+                  const uint32_t c = textCov[static_cast<size_t>(ty) * textW + tx];
+                  r = BANNER_R * c / 255;
+                  g = BANNER_G * c / 255;
+                  b = BANNER_B * c / 255;
+               }
+               const int ix = x - pad, iy = y - pad;
+               if (ix >= 0 && iy >= 0 && ix < icon && iy < icon)
+               {
+                  const uint32_t s = ShapeCoverage(triangle, ix, iy, icon);
+                  const int gy = iy - glyphShift;
+                  const uint32_t k = (glyphOk && gy >= 0 && gy < glyphH && ix < glyphW) ? glyphCov[static_cast<size_t>(gy) * glyphW + ix] : 0;
+                  const uint32_t lit = s * (255 - k) / 255;  // the glyph is cut out of the shape, in black
+                  r = shapeR * lit / 255;
+                  g = shapeG * lit / 255;
+                  b = shapeB * lit / 255;
+               }
+               p = 0xFF000000u | (r << 16) | (g << 8) | b;
+            }
+         GdiFlush();
+         SIZE extent { width, height };
+         POINT origin { 0, 0 };
+         const int areaW = area.right - area.left, areaH = area.bottom - area.top;
+         POINT at { area.left + (areaW - width) / 2, area.top + static_cast<LONG>(std::lround(BANNER_TOP * areaH)) };
+         BLENDFUNCTION blend { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+         ok = UpdateLayeredWindow(bannerWindow, screen, &at, &extent, dc, &origin, 0, &blend, ULW_ALPHA) != FALSE;
+         SelectObject(dc, previousBitmap);
+      }
+      if (dib != nullptr)
+         DeleteObject(dib);
+      if (dc != nullptr)
+         DeleteDC(dc);
+   }
+   if (glyphFont != nullptr)
+      DeleteObject(glyphFont);
+   if (font != nullptr)
+      DeleteObject(font);
+   ReleaseDC(nullptr, screen);
+   return ok;
+}
+
+void HideBannerWindow()
+{
+   if (bannerWindow != nullptr && bannerShownNow)
+      ShowWindow(bannerWindow, SW_HIDE);
+   bannerShownNow = false;
+}
+
+// Lays out again when the playfield moved, resized or changed DPI, and raises it while VPX is in
+// front; hides it otherwise.
+void FollowBanner()
+{
+   HWND playfield = nullptr;
+   RECT area { };
+   if (!bannerUp || bannerWindow == nullptr || !PlayfieldArea(playfield, area))
+   {
+      HideBannerWindow();
+      return;
+   }
+   const double scale = WindowDpi(playfield) / 96.0;
+   if (!bannerDrawn || !EqualRect(&area, &bannerArea) || scale != bannerScale)
+   {
+      if (!DrawBanner(bannerText, area, scale))
+      {
+         HideBannerWindow();
+         return;
+      }
+      bannerDrawn = true;
+      bannerArea = area;
+      bannerScale = scale;
+   }
+   SetWindowPos(bannerWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+   bannerShownNow = true;
+}
+
+std::string Lower(std::string s)
+{
+   for (char& c : s)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+   return s;
+}
+
+}
+
+bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
+{
+   if (!MakeBanner())
+      return false;
+   if (!(banner == bannerText))
+      bannerDrawn = false;
+   bannerText = banner;
+   bannerUp = true;
+   bannerUntil = Clock::now() + std::chrono::milliseconds(static_cast<int64_t>(lifetimeSeconds * 1000));
+   FollowBanner();
+   return true;
+}
+
+void HideStatusBanner()
+{
+   bannerUp = false;
+   HideBannerWindow();
+}
+
+void TickStatusBanner(bool release)
+{
+   if (release)
+   {
+      bannerUp = false;
+      if (bannerWindow != nullptr)
+         DestroyWindow(bannerWindow);
+      bannerWindow = nullptr;
+      if (bannerClass != 0)
+         UnregisterClassW(BANNER_CLASS, ThisModule());
+      bannerClass = 0;
+      bannerDrawn = false;
+      bannerShownNow = false;
+      return;
+   }
+   if (bannerUp && Clock::now() >= bannerUntil)
+      bannerUp = false;
+   FollowBanner();
+}
+
+const char* StatusBannerBlocked(const std::string& prefPath)
+{
+   // Only the DirectX 9 build has an exclusive mode; the BGFX and OpenGL builds name themselves.
+   // Wide throughout: a path outside the code page must not throw here.
+   wchar_t exe[MAX_PATH] = { };
+   GetModuleFileNameW(nullptr, exe, MAX_PATH);
+   std::wstring name = std::filesystem::path(exe).filename().wstring();
+   for (wchar_t& c : name)
+      c = static_cast<wchar_t>(towlower(c));
+   if (name.find(L"_bgfx") != std::wstring::npos || name.find(L"_gl") != std::wstring::npos)
+      return nullptr;
+   std::ifstream ini(std::filesystem::path(prefPath) / "VPinballX.ini");
+   bool inPlayer = false;
+   for (std::string line; std::getline(ini, line);)
+   {
+      const size_t start = line.find_first_not_of(" \t");
+      if (start == std::string::npos)
+         continue;
+      line = line.substr(start);
+      if (line[0] == '[')
+      {
+         inPlayer = Lower(line).rfind("[player]", 0) == 0;
+         continue;
+      }
+      if (!inPlayer || Lower(line).rfind("playfieldfullscreen", 0) != 0)
+         continue;
+      const size_t eq = line.find('=');
+      if (eq != std::string::npos && line.find_first_not_of(" \t\r", eq + 1) != std::string::npos
+         && line[line.find_first_not_of(" \t\r", eq + 1)] == '2')
+         return "VPX's DirectX 9 build in exclusive fullscreen (PlayfieldFullScreen = 2)";
+   }
+   return nullptr;
 }
 
 }
