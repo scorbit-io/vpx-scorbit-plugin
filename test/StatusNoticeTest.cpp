@@ -20,7 +20,7 @@ using std::chrono::seconds;
 namespace
 {
 
-const std::string NO_SESSION = "[!] Scorbit: no data, no connection to the Scorbit daemon";
+const std::string NO_SESSION = "[!] Scorbit: no data, no connection to the Scorbit VPX Helper";
 
 std::unique_ptr<StatusRecord> InSession(uint8_t session, uint8_t system, const std::string& text = "")
 {
@@ -384,7 +384,7 @@ void TestLostDuringGameIsReported()
    CHECK_MSG(Quiet(n, nullptr, t0 + seconds(40)) == NONE, "past the grace, still quiet in the game");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_TRACKING, Wire::SYSTEM_OK, "", InGame()), t0 + seconds(50)) == NONE, "reconnected within the bound");
    CHECK_MSG(Quiet(n, Rom(Wire::SESSION_NONE, Wire::SYSTEM_OK, "", Over()), t0 + seconds(60))
-      == Post("[!] Scorbit, during the game: no data, no connection to the Scorbit daemon"), "the outage is reported at the end");
+      == Post("[!] Scorbit, during the game: no data, no connection to the Scorbit VPX Helper"), "the outage is reported at the end");
 }
 
 void TestAuthoredEndSettles()
@@ -479,7 +479,7 @@ void TestTableEndedClearsTheGame()
 void TestDescribeEarlier()
 {
    CHECK(StatusNotifier::DescribeEarlier("[!] Scorbit: no data, ok - x") == "[!] Scorbit, during the game: no data, ok - x");
-   CHECK(StatusNotifier::DescribeEarlier(NO_SESSION) == "[!] Scorbit, during the game: no data, no connection to the Scorbit daemon");
+   CHECK(StatusNotifier::DescribeEarlier(NO_SESSION) == "[!] Scorbit, during the game: no data, no connection to the Scorbit VPX Helper");
 }
 
 // SB-6862: a table with no controller and no declaration while PinMAME is off.

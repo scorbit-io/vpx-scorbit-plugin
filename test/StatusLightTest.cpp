@@ -146,9 +146,9 @@ void TestCaptionIsTheDescribedState()
    StatusRecord lost;
    lost.since = T0;
    CHECK(CaptionFor(lost, T0 + milliseconds(4999)).empty());
-   CHECK(CaptionFor(lost, T0 + seconds(5)) == "[!] Scorbit: no data, no connection to the Scorbit daemon");
+   CHECK(CaptionFor(lost, T0 + seconds(5)) == "[!] Scorbit: no data, no connection to the Scorbit VPX Helper");
    lost.reason = "busy: another VPX is connected";
-   CHECK(CaptionFor(lost, T0 + seconds(5)) == "[!] Scorbit: no data, no connection to the Scorbit daemon - busy: another VPX is connected");
+   CHECK(CaptionFor(lost, T0 + seconds(5)) == "[!] Scorbit: no data, no connection to the Scorbit VPX Helper - busy: another VPX is connected");
 
    StatusRecord waiting;
    waiting.inSession = true;

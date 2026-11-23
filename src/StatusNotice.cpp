@@ -95,7 +95,7 @@ std::string StatusNotifier::Describe(const Wire::Status& status)
 
 std::string StatusNotifier::DescribeNoSession(const std::string& reason)
 {
-   return "[!] Scorbit: no data, no connection to the Scorbit daemon" + (reason.empty() ? std::string() : " - " + reason);
+   return "[!] Scorbit: no data, no connection to the Scorbit VPX Helper" + (reason.empty() ? std::string() : " - " + reason);
 }
 
 std::string StatusNotifier::DescribeEarlier(const std::string& described)

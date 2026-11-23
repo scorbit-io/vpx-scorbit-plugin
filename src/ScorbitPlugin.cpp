@@ -102,8 +102,8 @@ MSGPI_INT_VAL_SETTING(setOverlayTransitionPace,"OverlayTransitionPace", "Overlay
    "Milliseconds the overlay transition takes to cross one DMD column", true, 1, 254, 10);
 MSGPI_INT_VAL_SETTING(setOverlayTransitionWidth, "OverlayTransitionWidth", "Overlay transition width",
    "Width of the overlay transition's band in DMD columns, 0 for no transition", true, 0, 16, 8);
-MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit daemon socket",
-   "Local socket the Scorbit daemon listens on, empty for the per-user default", false, "", 1024);
+MSGPI_STRING_VAL_SETTING(setSocketPath, "socketPath", "Scorbit VPX Helper socket",
+   "Local socket the Scorbit VPX Helper listens on, empty for the per-user default", false, "", 1024);
 MSGPI_BOOL_VAL_SETTING(setShowStatus, "ShowStatus", "Show status",
    "Show Scorbit status notifications, in a session or out of one", true, true);
 // Off by default: no corner of a full-bleed table is guaranteed free (docs/status-window.md).
