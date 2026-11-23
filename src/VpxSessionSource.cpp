@@ -238,6 +238,7 @@ void VpxSessionSource::Present(const NoticeAction& action, const char* takenDown
       // disappear time); once VPX has dropped it, that would push the text again for a frame.
       if (noticeUp)
          m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      m_noticePostedAt = { }; // taken down: never taken down again, which would push it for a frame
       return;
    }
    // The banner where it can show (docs/status-banner.md), else VPX's notice; one at a time.
@@ -247,6 +248,7 @@ void VpxSessionSource::Present(const NoticeAction& action, const char* takenDown
       LOGI("Status notice (banner): "s + action.text);
       if (noticeUp)
          m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      m_noticePostedAt = { };
       return;
    }
    HideStatusBanner();

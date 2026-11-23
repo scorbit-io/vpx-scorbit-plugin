@@ -477,6 +477,9 @@ bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
    {
       if (bannerPanel == nil)
          BuildBanner();
+      // No panel, no banner: the caller posts VPX's notice instead.
+      if (bannerPanel == nil)
+         return false;
       const NSRect area = PlayfieldArea();
       if (!(banner == bannerShown) || !NSEqualRects(area, bannerArea))
       {
@@ -527,6 +530,19 @@ void TickStatusBanner(bool release)
       return;
    // Up only while VPX is in front; back on return if the alert is still current.
    const bool want = bannerUp && [NSApp isActive];
+   if (want)
+   {
+      // Follows the playfield window: moved, resized, made fullscreen, or first seen on this return.
+      @autoreleasepool
+      {
+         const NSRect area = PlayfieldArea();
+         if (!NSEqualRects(area, bannerArea))
+         {
+            LayoutBanner(bannerShown, area, PlayfieldScreen());
+            bannerArea = area;
+         }
+      }
+   }
    if (want && !bannerPanel.visible)
       [bannerPanel orderFrontRegardless];
    else if (!want && bannerPanel.visible)
