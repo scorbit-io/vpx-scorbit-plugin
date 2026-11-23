@@ -15,7 +15,8 @@ to draw the alerts.
 ## What changes, and what does not
 
 - **When** an alert shows is unchanged. `docs/status-notices.md` still decides: table load,
-  changes outside a game, the end-of-game line, the PinMAME hint. Nothing shows during a game.
+  changes outside a game, the end-of-game line, the PinMAME hint. With the default
+  `StatusNotices = 1` nothing shows during a game; with `2`, alerts show during play as they do now.
   `ShowStatus` and `StatusNotices` keep their meanings.
 - **How** it is drawn changes. Where the banner can show, the alert shows there **instead of**
   VPX's notice, never as well as it. Where it can't, VPX's notice is used as today.
@@ -32,7 +33,10 @@ to draw the alerts.
     empty input shape on X11.
 - **Only while an alert is up.** It appears when VPX's notice would, for the same lifetime
   (`StatusNotifier::NOTICE_LIFETIME`, 5 s), then hides. Nothing is on screen otherwise, not even an
-  empty box. A take-down (the game starts, the hint stops holding) hides it at once.
+  empty box. The banner follows the rules' actions: a post shows it, and an `Expire` hides it at
+  once. The rules send `Expire` when a game starts under `StatusNotices = 1`, or when the PinMAME
+  hint stops holding. The banner adds no take-down of its own, so `StatusNotices = 2` keeps alerts
+  up during play.
 - **Look:**
   - A solid black rounded box with large text in yellow (`#FFD400`).
   - An icon at the start of the first line replaces the `[!]` / `[OK]` / `[?]` marker:
@@ -43,9 +47,11 @@ to draw the alerts.
     Windows, and X11 often has none.
   - The icon keeps the shape difference the markers exist for, so no state is told by colour
     alone.
-- **Size, relative to the playfield's display:**
-  - Text height is 1/30 of the display's height, clamped to 18–48 points: about 36 px on a 1080p
-    screen, against VPX's 13.
+- **Size, relative to the playfield's display.** Sizes are worked out in device-independent units
+  (DIPs: macOS points, or pixels at 96 DPI), then converted once per platform:
+  - The text's pixel height (the font's character height, not its point size) is 1/30 of the
+    display's height in DIPs, clamped to 18–48 DIPs. That's 36 DIPs on a 1080p display at 100%,
+    against VPX's 13.
   - At most 60% of the display's width, word-wrapped, three lines at most; a longer text is cut
     with an ellipsis.
   - Padding is half a line. The icon is one line high.
@@ -53,10 +59,14 @@ to draw the alerts.
   where VPX's notice is now. It does not depend on `StatusCorner`. The display is found as the
   light finds it: the key window's screen on macOS, VPX's foreground window's monitor on Windows,
   the active window's monitor on X11.
-- **Scaling:** the light's per-platform rules apply.
-  - macOS: points, rendered at the screen's backing scale.
-  - Windows: the monitor's DPI (`GetDpiForWindow`).
-  - X11: `Xft.dpi`.
+- **Scaling:** from DIPs to device pixels, once, by the light's per-platform rules.
+  - macOS: DIPs are points. The display's height is `NSScreen.frame` in points, and the layers
+    render at the screen's backing scale.
+  - Windows: device pixels = DIPs × the monitor's DPI (`GetDpiForWindow`) / 96. The display's
+    height in DIPs is its pixel height × 96 / DPI. The font is created with a negative `lfHeight`
+    of that many pixels, so the size is a character height. This is not the caption's
+    points-to-pixels `MulDiv(pt, dpi, 72)`, which would make it a third larger.
+  - X11: device pixels = DIPs × `Xft.dpi` / 96, and the display's height in DIPs likewise.
 
 ## Text on each platform
 
