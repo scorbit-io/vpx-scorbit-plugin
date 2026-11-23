@@ -248,7 +248,18 @@ void VpxSessionSource::Present(const NoticeAction& action, const char* takenDown
    }
    // The banner where it can show (docs/status-banner.md), else VPX's notice; one at a time.
    const bool banner = (m_statusBanner == nullptr || m_statusBanner() != 0) && !m_bannerBlocked;
-   if (banner && ShowStatusBanner(BannerFor(action.text), std::chrono::duration<double>(StatusNotifier::NOTICE_LIFETIME).count()))
+   const BannerText text = BannerFor(action.text);
+   // The banner is for problems: a state that is fine is not shown, and ends a problem still up.
+   if (banner && text.icon == BannerIcon::Info && StatusBannerSupported())
+   {
+      LOGI("Status notice (not shown, all well): "s + action.text);
+      HideStatusBanner();
+      if (noticeUp)
+         m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), 0);
+      m_noticePostedAt = { };
+      return;
+   }
+   if (banner && ShowStatusBanner(text, std::chrono::duration<double>(StatusNotifier::NOTICE_LIFETIME).count()))
    {
       LOGI("Status notice (banner): "s + action.text);
       if (noticeUp)

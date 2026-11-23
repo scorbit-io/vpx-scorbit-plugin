@@ -471,6 +471,11 @@ static void LayoutBanner(const BannerText& banner, NSRect area, NSScreen* screen
    [CATransaction commit];
 }
 
+bool StatusBannerSupported()
+{
+   return true;
+}
+
 bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
 {
    @autoreleasepool

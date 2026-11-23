@@ -852,6 +852,11 @@ std::string Lower(std::string s)
 
 }
 
+bool StatusBannerSupported()
+{
+   return !bannerFailed;
+}
+
 bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
 {
    if (!MakeBanner())
