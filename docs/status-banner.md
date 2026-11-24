@@ -20,6 +20,9 @@ to draw the alerts.
   `ShowStatus` and `StatusNotices` keep their meanings.
 - **How** it is drawn changes. Where the banner can show, the alert shows there **instead of**
   VPX's notice, never as well as it. Where it can't, VPX's notice is used as today.
+- **Only problems.** The banner shows `[!]` and `[?]` states only (decided live, 2026-11-23). A state
+  that is fine, such as "no game, ok" at table load or a recovery, is not shown, and it takes
+  down a problem banner still up. VPX's notice, where it is the surface, keeps showing every state.
 - The status light, when `StatusCorner` is set, is untouched.
 
 ## The banner

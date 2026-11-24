@@ -471,6 +471,17 @@ static void LayoutBanner(const BannerText& banner, NSRect area, NSScreen* screen
    [CATransaction commit];
 }
 
+bool StatusBannerSupported()
+{
+   // Built here, so a banner that can't be made never drops a state VPX's notice would show.
+   @autoreleasepool
+   {
+      if (bannerPanel == nil)
+         BuildBanner();
+      return bannerPanel != nil;
+   }
+}
+
 bool ShowStatusBanner(const BannerText& banner, double lifetimeSeconds)
 {
    @autoreleasepool

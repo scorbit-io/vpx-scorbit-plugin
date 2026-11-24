@@ -27,15 +27,27 @@ inline bool UpdateStatusWindow(int, const LightView&, double, bool, const std::s
 // The status alert banner (docs/status-banner.md). API thread only. Shows the text for lifetime
 // seconds and returns true, or returns false where no banner can show, so the caller posts
 // VPX's notice instead. It is up only while VPX is the active application.
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
+// Whether a banner can show here at all, so a state that is not news can be dropped instead.
+bool StatusBannerSupported();
 bool ShowStatusBanner(const BannerText& text, double lifetimeSeconds);
 void HideStatusBanner();
 // Every tick: hides it once its lifetime is over, and while VPX is not active. release: at unload.
 void TickStatusBanner(bool release);
 #else
+inline bool StatusBannerSupported() { return false; }
 inline bool ShowStatusBanner(const BannerText&, double) { return false; }
 inline void HideStatusBanner() { }
 inline void TickStatusBanner(bool) { }
+#endif
+
+// Why no banner can show for this table, or nullptr: VPX's DirectX 9 build in exclusive
+// fullscreen, which no window can cover (docs/status-banner.md). prefPath is VPX's preference
+// folder as GetVpxInfo gives it, holding VPinballX.ini. Read once per table.
+#if defined(_WIN32)
+const char* StatusBannerBlocked(const std::string& prefPath);
+#else
+inline const char* StatusBannerBlocked(const std::string&) { return nullptr; }
 #endif
 
 // Why the last show was refused, as under Wayland, or nullptr. The notifications stay the surface.
