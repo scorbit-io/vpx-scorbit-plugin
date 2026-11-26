@@ -27,7 +27,7 @@ inline bool UpdateStatusWindow(int, const LightView&, double, bool, const std::s
 // The status alert banner (docs/status-banner.md). API thread only. Shows the text for lifetime
 // seconds and returns true, or returns false where no banner can show, so the caller posts
 // VPX's notice instead. It is up only while VPX is the active application.
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(SCORBIT_STATUS_X11)
 // Whether a banner can show here at all, so a state that is not news can be dropped instead.
 bool StatusBannerSupported();
 bool ShowStatusBanner(const BannerText& text, double lifetimeSeconds);
@@ -51,10 +51,14 @@ inline const char* StatusBannerBlocked(const std::string&) { return nullptr; }
 #endif
 
 // Why the last show was refused, as under Wayland, or nullptr. The notifications stay the surface.
+// StatusBannerUnavailable: why no banner can show, as under Wayland or with no scalable font, or
+// nullptr; it stands for the plugin's life.
 #if defined(SCORBIT_STATUS_X11)
 const char* StatusWindowUnavailable();
+const char* StatusBannerUnavailable();
 #else
 inline const char* StatusWindowUnavailable() { return nullptr; }
+inline const char* StatusBannerUnavailable() { return nullptr; }
 #endif
 
 }

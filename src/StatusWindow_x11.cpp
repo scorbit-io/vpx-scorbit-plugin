@@ -72,7 +72,8 @@ constexpr uint32_t CAPTION_TEXT = 0xffffffff;
    X(xcb_change_property) X(xcb_configure_window) X(xcb_map_window) X(xcb_unmap_window) X(xcb_create_gc) \
    X(xcb_put_image) X(xcb_query_pointer) X(xcb_query_pointer_reply) X(xcb_open_font) \
    X(xcb_query_text_extents) X(xcb_query_text_extents_reply) X(xcb_image_text_8) X(xcb_change_gc) \
-   X(xcb_poly_fill_rectangle)
+   X(xcb_poly_fill_rectangle) X(xcb_fill_poly) X(xcb_poly_fill_arc) X(xcb_poly_text_8) X(xcb_list_fonts) \
+   X(xcb_list_fonts_reply) X(xcb_list_fonts_names_iterator) X(xcb_str_next) X(xcb_str_name) X(xcb_str_name_length)
 #define SCORBIT_XCB_SHAPE(X) \
    X(xcb_shape_id) X(xcb_shape_query_version) X(xcb_shape_query_version_reply) X(xcb_shape_rectangles)
 #define SCORBIT_XCB_RANDR(X) \
@@ -1006,6 +1007,356 @@ private:
    std::vector<uint32_t> image;
 };
 
+// The status alert banner (docs/status-banner.md): a window of the light's kind, opaque, centred
+// in the playfield a quarter of the way down. Static, so it needs no thread: the API thread's tick
+// (TickStatusBanner) places, raises and hides it, on a connection of the banner's own.
+constexpr uint32_t BANNER_YELLOW = 0xffd400;  // #FFD400
+constexpr uint32_t BANNER_WHITE = 0xffffff;
+constexpr uint32_t BANNER_BLACK = 0x000000;
+
+class Banner : public Display
+{
+public:
+   // API thread. False with why set when no banner can show: no X server, or no scalable font.
+   bool Open(std::string& why)
+   {
+      if (!Connect(why))
+         return false;
+      // Opaque, so the root visual will do: no colormap, and no compositor needed.
+      bool trueColor = false;
+      for (auto d = x.xcb_screen_allowed_depths_iterator(screen); d.rem > 0; x.xcb_depth_next(&d))
+         for (auto v = x.xcb_depth_visuals_iterator(d.data); v.rem > 0; x.xcb_visualtype_next(&v))
+            if (v.data->visual_id == screen->root_visual)
+               trueColor = v.data->_class == XCB_VISUAL_CLASS_TRUE_COLOR && v.data->red_mask == 0xff0000
+                  && v.data->green_mask == 0xff00 && v.data->blue_mask == 0xff;
+      if (!trueColor)
+      {
+         why = "the X screen is not 24-bit TrueColor";
+         return false;
+      }
+      scale = ReadScale();
+      textPx = std::max(1, static_cast<int>(std::lround(BANNER_TEXT_HEIGHT * scale)));
+      if (!OpenFonts(why))
+         return false;
+
+      window = x.xcb_generate_id(c);
+      const uint32_t values[] = { Pixel(BANNER_BLACK), 0, 1, XCB_EVENT_MASK_EXPOSURE };
+      x.xcb_create_window(c, screen->root_depth, window, root, 0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
+         XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK, values);
+      x.xcb_shape_rectangles(c, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT, XCB_CLIP_ORDERING_UNSORTED, window, 0, 0, 0, nullptr);
+      static constexpr char CLASS[] = "scorbit-status-banner\0Scorbit";
+      x.xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(CLASS), CLASS);
+      x.xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, 21, "Scorbit status banner");
+      if (typeAtom != XCB_ATOM_NONE && notificationAtom != XCB_ATOM_NONE)
+         x.xcb_change_property(c, XCB_PROP_MODE_REPLACE, window, typeAtom, XCB_ATOM_ATOM, 32, 1, &notificationAtom);
+      gc = x.xcb_generate_id(c);
+      x.xcb_create_gc(c, gc, window, 0, nullptr);
+      // Ours alone on the server, as for the light: other windows mapping or restacking over it.
+      const uint32_t rootEvents = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
+      x.xcb_change_window_attributes(c, root, XCB_CW_EVENT_MASK, &rootEvents);
+      x.xcb_flush(c);
+      if (x.xcb_connection_has_error(c))
+      {
+         why = "the X connection failed while creating the banner";
+         return false;
+      }
+      return true;
+   }
+
+   void SetText(const BannerText& banner)
+   {
+      if (banner == text)
+         return;
+      text = banner;
+      laidOut = false;
+   }
+
+   // Every tick while an alert is up: placed in the playfield and raised over it while VPX is in
+   // front, hidden otherwise. False once the connection has failed.
+   bool Follow()
+   {
+      if (x.xcb_connection_has_error(c))
+         return false;
+      Events();
+      const xcb_window_t playfield = FindPlayfield();
+      Rect area;
+      if (playfield == XCB_WINDOW_NONE || !WindowRect(playfield, area) || area.w <= 0 || area.h <= 0)
+      {
+         Unmap();
+         x.xcb_flush(c);
+         return true;
+      }
+      if (!laidOut || area.w != laidOutWidth)
+         Layout(area.w);
+      const Rect at { area.x + (area.w - size.w) / 2, area.y + static_cast<int>(std::lround(BANNER_TOP * area.h)), size.w, size.h };
+      if (!(at == placed))
+      {
+         const uint32_t geometry[] = { static_cast<uint32_t>(at.x), static_cast<uint32_t>(at.y), static_cast<uint32_t>(at.w),
+            static_cast<uint32_t>(at.h) };
+         x.xcb_configure_window(c, window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+            geometry);
+         if (at.w != placed.w || at.h != placed.h)
+            Shape(at.w, at.h);
+         placed = at;
+         dirty = true;
+      }
+      if (!mapped)
+      {
+         // Stacked first: a window maps at the top, over any override-redirect window.
+         StackAbove();
+         x.xcb_map_window(c, window);
+         mapped = true;
+         dirty = true;
+      }
+      else if (raise && Clock::now() - lastRaise >= RAISE_GAP)
+         StackAbove();
+      if (dirty)
+         Draw();
+      x.xcb_flush(c);
+      return !x.xcb_connection_has_error(c);
+   }
+
+   // Every tick while no alert is up: the root's events are still read, or the server queues them.
+   void Idle()
+   {
+      Events();
+      Unmap();
+      x.xcb_flush(c);
+   }
+
+   void Unmap()
+   {
+      if (mapped)
+         x.xcb_unmap_window(c, window);
+      mapped = false;
+   }
+
+private:
+   // A scalable core font at the banner's size, bold where there is one. A bitmap font scaled that
+   // far is unreadable, and "fixed" cannot be scaled at all: with neither, VPX's notice is used.
+   bool OpenFonts(std::string& why)
+   {
+      static constexpr const char* PATTERNS[] = {
+         "-*-helvetica-bold-r-normal--0-0-0-0-p-0-iso8859-1",
+         "-*-*-bold-r-normal-*-0-0-0-0-p-0-iso8859-1",
+         "-*-*-medium-r-normal-*-0-0-0-0-p-0-iso8859-1",
+      };
+      std::string scalable;
+      for (const char* pattern : PATTERNS)
+         if (xcb_list_fonts_reply_t* list = x.xcb_list_fonts_reply(c,
+                x.xcb_list_fonts(c, 1, static_cast<uint16_t>(std::strlen(pattern)), pattern), nullptr))
+         {
+            auto it = x.xcb_list_fonts_names_iterator(list);
+            if (it.rem > 0)
+               scalable.assign(x.xcb_str_name(it.data), static_cast<size_t>(x.xcb_str_name_length(it.data)));
+            std::free(list);
+            if (!scalable.empty())
+               break;
+         }
+      if (scalable.empty())
+      {
+         why = "the X server has no scalable font";
+         return false;
+      }
+      // The XLFD's size fields (pixel, point, x and y resolution, spacing, average width) at this size.
+      size_t field = 0, at = 0;
+      for (int dashes = 0; dashes < 7 && at != std::string::npos; dashes++)
+         at = scalable.find('-', at + (dashes > 0 ? 1 : 0));
+      field = at;
+      const size_t tail = field == std::string::npos ? std::string::npos : scalable.find('-', field + 1);
+      size_t charset = tail;
+      for (int dashes = 0; dashes < 5 && charset != std::string::npos; dashes++)
+         charset = scalable.find('-', charset + 1);
+      if (field == std::string::npos || charset == std::string::npos)
+      {
+         why = "the X server's scalable font has an unreadable name";
+         return false;
+      }
+      const auto sized = [&](int px) { return scalable.substr(0, field + 1) + std::to_string(px) + "-*-*-*-*-*" + scalable.substr(charset); };
+      font = OpenFont(sized(textPx), fontAscent, fontDescent);
+      if (font == 0)
+      {
+         why = "the X server's scalable font did not open (" + scalable + ")";
+         return false;
+      }
+      line = std::max(1, fontAscent + fontDescent);
+      // The icon's "!", "i" or "?", at about the size the other platforms draw it.
+      glyphFont = OpenFont(sized(std::max(1, static_cast<int>(std::lround(line * 0.6)))), glyphAscent, glyphDescent);
+      if (glyphFont == 0)
+      {
+         glyphFont = font;
+         glyphAscent = fontAscent;
+         glyphDescent = fontDescent;
+      }
+      return true;
+   }
+
+   // A font's id, or 0 when the server could not open it: an error on the open, which a query shows.
+   xcb_font_t OpenFont(const std::string& name, int& ascent, int& descent)
+   {
+      const xcb_font_t f = x.xcb_generate_id(c);
+      x.xcb_open_font(c, f, static_cast<uint16_t>(name.size()), name.c_str());
+      int width = 0;
+      return TextExtents(f, "x", ascent, descent, width) ? f : 0;
+   }
+
+   uint32_t Pixel(uint32_t rgb) const { return screen->root_depth == 32 ? 0xff000000u | rgb : rgb; }
+
+   // Sizes from docs/status-banner.md, "Size": wrapped to 60% of the playfield's width, three lines
+   // at most, the last ending in "..." when the text is longer (Latin-1 has no ellipsis).
+   void Layout(int areaWidth)
+   {
+      pad = (textPx + 1) / 2;
+      icon = line;
+      const int maxText = std::max(1, static_cast<int>(BANNER_MAX_WIDTH * areaWidth) - 3 * pad - icon);
+      lines = Wrap(font, Latin1(text.text), maxText);
+      if (lines.size() > static_cast<size_t>(BANNER_MAX_LINES))
+      {
+         lines.resize(BANNER_MAX_LINES);
+         std::string& last = lines.back();
+         while (!last.empty() && !Fits(font, last + "...", maxText))
+         {
+            const size_t space = last.find_last_of(' ');
+            last.erase(space != std::string::npos && space > 0 ? space : last.size() - 1);
+         }
+         while (!last.empty() && last.back() == ' ')
+            last.pop_back();
+         last += "...";
+      }
+      int widest = 1, ascent = 0, descent = 0, width = 0;
+      for (const std::string& l : lines)
+         if (TextExtents(font, l, ascent, descent, width))
+            widest = std::max(widest, std::min(width, maxText));
+      textHeight = static_cast<int>(lines.size()) * line;
+      const int inner = std::max(textHeight, icon);
+      size = { 0, 0, pad + icon + pad + widest + pad, pad + inner + pad };
+      laidOut = true;
+      laidOutWidth = areaWidth;
+      dirty = true;
+   }
+
+   // The rounded corners, as a bounding shape: the server draws the box itself, with no alpha.
+   void Shape(int w, int h)
+   {
+      const int r = std::max(1, pad / 2);
+      std::vector<xcb_rectangle_t> runs;
+      for (int y = 0; y < h; y++)
+      {
+         const int cy = y < r ? r - 1 - y : y >= h - r ? y - (h - r) : -1;
+         int inset = 0;
+         if (cy >= 0)
+            while (inset < r && (r - inset) * (r - inset) + (cy + 1) * (cy + 1) > r * r)
+               inset++;
+         runs.push_back({ static_cast<int16_t>(inset), static_cast<int16_t>(y), static_cast<uint16_t>(std::max(1, w - 2 * inset)), 1 });
+      }
+      x.xcb_shape_rectangles(c, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING, XCB_CLIP_ORDERING_YX_BANDED, window, 0, 0,
+         static_cast<uint32_t>(runs.size()), runs.data());
+   }
+
+   void Draw()
+   {
+      dirty = false;
+      const uint32_t black[] = { Pixel(BANNER_BLACK) };
+      x.xcb_change_gc(c, gc, XCB_GC_FOREGROUND, black);
+      const xcb_rectangle_t whole { 0, 0, static_cast<uint16_t>(placed.w), static_cast<uint16_t>(placed.h) };
+      x.xcb_poly_fill_rectangle(c, window, gc, 1, &whole);
+
+      // The icon, level with the first line; its glyph is cut out of it in black.
+      const bool triangle = text.icon == BannerIcon::Problem;
+      const uint32_t shape[] = { Pixel(triangle ? BANNER_YELLOW : BANNER_WHITE) };
+      x.xcb_change_gc(c, gc, XCB_GC_FOREGROUND, shape);
+      if (triangle)
+      {
+         const xcb_point_t points[] = { { static_cast<int16_t>(pad + icon / 2), static_cast<int16_t>(pad) },
+            { static_cast<int16_t>(pad + icon), static_cast<int16_t>(pad + icon) }, { static_cast<int16_t>(pad), static_cast<int16_t>(pad + icon) } };
+         x.xcb_fill_poly(c, window, gc, XCB_POLY_SHAPE_CONVEX, XCB_COORD_MODE_ORIGIN, 3, points);
+      }
+      else
+      {
+         const xcb_arc_t disc { static_cast<int16_t>(pad), static_cast<int16_t>(pad), static_cast<uint16_t>(icon), static_cast<uint16_t>(icon), 0, 360 * 64 };
+         x.xcb_poly_fill_arc(c, window, gc, 1, &disc);
+      }
+      const char glyph = triangle ? '!' : text.icon == BannerIcon::Unknown ? '?' : 'i';
+      int ascent = 0, descent = 0, width = 0;
+      TextExtents(glyphFont, std::string(1, glyph), ascent, descent, width);
+      // A triangle's middle sits low; its glyph follows it.
+      const int shift = triangle ? static_cast<int>(std::lround(icon * 0.14)) : 0;
+      const int gx = pad + (icon - width) / 2;
+      const int gy = pad + shift + (icon + glyphAscent - glyphDescent) / 2;
+      const uint32_t ink[] = { Pixel(BANNER_BLACK), glyphFont };
+      x.xcb_change_gc(c, gc, XCB_GC_FOREGROUND | XCB_GC_FONT, ink);
+      const uint8_t item[] = { 1, 0, static_cast<uint8_t>(glyph) };  // one TEXTITEM8: length, delta, the character
+      x.xcb_poly_text_8(c, window, gc, static_cast<int16_t>(gx), static_cast<int16_t>(gy), sizeof(item), item);
+
+      const uint32_t textInk[] = { Pixel(BANNER_YELLOW), Pixel(BANNER_BLACK), font };
+      x.xcb_change_gc(c, gc, XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT, textInk);
+      const int inner = std::max(textHeight, icon);
+      int baseline = pad + (inner - textHeight) / 2 + fontAscent;
+      for (const std::string& l : lines)
+      {
+         x.xcb_image_text_8(c, static_cast<uint8_t>(std::min<size_t>(l.size(), 255)), window, gc, static_cast<int16_t>(pad + icon + pad),
+            static_cast<int16_t>(baseline), l.c_str());
+         baseline += line;
+      }
+   }
+
+   void Events()
+   {
+      while (xcb_generic_event_t* event = x.xcb_poll_for_event(c))
+      {
+         switch (event->response_type & 0x7f)
+         {
+         case XCB_EXPOSE:
+            dirty = true;
+            break;
+         // Another managed window moved or was restacked, perhaps over the banner.
+         case XCB_CONFIGURE_NOTIFY:
+         {
+            const auto* configure = reinterpret_cast<xcb_configure_notify_event_t*>(event);
+            if (configure->window != window && !configure->override_redirect)
+               raise = true;
+            break;
+         }
+         case XCB_MAP_NOTIFY:
+         {
+            const auto* map = reinterpret_cast<xcb_map_notify_event_t*>(event);
+            if (map->window != window && !map->override_redirect)
+               raise = true;
+            break;
+         }
+         default:
+            break;
+         }
+         std::free(event);
+      }
+   }
+
+   void StackAbove()
+   {
+      lastRaise = Clock::now();
+      raise = false;
+      const xcb_window_t sibling = TopManaged();
+      if (sibling == XCB_WINDOW_NONE)
+         return;
+      const uint32_t values[] = { sibling, XCB_STACK_MODE_ABOVE };
+      x.xcb_configure_window(c, window, XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, values);
+   }
+
+   xcb_window_t window = XCB_WINDOW_NONE;
+   xcb_gcontext_t gc = 0;
+   xcb_font_t font = 0, glyphFont = 0;
+   int fontAscent = 0, fontDescent = 0, glyphAscent = 0, glyphDescent = 0;
+   double scale = 1;
+   int textPx = 1, line = 1, pad = 1, icon = 1, textHeight = 1;
+   BannerText text;
+   std::vector<std::string> lines;
+   bool laidOut = false;
+   int laidOutWidth = 0;
+   Rect size, placed;
+   bool mapped = false, dirty = true, raise = false;
+   Clock::time_point lastRaise;
+};
+
 Light* light = nullptr;
 
 // VPX draws through SDL, and only SDL's x11 driver puts its playfield where an X window can sit
@@ -1055,9 +1406,67 @@ void Hide()
 
 // If the library goes (dlclose, process exit) without the plugin hiding the light, a joinable
 // std::thread destroyed with the statics calls std::terminate. Defined after them, so destroyed first.
+// The banner, the API thread's alone. Once it can't be made, VPX's notice is used for the plugin's life.
+Banner* banner = nullptr;
+std::string bannerUnavailable;
+bool bannerUp = false;
+Clock::time_point bannerUntil;
+
+void CloseBanner()
+{
+   if (banner != nullptr)
+      banner->Close();
+   delete banner;
+   banner = nullptr;
+   bannerUp = false;
+}
+
+bool MakeBanner()
+{
+   if (banner != nullptr)
+      return true;
+   if (!bannerUnavailable.empty())
+      return false;
+   if (const char* why = DriverProblem())
+   {
+      bannerUnavailable = why;
+      return false;
+   }
+   banner = new Banner();
+   if (!banner->Open(bannerUnavailable))
+   {
+      if (bannerUnavailable.empty())
+         bannerUnavailable = "the banner could not be made";
+      CloseBanner();
+      return false;
+   }
+   return true;
+}
+
+// Placed and raised while up, hidden otherwise. False when its connection failed: then it is gone.
+bool FollowBanner()
+{
+   if (banner == nullptr)
+      return false;
+   if (!bannerUp)
+   {
+      banner->Idle();
+      return true;
+   }
+   if (banner->Follow())
+      return true;
+   bannerUnavailable = "the X connection closed";
+   CloseBanner();
+   return false;
+}
+
 struct StopAtUnload
 {
-   ~StopAtUnload() { Hide(); }
+   ~StopAtUnload()
+   {
+      Hide();
+      CloseBanner();
+   }
 } stopAtUnload;
 
 bool Show()
@@ -1128,6 +1537,46 @@ bool UpdateStatusWindow(int corner, const LightView& view, double opacity, bool 
 const char* StatusWindowUnavailable()
 {
    return unavailable.empty() ? nullptr : unavailable.c_str();
+}
+
+bool StatusBannerSupported()
+{
+   // Made here, so a banner that can't be made never drops a state VPX's notice would show.
+   return MakeBanner();
+}
+
+bool ShowStatusBanner(const BannerText& text, double lifetimeSeconds)
+{
+   if (!MakeBanner())
+      return false;
+   banner->SetText(text);
+   bannerUp = true;
+   bannerUntil = Clock::now() + std::chrono::milliseconds(static_cast<int64_t>(lifetimeSeconds * 1000));
+   // A banner that could not be drawn hands the alert to VPX's notice.
+   return FollowBanner();
+}
+
+void HideStatusBanner()
+{
+   bannerUp = false;
+   FollowBanner();
+}
+
+void TickStatusBanner(bool release)
+{
+   if (release)
+   {
+      CloseBanner();
+      return;
+   }
+   if (bannerUp && Clock::now() >= bannerUntil)
+      bannerUp = false;
+   FollowBanner();
+}
+
+const char* StatusBannerUnavailable()
+{
+   return bannerUnavailable.empty() ? nullptr : bannerUnavailable.c_str();
 }
 
 }
