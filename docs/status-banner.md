@@ -81,6 +81,11 @@ to draw the alerts.
   falling back to `fixed`.
   - `fixed` cannot be scaled to the banner's size. So the banner asks for a scalable font at its
     pixel size, and if the server has none, it does not show; the alert goes to VPX's notice.
+  - Scalable is the server's word: a bold Helvetica first, then any bold or regular proportional
+    font it lists with zero sizes. Xorg lists its bitmap Helvetica that way too, and scales it.
+  - Core fonts are Latin-1, so the ellipsis is three full stops.
+  - The banner has a connection of its own, ticked by the API thread, so it shows whether or not
+    the light is on.
   - The icon is `xcb_fill_poly` and `xcb_poly_fill_arc`.
 
 ## When the banner can't show

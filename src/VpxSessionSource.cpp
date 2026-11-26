@@ -268,6 +268,11 @@ void VpxSessionSource::Present(const NoticeAction& action, const char* takenDown
       return;
    }
    HideStatusBanner();
+   if (const char* why = banner && !m_bannerUnavailableLogged ? StatusBannerUnavailable() : nullptr)
+   {
+      LOGI("Status banner unavailable, VPX's notices instead: "s + why);
+      m_bannerUnavailableLogged = true;
+   }
    LOGI("Status notice: "s + action.text);
    // Updates ours in place while VPX still shows it, else posts a new one (vpinball #4228).
    m_noticeHandle = m_vpxApi->UpdateNotification(m_noticeHandle, action.text.c_str(), NOTICE_MS);

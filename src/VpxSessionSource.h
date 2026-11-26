@@ -208,6 +208,7 @@ private:
    unsigned int m_noticeHandle = 0;
    std::chrono::steady_clock::time_point m_noticePostedAt { }; // VPX's notice, as the handle
    bool m_bannerBlocked = false; // no window can cover VPX's display mode, read at table start
+   bool m_bannerUnavailableLogged = false;
    StatusRecord m_scriptStatus;                    // API thread only
    std::unique_ptr<StatusRecord> m_statusPending;  // taken for the script, not yet shown to the notifier
 
