@@ -160,11 +160,13 @@ std::atomic<bool> lost { false };   // the light's connection failed; the API th
 std::thread worker;
 std::string unavailable;   // API thread: why the light last failed to show, empty if it did not
 
-class Light
+// A connection of the plugin's own to the X server, and what the light and the banner both ask of
+// it. Each has its own: the light's is used by its thread, the banner's by the API thread.
+class Display
 {
 public:
    // API thread. False with why set if there is no X server to draw on or it lacks what is needed.
-   bool Open(std::string& why)
+   bool Connect(std::string& why)
    {
       if (!x.Load(why))
          return false;
@@ -220,7 +222,278 @@ public:
             std::free(reply);
          }
 
-      if (!CreateWindow(setup, why))
+      return true;
+   }
+
+   // Once nothing else uses the connection: for the light, once its thread has stopped or never ran.
+   // Closing it frees everything the server holds for it: windows, colormaps, GCs, fonts, the root
+   // event mask.
+   void Close()
+   {
+      if (c != nullptr)
+         x.xcb_disconnect(c);
+      c = nullptr;
+      x.Unload();
+   }
+
+protected:
+   Xcb x;
+   xcb_connection_t* c = nullptr;
+   xcb_screen_t* screen = nullptr;
+   xcb_window_t root = XCB_WINDOW_NONE;
+   xcb_atom_t activeAtom = XCB_ATOM_NONE, pidAtom = XCB_ATOM_NONE, compositorAtom = XCB_ATOM_NONE;
+   xcb_atom_t typeAtom = XCB_ATOM_NONE, notificationAtom = XCB_ATOM_NONE;
+   bool haveRandr = false;
+   bool lsbImage = true;
+
+   int ScreenIndex(const xcb_setup_t* setup)
+   {
+      int i = 0;
+      for (auto it = x.xcb_setup_roots_iterator(setup); it.rem > 0 && it.data != screen; x.xcb_screen_next(&it))
+         i++;
+      return i;
+   }
+
+   // The width of 8-bit text in a core font, with the font's ascent and descent. False when the
+   // font is not open.
+   bool TextExtents(xcb_font_t f, const std::string& text, int& ascent, int& descent, int& width)
+   {
+      std::vector<xcb_char2b_t> chars(text.size());
+      for (size_t i = 0; i < text.size(); i++)
+         chars[i] = { 0, static_cast<uint8_t>(text[i]) };
+      xcb_query_text_extents_reply_t* reply = x.xcb_query_text_extents_reply(c,
+         x.xcb_query_text_extents(c, f, static_cast<uint32_t>(chars.size()), chars.data()), nullptr);
+      if (reply == nullptr)
+         return false;
+      ascent = reply->font_ascent;
+      descent = reply->font_descent;
+      width = reply->overall_width;
+      std::free(reply);
+      return true;
+   }
+
+   // Text as a core font takes it: Latin-1 for what UTF-8 carries of it, '?' for the rest.
+   static std::string Latin1(const std::string& utf8)
+   {
+      std::string out;
+      for (size_t i = 0; i < utf8.size();)
+      {
+         const unsigned char b = static_cast<unsigned char>(utf8[i]);
+         if (b < 0x80)
+         {
+            out.push_back(static_cast<char>(b));
+            i++;
+         }
+         else if ((b & 0xe0) == 0xc0 && i + 1 < utf8.size())
+         {
+            const unsigned int code = ((b & 0x1fu) << 6) | (static_cast<unsigned char>(utf8[i + 1]) & 0x3fu);
+            out.push_back(code < 0x100 ? static_cast<char>(code) : '?');
+            i += 2;
+         }
+         else
+         {
+            out.push_back('?');
+            i += (b & 0xf0) == 0xf0 ? 4 : (b & 0xe0) == 0xe0 ? 3 : 1;
+         }
+      }
+      return out;
+   }
+
+   // Within the width, and within the 255 bytes one xcb_image_text_8 draws. Unmeasurable counts as fitting.
+   bool Fits(xcb_font_t f, const std::string& line, int maxWidth)
+   {
+      int ascent = 0, descent = 0, width = 0;
+      return line.size() <= 255 && (!TextExtents(f, line, ascent, descent, width) || width <= maxWidth);
+   }
+
+   // Greedy word wrap within the width, measured by the server.
+   std::vector<std::string> Wrap(xcb_font_t f, const std::string& text, int maxWidth)
+   {
+      std::vector<std::string> lines;
+      std::string line;
+      int ascent = 0, descent = 0, width = 0;
+      for (size_t at = 0; at <= text.size();)
+      {
+         size_t end = text.find_first_of(" \n", at);
+         if (end == std::string::npos)
+            end = text.size();
+         const std::string word = text.substr(at, end - at);
+         const std::string candidate = line.empty() ? word : line + " " + word;
+         if (!line.empty() && TextExtents(f, candidate, ascent, descent, width) && width > maxWidth)
+         {
+            lines.push_back(line);
+            line = word;
+         }
+         else
+            line = candidate;
+         // A word too wide on its own is broken at the edge: the longest prefix that fits.
+         while (line.size() > 1 && !Fits(f, line, maxWidth))
+         {
+            size_t lo = 1, hi = line.size() - 1;
+            while (lo < hi)
+            {
+               const size_t mid = (lo + hi + 1) / 2;
+               if (Fits(f, line.substr(0, mid), maxWidth))
+                  lo = mid;
+               else
+                  hi = mid - 1;
+            }
+            lines.push_back(line.substr(0, lo));
+            line.erase(0, lo);
+         }
+         if (end < text.size() && text[end] == '\n')
+         {
+            lines.push_back(line);
+            line.clear();
+         }
+         at = end + 1;
+      }
+      if (!line.empty() || lines.empty())
+         lines.push_back(line);
+      return lines;
+   }
+
+   // Xft.dpi, which desktops set for a scaled display, over the 96 dpi of an unscaled one.
+   double ReadScale()
+   {
+      double dpi = 96;
+      if (xcb_get_property_reply_t* reply = x.xcb_get_property_reply(c,
+             x.xcb_get_property(c, 0, root, XCB_ATOM_RESOURCE_MANAGER, XCB_ATOM_STRING, 0, 16384), nullptr))
+      {
+         const std::string_view db(static_cast<const char*>(x.xcb_get_property_value(reply)),
+            static_cast<size_t>(std::max(0, x.xcb_get_property_value_length(reply))));
+         for (size_t at = 0; at < db.size();)
+         {
+            size_t end = db.find('\n', at);
+            if (end == std::string_view::npos)
+               end = db.size();
+            const std::string_view line = db.substr(at, end - at);
+            if (line.starts_with("Xft.dpi:"))
+            {
+               const std::string value(line.substr(8));
+               if (const double v = std::atof(value.c_str()); v > 0)
+                  dpi = v;
+            }
+            at = end + 1;
+         }
+         std::free(reply);
+      }
+      return std::clamp(dpi / 96.0, 1.0, 4.0);
+   }
+
+   xcb_window_t ReadWindow(xcb_window_t w, xcb_atom_t property, bool& present)
+   {
+      xcb_window_t value = XCB_WINDOW_NONE;
+      present = false;
+      if (xcb_get_property_reply_t* reply = x.xcb_get_property_reply(c,
+             x.xcb_get_property(c, 0, w, property, XCB_ATOM_WINDOW, 0, 1), nullptr))
+      {
+         present = reply->type == XCB_ATOM_WINDOW;
+         if (present && x.xcb_get_property_value_length(reply) >= 4)
+            std::memcpy(&value, x.xcb_get_property_value(reply), 4);
+         std::free(reply);
+      }
+      return value;
+   }
+
+   // VPX plays only while its playfield holds keyboard focus, so while VPX is in front, the
+   // active window is the playfield. Found by its _NET_WM_PID, which SDL sets, on it or on the
+   // nearest ancestor that has one; a window that names another process is not VPX's.
+   xcb_window_t FindPlayfield()
+   {
+      bool ewmh = false;
+      xcb_window_t w = activeAtom != XCB_ATOM_NONE ? ReadWindow(root, activeAtom, ewmh) : xcb_window_t(XCB_WINDOW_NONE);
+      if (!ewmh)
+         if (xcb_get_input_focus_reply_t* focus = x.xcb_get_input_focus_reply(c, x.xcb_get_input_focus(c), nullptr))
+         {
+            w = focus->focus;
+            std::free(focus);
+         }
+      const uint32_t self = static_cast<uint32_t>(getpid());
+      for (int hops = 0; w != XCB_WINDOW_NONE && w != XCB_INPUT_FOCUS_POINTER_ROOT && w != root && hops < 8; hops++)
+      {
+         if (xcb_get_property_reply_t* reply = x.xcb_get_property_reply(c,
+                x.xcb_get_property(c, 0, w, pidAtom, XCB_ATOM_CARDINAL, 0, 1), nullptr))
+         {
+            uint32_t pid = 0;
+            const bool has = reply->type == XCB_ATOM_CARDINAL && x.xcb_get_property_value_length(reply) >= 4;
+            if (has)
+               std::memcpy(&pid, x.xcb_get_property_value(reply), 4);
+            std::free(reply);
+            if (has)
+               return pid == self ? w : xcb_window_t(XCB_WINDOW_NONE);
+         }
+         xcb_query_tree_reply_t* tree = x.xcb_query_tree_reply(c, x.xcb_query_tree(c, w), nullptr);
+         if (tree == nullptr)
+            return XCB_WINDOW_NONE;
+         w = tree->parent;
+         std::free(tree);
+      }
+      return XCB_WINDOW_NONE;
+   }
+
+   // A window's place and size on the root, or false if it went.
+   bool WindowRect(xcb_window_t w, Rect& out)
+   {
+      xcb_get_geometry_reply_t* geometry = x.xcb_get_geometry_reply(c, x.xcb_get_geometry(c, w), nullptr);
+      xcb_translate_coordinates_reply_t* origin
+         = x.xcb_translate_coordinates_reply(c, x.xcb_translate_coordinates(c, w, root, 0, 0), nullptr);
+      const bool ok = geometry != nullptr && origin != nullptr;
+      if (ok)
+         out = { origin->dst_x, origin->dst_y, geometry->width, geometry->height };
+      std::free(geometry);
+      std::free(origin);
+      return ok;
+   }
+
+   // The topmost viewable window the window manager manages, or none. A window of ours goes directly
+   // above it, so override-redirect windows over it (menus, a screen locker) stay above ours.
+   xcb_window_t TopManaged()
+   {
+      xcb_query_tree_reply_t* tree = x.xcb_query_tree_reply(c, x.xcb_query_tree(c, root), nullptr);
+      if (tree == nullptr)
+         return XCB_WINDOW_NONE;
+      const xcb_window_t* children = x.xcb_query_tree_children(tree);   // bottom to top
+      const int count = x.xcb_query_tree_children_length(tree);
+      std::vector<xcb_get_window_attributes_cookie_t> cookies(static_cast<size_t>(count));
+      for (int i = count - 1; i >= 0; i--)
+         cookies[static_cast<size_t>(i)] = x.xcb_get_window_attributes(c, children[i]);
+      xcb_window_t top = XCB_WINDOW_NONE;
+      for (int i = count - 1; i >= 0; i--)
+      {
+         // Every reply is collected, so none is left queued on the connection.
+         xcb_get_window_attributes_reply_t* attributes = x.xcb_get_window_attributes_reply(c, cookies[static_cast<size_t>(i)], nullptr);
+         if (top == XCB_WINDOW_NONE && attributes != nullptr && !attributes->override_redirect
+            && attributes->map_state == XCB_MAP_STATE_VIEWABLE)
+            top = children[i];
+         std::free(attributes);
+      }
+      std::free(tree);
+      return top;
+   }
+
+   bool Composited()
+   {
+      if (compositorAtom == XCB_ATOM_NONE)
+         return false;
+      xcb_get_selection_owner_reply_t* reply
+         = x.xcb_get_selection_owner_reply(c, x.xcb_get_selection_owner(c, compositorAtom), nullptr);
+      const bool owned = reply != nullptr && reply->owner != XCB_WINDOW_NONE;
+      std::free(reply);
+      return owned;
+   }
+
+};
+
+class Light : public Display
+{
+public:
+   // API thread. False with why set if there is no X server to draw on or it lacks what is needed.
+   bool Open(std::string& why)
+   {
+      if (!Connect(why))
+         return false;
+      if (!CreateWindow(x.xcb_get_setup(c), why))
          return false;
       CreateCaption();
       scale = ReadScale();
@@ -231,16 +504,6 @@ public:
          return false;
       }
       return true;
-   }
-
-   // API thread, once the light's thread has stopped or never ran. Closing the connection frees
-   // everything the server holds for it: the window, its colormap and GC, the root event mask.
-   void Close()
-   {
-      if (c != nullptr)
-         x.xcb_disconnect(c);
-      c = nullptr;
-      x.Unload();
    }
 
    // The light's thread.
@@ -259,14 +522,6 @@ public:
    }
 
 private:
-   int ScreenIndex(const xcb_setup_t* setup)
-   {
-      int i = 0;
-      for (auto it = x.xcb_setup_roots_iterator(setup); it.rem > 0 && it.data != screen; x.xcb_screen_next(&it))
-         i++;
-      return i;
-   }
-
    bool CreateWindow(const xcb_setup_t* setup, std::string& why)
    {
       // An ARGB visual lets a compositor blend the light; without one, the light is clipped to its disc.
@@ -355,10 +610,10 @@ private:
       // Checked: an unknown font name is an error on the open, which the reply of a query shows.
       x.xcb_open_font(c, font, static_cast<uint16_t>(name.size()), name.c_str());
       int width = 0;
-      if (!TextExtents("x", fontAscent, fontDescent, width))
+      if (!TextExtents(font, "x", fontAscent, fontDescent, width))
       {
          x.xcb_open_font(c, font, 5, "fixed");
-         if (!TextExtents("x", fontAscent, fontDescent, width))
+         if (!TextExtents(font, "x", fontAscent, fontDescent, width))
          {
             font = 0;
             return;
@@ -379,105 +634,6 @@ private:
       return argb ? q : q & 0xffffff;
    }
 
-   // The width of 8-bit text in the caption's font, with its ascent and descent. False when the
-   // font is not open.
-   bool TextExtents(const std::string& text, int& ascent, int& descent, int& width)
-   {
-      std::vector<xcb_char2b_t> chars(text.size());
-      for (size_t i = 0; i < text.size(); i++)
-         chars[i] = { 0, static_cast<uint8_t>(text[i]) };
-      xcb_query_text_extents_reply_t* reply = x.xcb_query_text_extents_reply(c,
-         x.xcb_query_text_extents(c, font, static_cast<uint32_t>(chars.size()), chars.data()), nullptr);
-      if (reply == nullptr)
-         return false;
-      ascent = reply->font_ascent;
-      descent = reply->font_descent;
-      width = reply->overall_width;
-      std::free(reply);
-      return true;
-   }
-
-   // The caption's text as the font takes it: Latin-1 for what UTF-8 carries of it, '?' for the rest.
-   static std::string Latin1(const std::string& utf8)
-   {
-      std::string out;
-      for (size_t i = 0; i < utf8.size();)
-      {
-         const unsigned char b = static_cast<unsigned char>(utf8[i]);
-         if (b < 0x80)
-         {
-            out.push_back(static_cast<char>(b));
-            i++;
-         }
-         else if ((b & 0xe0) == 0xc0 && i + 1 < utf8.size())
-         {
-            const unsigned int code = ((b & 0x1fu) << 6) | (static_cast<unsigned char>(utf8[i + 1]) & 0x3fu);
-            out.push_back(code < 0x100 ? static_cast<char>(code) : '?');
-            i += 2;
-         }
-         else
-         {
-            out.push_back('?');
-            i += (b & 0xf0) == 0xf0 ? 4 : (b & 0xe0) == 0xe0 ? 3 : 1;
-         }
-      }
-      return out;
-   }
-
-   // Greedy word wrap within the caption's width, measured by the server.
-   // Within the width, and within the 255 bytes one xcb_image_text_8 draws. Unmeasurable counts as fitting.
-   bool Fits(const std::string& line, int maxWidth)
-   {
-      int ascent = 0, descent = 0, width = 0;
-      return line.size() <= 255 && (!TextExtents(line, ascent, descent, width) || width <= maxWidth);
-   }
-
-   std::vector<std::string> Wrap(const std::string& text, int maxWidth)
-   {
-      std::vector<std::string> lines;
-      std::string line;
-      int ascent = 0, descent = 0, width = 0;
-      for (size_t at = 0; at <= text.size();)
-      {
-         size_t end = text.find_first_of(" \n", at);
-         if (end == std::string::npos)
-            end = text.size();
-         const std::string word = text.substr(at, end - at);
-         const std::string candidate = line.empty() ? word : line + " " + word;
-         if (!line.empty() && TextExtents(candidate, ascent, descent, width) && width > maxWidth)
-         {
-            lines.push_back(line);
-            line = word;
-         }
-         else
-            line = candidate;
-         // A word too wide on its own is broken at the edge: the longest prefix that fits.
-         while (line.size() > 1 && !Fits(line, maxWidth))
-         {
-            size_t lo = 1, hi = line.size() - 1;
-            while (lo < hi)
-            {
-               const size_t mid = (lo + hi + 1) / 2;
-               if (Fits(line.substr(0, mid), maxWidth))
-                  lo = mid;
-               else
-                  hi = mid - 1;
-            }
-            lines.push_back(line.substr(0, lo));
-            line.erase(0, lo);
-         }
-         if (end < text.size() && text[end] == '\n')
-         {
-            lines.push_back(line);
-            line.clear();
-         }
-         at = end + 1;
-      }
-      if (!line.empty() || lines.empty())
-         lines.push_back(line);
-      return lines;
-   }
-
    // Beside the light on the side toward the monitor's centre, level with it, at the light's
    // opacity. Drawn again only when the text or opacity changes; filled and written by the server.
    void ShowCaption(const std::string& text, const Rect& lightAt, uint8_t alpha)
@@ -489,10 +645,10 @@ private:
       if (text != captionText)
       {
          const std::string latin = Latin1(text);
-         captionLines = Wrap(latin, static_cast<int>(std::lround(CAPTION_MAX_WIDTH_PT * scale)));
+         captionLines = Wrap(font, latin, static_cast<int>(std::lround(CAPTION_MAX_WIDTH_PT * scale)));
          int ascent = 0, descent = 0, width = 0, widest = 1;
          for (const std::string& line : captionLines)
-            if (TextExtents(line, ascent, descent, width))
+            if (TextExtents(font, line, ascent, descent, width))
                widest = std::max(widest, width);
          lineHeight = std::max(1, fontAscent + fontDescent);
          captionSize = { 0, 0, widest + 2 * padX, static_cast<int>(captionLines.size()) * lineHeight + 2 * padY };
@@ -577,97 +733,13 @@ private:
          HideCaption();
    }
 
-   // Xft.dpi, which desktops set for a scaled display, over the 96 dpi of an unscaled one.
-   double ReadScale()
-   {
-      double dpi = 96;
-      if (xcb_get_property_reply_t* reply = x.xcb_get_property_reply(c,
-             x.xcb_get_property(c, 0, root, XCB_ATOM_RESOURCE_MANAGER, XCB_ATOM_STRING, 0, 16384), nullptr))
-      {
-         const std::string_view db(static_cast<const char*>(x.xcb_get_property_value(reply)),
-            static_cast<size_t>(std::max(0, x.xcb_get_property_value_length(reply))));
-         for (size_t at = 0; at < db.size();)
-         {
-            size_t end = db.find('\n', at);
-            if (end == std::string_view::npos)
-               end = db.size();
-            const std::string_view line = db.substr(at, end - at);
-            if (line.starts_with("Xft.dpi:"))
-            {
-               const std::string value(line.substr(8));
-               if (const double v = std::atof(value.c_str()); v > 0)
-                  dpi = v;
-            }
-            at = end + 1;
-         }
-         std::free(reply);
-      }
-      return std::clamp(dpi / 96.0, 1.0, 4.0);
-   }
-
-   xcb_window_t ReadWindow(xcb_window_t w, xcb_atom_t property, bool& present)
-   {
-      xcb_window_t value = XCB_WINDOW_NONE;
-      present = false;
-      if (xcb_get_property_reply_t* reply = x.xcb_get_property_reply(c,
-             x.xcb_get_property(c, 0, w, property, XCB_ATOM_WINDOW, 0, 1), nullptr))
-      {
-         present = reply->type == XCB_ATOM_WINDOW;
-         if (present && x.xcb_get_property_value_length(reply) >= 4)
-            std::memcpy(&value, x.xcb_get_property_value(reply), 4);
-         std::free(reply);
-      }
-      return value;
-   }
-
-   // VPX plays only while its playfield holds keyboard focus, so while VPX is in front, the
-   // active window is the playfield. Found by its _NET_WM_PID, which SDL sets, on it or on the
-   // nearest ancestor that has one; a window that names another process is not VPX's.
-   xcb_window_t FindPlayfield()
-   {
-      bool ewmh = false;
-      xcb_window_t w = activeAtom != XCB_ATOM_NONE ? ReadWindow(root, activeAtom, ewmh) : xcb_window_t(XCB_WINDOW_NONE);
-      if (!ewmh)
-         if (xcb_get_input_focus_reply_t* focus = x.xcb_get_input_focus_reply(c, x.xcb_get_input_focus(c), nullptr))
-         {
-            w = focus->focus;
-            std::free(focus);
-         }
-      const uint32_t self = static_cast<uint32_t>(getpid());
-      for (int hops = 0; w != XCB_WINDOW_NONE && w != XCB_INPUT_FOCUS_POINTER_ROOT && w != root && hops < 8; hops++)
-      {
-         if (xcb_get_property_reply_t* reply = x.xcb_get_property_reply(c,
-                x.xcb_get_property(c, 0, w, pidAtom, XCB_ATOM_CARDINAL, 0, 1), nullptr))
-         {
-            uint32_t pid = 0;
-            const bool has = reply->type == XCB_ATOM_CARDINAL && x.xcb_get_property_value_length(reply) >= 4;
-            if (has)
-               std::memcpy(&pid, x.xcb_get_property_value(reply), 4);
-            std::free(reply);
-            if (has)
-               return pid == self ? w : xcb_window_t(XCB_WINDOW_NONE);
-         }
-         xcb_query_tree_reply_t* tree = x.xcb_query_tree_reply(c, x.xcb_query_tree(c, w), nullptr);
-         if (tree == nullptr)
-            return XCB_WINDOW_NONE;
-         w = tree->parent;
-         std::free(tree);
-      }
-      return XCB_WINDOW_NONE;
-   }
-
    // The monitor under the playfield's centre, or the whole screen without RandR 1.5.
    bool PlayfieldMonitor(xcb_window_t playfield, Rect& out)
    {
-      xcb_get_geometry_reply_t* geometry = x.xcb_get_geometry_reply(c, x.xcb_get_geometry(c, playfield), nullptr);
-      xcb_translate_coordinates_reply_t* origin
-         = x.xcb_translate_coordinates_reply(c, x.xcb_translate_coordinates(c, playfield, root, 0, 0), nullptr);
-      const bool ok = geometry != nullptr && origin != nullptr;
-      const int cx = ok ? origin->dst_x + geometry->width / 2 : 0, cy = ok ? origin->dst_y + geometry->height / 2 : 0;
-      std::free(geometry);
-      std::free(origin);
-      if (!ok)
+      Rect area;
+      if (!WindowRect(playfield, area))
          return false;
+      const int cx = area.x + area.w / 2, cy = area.y + area.h / 2;
       out = { 0, 0, screen->width_in_pixels, screen->height_in_pixels };
       if (xcb_get_geometry_reply_t* rootSize = x.xcb_get_geometry_reply(c, x.xcb_get_geometry(c, root), nullptr))
       {
@@ -692,17 +764,6 @@ private:
          std::free(monitors);
       }
       return true;
-   }
-
-   bool Composited()
-   {
-      if (compositorAtom == XCB_ATOM_NONE)
-         return false;
-      xcb_get_selection_owner_reply_t* reply
-         = x.xcb_get_selection_owner_reply(c, x.xcb_get_selection_owner(c, compositorAtom), nullptr);
-      const bool owned = reply != nullptr && reply->owner != XCB_WINDOW_NONE;
-      std::free(reply);
-      return owned;
    }
 
    void Events()
@@ -747,31 +808,12 @@ private:
       }
    }
 
-   // Directly above the topmost viewable window the window manager manages, so override-redirect
-   // windows over it (menus, a screen locker) stay above the light. With none, it is left where it is.
+   // Directly above the topmost managed window (TopManaged). With none, it is left where it is.
    void StackAbove()
    {
       lastRaise = Clock::now();
       raise = false;
-      xcb_query_tree_reply_t* tree = x.xcb_query_tree_reply(c, x.xcb_query_tree(c, root), nullptr);
-      if (tree == nullptr)
-         return;
-      const xcb_window_t* children = x.xcb_query_tree_children(tree);   // bottom to top
-      const int count = x.xcb_query_tree_children_length(tree);
-      std::vector<xcb_get_window_attributes_cookie_t> cookies(static_cast<size_t>(count));
-      for (int i = count - 1; i >= 0; i--)
-         cookies[static_cast<size_t>(i)] = x.xcb_get_window_attributes(c, children[i]);
-      xcb_window_t sibling = XCB_WINDOW_NONE;
-      for (int i = count - 1; i >= 0; i--)
-      {
-         // Every reply is collected, so none is left queued on the connection.
-         xcb_get_window_attributes_reply_t* attributes = x.xcb_get_window_attributes_reply(c, cookies[static_cast<size_t>(i)], nullptr);
-         if (sibling == XCB_WINDOW_NONE && attributes != nullptr && children[i] != window && !attributes->override_redirect
-            && attributes->map_state == XCB_MAP_STATE_VIEWABLE)
-            sibling = children[i];
-         std::free(attributes);
-      }
-      std::free(tree);
+      const xcb_window_t sibling = TopManaged();
       if (sibling == XCB_WINDOW_NONE)
          return;
       const uint32_t values[] = { sibling, XCB_STACK_MODE_ABOVE };
@@ -928,17 +970,9 @@ private:
       }
    }
 
-   Xcb x;
-   xcb_connection_t* c = nullptr;
-   xcb_screen_t* screen = nullptr;
-   xcb_window_t root = XCB_WINDOW_NONE;
    xcb_window_t window = XCB_WINDOW_NONE;
    xcb_gcontext_t gc = 0;
-   xcb_atom_t activeAtom = XCB_ATOM_NONE, pidAtom = XCB_ATOM_NONE, compositorAtom = XCB_ATOM_NONE;
-   xcb_atom_t typeAtom = XCB_ATOM_NONE, notificationAtom = XCB_ATOM_NONE;
-   bool haveRandr = false;
    bool argb = false;
-   bool lsbImage = true;
    double scale = 1;
    xcb_visualid_t lightVisual = 0;
 
