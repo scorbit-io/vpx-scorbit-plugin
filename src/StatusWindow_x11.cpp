@@ -307,10 +307,12 @@ protected:
       return line.size() <= 255 && (!TextExtents(f, line, ascent, descent, width) || width <= maxWidth);
    }
 
-   // Greedy word wrap within the width, measured by the server.
-   std::vector<std::string> Wrap(xcb_font_t f, const std::string& text, int maxWidth)
+   // Greedy word wrap within the width, measured by the server. With maxLines, it stops once a line
+   // past it is known to be needed, so a long text costs no more round trips than the lines shown.
+   std::vector<std::string> Wrap(xcb_font_t f, const std::string& text, int maxWidth, size_t maxLines = 0)
    {
       std::vector<std::string> lines;
+      const auto full = [&] { return maxLines > 0 && lines.size() > maxLines; };
       std::string line;
       int ascent = 0, descent = 0, width = 0;
       for (size_t at = 0; at <= text.size();)
@@ -324,6 +326,8 @@ protected:
          {
             lines.push_back(line);
             line = word;
+            if (full())
+               return lines;
          }
          else
             line = candidate;
@@ -341,11 +345,15 @@ protected:
             }
             lines.push_back(line.substr(0, lo));
             line.erase(0, lo);
+            if (full())
+               return lines;
          }
          if (end < text.size() && text[end] == '\n')
          {
             lines.push_back(line);
             line.clear();
+            if (full())
+               return lines;
          }
          at = end + 1;
       }
@@ -1117,11 +1125,15 @@ public:
    }
 
    // Every tick while no alert is up: the root's events are still read, or the server queues them.
-   void Idle()
+   // False once the connection has failed.
+   bool Idle()
    {
+      if (x.xcb_connection_has_error(c))
+         return false;
       Events();
       Unmap();
       x.xcb_flush(c);
+      return !x.xcb_connection_has_error(c);
    }
 
    void Unmap()
@@ -1209,7 +1221,7 @@ private:
       pad = (textPx + 1) / 2;
       icon = line;
       const int maxText = std::max(1, static_cast<int>(BANNER_MAX_WIDTH * areaWidth) - 3 * pad - icon);
-      lines = Wrap(font, Latin1(text.text), maxText);
+      lines = Wrap(font, Latin1(text.text), maxText, BANNER_MAX_LINES);
       if (lines.size() > static_cast<size_t>(BANNER_MAX_LINES))
       {
          lines.resize(BANNER_MAX_LINES);
@@ -1448,12 +1460,8 @@ bool FollowBanner()
 {
    if (banner == nullptr)
       return false;
-   if (!bannerUp)
-   {
-      banner->Idle();
-      return true;
-   }
-   if (banner->Follow())
+   // Checked while hidden too, so a dead banner stops dropping states VPX's notice would show.
+   if (bannerUp ? banner->Follow() : banner->Idle())
       return true;
    bannerUnavailable = "the X connection closed";
    CloseBanner();
